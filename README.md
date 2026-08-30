@@ -4,6 +4,50 @@ VoxBraid 是一个面向 iPad 浏览器的环境音实时翻译工具。它持�
 
 项目当前处于设计和最小可用版本（MVP）准备阶段。
 
+## 当前实现状态
+
+最小实时翻译链路已经进入可运行阶段：
+
+- SvelteKit + TypeScript + `adapter-node` 工程骨架
+- 服务端使用 `OPENAI_API_KEY` 创建 Realtime Translation 短期客户端凭证
+- 浏览器采集麦克风并通过 WebRTC 直连 OpenAI
+- 分别处理源语言和目标语言字幕增量事件
+- 提供目标语言选择、开始、停止、连接状态和错误提示
+- 可取消尚未完成的启动流程，避免停止操作被异步连接覆盖
+- 临时 WebRTC 断线先进入等待恢复窗口，期间依赖浏览器自行恢复；超时或明确失败后终止会话
+- 初始 WebRTC 连接长时间未建立时主动超时，避免界面无限停留在连接中
+- 停止时请求 OpenAI 冲刷剩余字幕，收到关闭确认或短超时后释放连接和麦克风
+- 翻译期间尽力申请 Screen Wake Lock
+
+真实账户已经完成短期凭证签发、浏览器麦克风、Translation WebRTC SDP 握手和英文到中文字幕验证。真实 iPad Safari 的长会话、前后台切换和网络抖动仍需继续验证。
+
+## 本地运行
+
+项目要求 Node.js 22 和 pnpm 11。仓库包含 `.nvmrc` 与锁文件：
+
+```sh
+nvm use
+corepack pnpm install
+```
+
+复制配置模板并在本机填写服务端 API Key；不要提交或分享 `.env`：
+
+```sh
+cp .env.example .env
+```
+
+```dotenv
+OPENAI_API_KEY=sk-...
+```
+
+启动开发服务：
+
+```sh
+corepack pnpm dev
+```
+
+打开 `http://localhost:5173`，选择目标语言并点击“开始翻译”。浏览器会请求麦克风权限。OpenAI 正式 API Key 仅由 SvelteKit 服务端读取；浏览器只获得短期客户端凭证。
+
 ## 实现目标
 
 第一版聚焦一个简单、通用的闭环：
@@ -74,18 +118,18 @@ VoxBraid 是一个面向 iPad 浏览器的环境音实时翻译工具。它持�
 
 ## 技术选型
 
-| 层级 | 选型 | 主要职责 |
-|---|---|---|
-| Web 应用 | SvelteKit + TypeScript | 页面、客户端交互及服务端 API |
-| 包管理器 | pnpm | 依赖安装、脚本和工作区管理 |
-| 浏览器媒体 | `getUserMedia` + WebRTC | 麦克风采集和实时音频传输 |
-| 浏览器持久化 | IndexedDB | 保存未提交字幕和恢复信息 |
-| 实时 AI | OpenAI Realtime Translation | 源语言识别和目标语言翻译 |
-| Node 运行方式 | SvelteKit `adapter-node` | 将前端和 API 构建为一个 Node 服务 |
-| 应用部署 | Railway | 承载 SvelteKit Node 应用和后续轻量后台任务 |
-| 持久化 | Supabase Postgres | 会话和字幕；以后可扩展用户与任务状态 |
-| 身份 | 初期采用简单的单用户保护 | 以后开放使用时再接入 Supabase Auth |
-| 文件存储 | Supabase Storage（按需） | 后续可能产生的录音或导出文件 |
+| 层级          | 选型                        | 主要职责                                   |
+| ------------- | --------------------------- | ------------------------------------------ |
+| Web 应用      | SvelteKit + TypeScript      | 页面、客户端交互及服务端 API               |
+| 包管理器      | pnpm                        | 依赖安装、脚本和工作区管理                 |
+| 浏览器媒体    | `getUserMedia` + WebRTC     | 麦克风采集和实时音频传输                   |
+| 浏览器持久化  | IndexedDB                   | 保存未提交字幕和恢复信息                   |
+| 实时 AI       | OpenAI Realtime Translation | 源语言识别和目标语言翻译                   |
+| Node 运行方式 | SvelteKit `adapter-node`    | 将前端和 API 构建为一个 Node 服务          |
+| 应用部署      | Railway                     | 承载 SvelteKit Node 应用和后续轻量后台任务 |
+| 持久化        | Supabase Postgres           | 会话和字幕；以后可扩展用户与任务状态       |
+| 身份          | 初期采用简单的单用户保护    | 以后开放使用时再接入 Supabase Auth         |
+| 文件存储      | Supabase Storage（按需）    | 后续可能产生的录音或导出文件               |
 
 当前 OpenAI 官方模型目录和客户端凭证示例已经确认存在 `gpt-realtime-translate` 与 `gpt-realtime-whisper`。计划使用前者进行实时翻译，并配置后者产生源语言字幕。仍然应在开发第 0 步使用真实账户完成最小连接测试，不只依赖文档设计。
 
@@ -167,6 +211,7 @@ Supabase 不接收每一个实时字幕 delta。客户端先聚合成片段，�
 12. **Web 版本通过防锁屏保持连续运行。** Safari/PWA 不保证锁屏后的麦克风和 WebRTC 采集；翻译时使用 Screen Wake Lock，并提供深色低亮度界面。若锁屏采集成为硬需求，再评估原生 iPad App。
 13. **可靠性优先于激进静音裁剪。** 模型按音频时长计费，但远场客户端 VAD 可能裁掉弱声和句首。MVP 先提供手动暂停并测量真实静音计费行为，再决定是否增加可配置的本地 VAD。
 14. **未提交数据进入 IndexedDB。** 纯内存只能作为短期缓冲，不能承担 iPad 页面回收和刷新后的恢复。
+15. **当前不承诺主动重连。** 临时断线时先等待浏览器恢复；超时后结束当前会话，由用户重新开始并获取新的短期凭证。自动重建会话将在保留字幕连续性后单独实现。
 
 ## iPad 锁屏与后台边界
 
