@@ -1,4 +1,4 @@
-import type { CaptureRun, CaptureRunEndReason, TranscriptStreamSnapshot } from './types';
+import type { CaptureRun, CaptureRunEndReason, RunError, TranscriptStreamSnapshot } from './types';
 
 export type TranscriptFactEvent =
 	| {
@@ -9,8 +9,9 @@ export type TranscriptFactEvent =
 	  }
 	| {
 			type: 'run-closed';
-			outcome: 'completed' | 'interrupted';
+			outcome: 'completed' | 'interrupted' | 'failed';
 			reason: CaptureRunEndReason;
+			error?: RunError | null;
 			at: string;
 	  };
 
@@ -65,7 +66,8 @@ export function reduceTranscriptFacts(
 				...run,
 				status: event.outcome,
 				endedAt: event.at,
-				endReason: event.reason
+				endReason: event.reason,
+				lastError: event.error ?? run.lastError
 			},
 			diagnostics: emptyDiagnostics()
 		};

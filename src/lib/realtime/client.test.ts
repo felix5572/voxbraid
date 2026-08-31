@@ -55,6 +55,7 @@ function createHarness(overrides: Partial<RealtimeTranslationClientDependencies>
 	const statuses: ConnectionStatus[] = [];
 	const events: TranslationServerEvent[] = [];
 	const onError = vi.fn();
+	const onConnectionFailure = vi.fn();
 	const peerConnection = new FakePeerConnection();
 	const media = createMediaStream();
 	const dependencies: Partial<RealtimeTranslationClientDependencies> = {
@@ -75,12 +76,22 @@ function createHarness(overrides: Partial<RealtimeTranslationClientDependencies>
 		{
 			onStatus: (status) => statuses.push(status),
 			onEvent: (event) => events.push(event),
-			onError
+			onError,
+			onConnectionFailure
 		},
 		dependencies
 	);
 
-	return { client, dependencies, events, media, onError, peerConnection, statuses };
+	return {
+		client,
+		dependencies,
+		events,
+		media,
+		onConnectionFailure,
+		onError,
+		peerConnection,
+		statuses
+	};
 }
 
 afterEach(() => {
@@ -110,6 +121,7 @@ describe('RealtimeTranslationClient', () => {
 		expect(harness.statuses).not.toContain('failed');
 		expect(harness.media.stop).toHaveBeenCalled();
 		expect(harness.onError).not.toHaveBeenCalled();
+		expect(harness.onConnectionFailure).not.toHaveBeenCalled();
 		expect(harness.dependencies.createPeerConnection).not.toHaveBeenCalled();
 	});
 
@@ -125,6 +137,7 @@ describe('RealtimeTranslationClient', () => {
 
 		expect(harness.client.currentStatus).toBe('failed');
 		expect(harness.onError).not.toHaveBeenCalled();
+		expect(harness.onConnectionFailure).not.toHaveBeenCalled();
 		expect(harness.dependencies.createPeerConnection).not.toHaveBeenCalled();
 		expect(harness.media.stop).toHaveBeenCalled();
 	});
@@ -148,6 +161,7 @@ describe('RealtimeTranslationClient', () => {
 		]);
 		expect(harness.client.currentStatus).toBe('connected');
 		expect(harness.onError).not.toHaveBeenCalled();
+		expect(harness.onConnectionFailure).not.toHaveBeenCalled();
 		await harness.client.stop();
 	});
 
@@ -161,7 +175,8 @@ describe('RealtimeTranslationClient', () => {
 		await vi.advanceTimersByTimeAsync(10);
 
 		expect(harness.client.currentStatus).toBe('failed');
-		expect(harness.onError).toHaveBeenCalledWith('网络连接长时间未恢复，请重新开始。');
+		expect(harness.onConnectionFailure).toHaveBeenCalledWith('网络连接长时间未恢复，请重新开始。');
+		expect(harness.onError).not.toHaveBeenCalled();
 		expect(harness.peerConnection.close).toHaveBeenCalledOnce();
 	});
 
@@ -173,9 +188,27 @@ describe('RealtimeTranslationClient', () => {
 		await vi.advanceTimersByTimeAsync(10);
 
 		expect(harness.client.currentStatus).toBe('failed');
-		expect(harness.onError).toHaveBeenCalledWith('实时连接建立超时，请检查网络后重新开始。');
+		expect(harness.onConnectionFailure).toHaveBeenCalledWith(
+			'实时连接建立超时，请检查网络后重新开始。'
+		);
+		expect(harness.onError).not.toHaveBeenCalled();
 		expect(harness.media.stop).toHaveBeenCalled();
 		expect(harness.peerConnection.close).toHaveBeenCalledOnce();
+	});
+
+	it('reports protocol errors without declaring the connection failed', async () => {
+		const harness = createHarness();
+		await harness.client.start('zh');
+		harness.peerConnection.emitConnectionState('connected');
+
+		harness.peerConnection.dataChannel.emitMessage(
+			JSON.stringify({ type: 'error', error: { message: 'bad realtime event' } })
+		);
+
+		expect(harness.onError).toHaveBeenCalledWith('bad realtime event');
+		expect(harness.onConnectionFailure).not.toHaveBeenCalled();
+		expect(harness.client.currentStatus).toBe('connected');
+		await harness.client.stop();
 	});
 
 	it('waits for session.closed while accepting final transcript events', async () => {

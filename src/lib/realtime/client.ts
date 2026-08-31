@@ -17,6 +17,7 @@ export interface RealtimeTranslationClientOptions {
 	onStatus: (status: ConnectionStatus) => void;
 	onEvent: (event: TranslationServerEvent) => void;
 	onError: (message: string) => void;
+	onConnectionFailure: (message: string) => void;
 }
 
 export interface RealtimeTranslationClientDependencies {
@@ -278,7 +279,7 @@ export class RealtimeTranslationClient {
 		++this.runId;
 		this.teardown();
 		this.setStatus('failed');
-		this.options.onError(message);
+		this.options.onConnectionFailure(message);
 	}
 
 	private requestGracefulClose(): Promise<void> {

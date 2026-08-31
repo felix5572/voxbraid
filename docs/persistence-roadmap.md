@@ -84,6 +84,7 @@ interface SessionRepository {
 - `saveCheckpoint` 保存完整流快照和 run 元数据；实时事实路径不依赖 segment。
 - `replaceSegmentRevision` 在一个事务内写入新 revision 的全部 segment，并切换 `run.currentSegmentRevision`。
 - `repairAbandonedRuns` 在页面恢复时一次性修复遗留 run。
+- 完整流平时防抖保存，并在暂停、连接失败、页面隐藏和 `pagehide` 时立即发起 `saveCheckpoint`；组件卸载不能直接丢弃最后的内存状态。浏览器可能随时终止异步卸载工作，因此恢复能力不能只依赖最后一次 unload 写入。
 
 不要先设计 `saveThread`、`saveRun`、`saveSegment` 一类通用接口再由页面拼事务；这会让关键原子性依赖每个调用方都正确组合。
 

@@ -2,7 +2,19 @@
 	import { onMount } from 'svelte';
 	import { RealtimeTranslationClient, realtimeErrorMessage } from '$lib/realtime/client';
 	import { ScreenWakeLock } from '$lib/screen-wake-lock';
-	import { EMPTY_TRANSCRIPT, reduceTranscript } from '$lib/realtime/transcript';
+	import {
+		activeCaptureRun,
+		appendRealtimeTranscriptEvent,
+		beginCaptureRun,
+		createTranslationSession,
+		endActiveCaptureRun,
+		markActiveRunConnected,
+		markActiveRunHidden,
+		markActiveRunStopping,
+		markActiveRunVisible,
+		type TranslationSessionState
+	} from '$lib/session/translation-session';
+	import { visibleTranscriptRuns, type VisibleTranscriptRun } from '$lib/session/transcript-view';
 	import {
 		TARGET_LANGUAGES,
 		type ConnectionStatus,
@@ -27,18 +39,87 @@
 		stopping: '正在停止',
 		failed: '连接异常'
 	};
+	const VISIBLE_TAIL_CHARACTERS = 2_000;
+	const RUN_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+		hour: '2-digit',
+		minute: '2-digit'
+	});
 
 	let status = $state<ConnectionStatus>('idle');
 	let targetLanguage = $state<TargetLanguage>('zh');
-	let transcript = $state({ ...EMPTY_TRANSCRIPT });
+	let session = $state<TranslationSessionState | null>(null);
 	let error = $state('');
 	let client: RealtimeTranslationClient | null = null;
 	let timingProbeEnabled = false;
 	let timingProbeStartedAt: number | null = null;
 	let timingProbeSamples: TranscriptTimingSample[] = [];
+	let sourceScroller: HTMLDivElement | null = null;
+	let translationScroller: HTMLDivElement | null = null;
+	let sourceFollowsTail = true;
+	let translationFollowsTail = true;
+	let followFrame: number | null = null;
 	const wakeLock = new ScreenWakeLock();
 
 	const active = $derived(status !== 'idle' && status !== 'failed' && status !== 'stopping');
+	const sourceTranscriptRuns = $derived(
+		session ? visibleTranscriptRuns(session.runs, 'source', VISIBLE_TAIL_CHARACTERS) : []
+	);
+	const translatedTranscriptRuns = $derived(
+		session ? visibleTranscriptRuns(session.runs, 'translation', VISIBLE_TAIL_CHARACTERS) : []
+	);
+
+	function nowIso(): string {
+		return new Date().toISOString();
+	}
+
+	function runTime(run: VisibleTranscriptRun): string {
+		return RUN_TIME_FORMATTER.format(new Date(run.startedAt));
+	}
+
+	function languageLabel(code: string): string {
+		return TARGET_LANGUAGES.find((language) => language.code === code)?.label ?? code;
+	}
+
+	function isNearTail(element: HTMLDivElement): boolean {
+		return element.scrollHeight - element.scrollTop - element.clientHeight < 64;
+	}
+
+	function updateSourceFollow(): void {
+		if (sourceScroller) sourceFollowsTail = isNearTail(sourceScroller);
+	}
+
+	function updateTranslationFollow(): void {
+		if (translationScroller) translationFollowsTail = isNearTail(translationScroller);
+	}
+
+	function followTranscriptTails(): void {
+		if (followFrame !== null) return;
+		followFrame = requestAnimationFrame(() => {
+			followFrame = null;
+			if (sourceScroller && sourceFollowsTail)
+				sourceScroller.scrollTop = sourceScroller.scrollHeight;
+			if (translationScroller && translationFollowsTail) {
+				translationScroller.scrollTop = translationScroller.scrollHeight;
+			}
+		});
+	}
+
+	function endFailedRun(message: string): void {
+		if (!session) return;
+		const run = activeCaptureRun(session);
+		if (!run) return;
+
+		const connected = run.mediaStartedAt !== null;
+		session = endActiveCaptureRun(session, {
+			outcome: connected ? 'interrupted' : 'failed',
+			reason: connected ? 'connection-lost' : 'startup-failed',
+			error: {
+				code: connected ? 'connection-lost' : 'startup-failed',
+				message
+			},
+			at: nowIso()
+		});
+	}
 
 	function recordTranscriptTiming(event: TranslationServerEvent): void {
 		if (
@@ -77,6 +158,12 @@
 		client = new RealtimeTranslationClient({
 			onStatus: (nextStatus) => {
 				status = nextStatus;
+				if (session && nextStatus === 'connected') {
+					session = markActiveRunConnected(session, nowIso());
+				}
+				if (session && nextStatus === 'stopping') {
+					session = markActiveRunStopping(session);
+				}
 				if (nextStatus === 'connected') void wakeLock.acquire();
 				if (nextStatus === 'stopping' || nextStatus === 'idle' || nextStatus === 'failed') {
 					void wakeLock.release();
@@ -84,18 +171,47 @@
 			},
 			onEvent: (event) => {
 				recordTranscriptTiming(event);
-				transcript = reduceTranscript(transcript, event);
+				if (!session) return;
+
+				const previousDeltasAfterClose = session.diagnostics.deltasAfterClose;
+				session = appendRealtimeTranscriptEvent(session, event, nowIso());
+				followTranscriptTails();
+				if (
+					import.meta.env.DEV &&
+					session.diagnostics.deltasAfterClose > previousDeltasAfterClose
+				) {
+					console.warn('[transcript-facts] received a transcript delta after run close');
+				}
 			},
-			onError: (message) => (error = message)
+			onError: (message) => {
+				error = message;
+			},
+			onConnectionFailure: (message) => {
+				error = message;
+				endFailedRun(message);
+			}
 		});
 
 		const handleVisibility = () => {
-			if (document.visibilityState === 'visible' && status === 'connected') void wakeLock.acquire();
+			if (document.visibilityState === 'hidden' && session) {
+				session = markActiveRunHidden(session, nowIso());
+			}
+			if (document.visibilityState === 'visible') {
+				const hiddenAt = session ? activeCaptureRun(session)?.hiddenAt : null;
+				if (hiddenAt && import.meta.env.DEV) {
+					console.info(
+						`[visibility] page was hidden for ${Math.max(0, Date.now() - Date.parse(hiddenAt))} ms`
+					);
+				}
+				if (session) session = markActiveRunVisible(session);
+				if (status === 'connected') void wakeLock.acquire();
+			}
 		};
 		document.addEventListener('visibilitychange', handleVisibility);
 
 		return () => {
 			document.removeEventListener('visibilitychange', handleVisibility);
+			if (followFrame !== null) cancelAnimationFrame(followFrame);
 			void client?.stop();
 			void wakeLock.release();
 		};
@@ -104,7 +220,20 @@
 	async function start(): Promise<void> {
 		if (!client) return;
 		error = '';
-		transcript = { ...EMPTY_TRANSCRIPT };
+		const at = nowIso();
+		const baseSession =
+			session ??
+			createTranslationSession({
+				threadId: crypto.randomUUID(),
+				defaultTargetLanguage: targetLanguage,
+				at
+			});
+		session = beginCaptureRun(baseSession, {
+			runId: crypto.randomUUID(),
+			targetLanguage,
+			clientPlatform: navigator.userAgent,
+			at
+		});
 		if (timingProbeEnabled) {
 			timingProbeSamples = [];
 			timingProbeStartedAt = performance.now();
@@ -113,12 +242,21 @@
 			await client.start(targetLanguage);
 		} catch (startError) {
 			console.error('[realtime-client] start failed', startError);
-			error = realtimeErrorMessage(startError);
+			const message = realtimeErrorMessage(startError);
+			error = message;
+			endFailedRun(message);
 		}
 	}
 
 	async function stop(): Promise<void> {
 		await client?.stop();
+		if (session) {
+			session = endActiveCaptureRun(session, {
+				outcome: 'completed',
+				reason: 'user-paused',
+				at: nowIso()
+			});
+		}
 		publishTranscriptTiming();
 		timingProbeStartedAt = null;
 	}
@@ -172,9 +310,20 @@
 	<section class="captions" aria-live="polite">
 		<article>
 			<div class="caption-label"><span>原文</span><small>自动识别语言</small></div>
-			<p class:placeholder={!transcript.source}>
-				{transcript.source || (active ? '正在听取环境声音…' : '开始后，原文字幕会显示在这里。')}
-			</p>
+			<div class="caption-scroll" bind:this={sourceScroller} onscroll={updateSourceFollow}>
+				{#if sourceTranscriptRuns.length > 0}
+					{#each sourceTranscriptRuns as run (run.runId)}
+						{#if sourceTranscriptRuns.length > 1 || run.sequence > 1}
+							<div class="run-separator">第 {run.sequence} 段 · {runTime(run)}</div>
+						{/if}
+						<p>{run.text}</p>
+					{/each}
+				{:else}
+					<p class="placeholder">
+						{active ? '正在听取环境声音…' : '开始后，原文字幕会显示在这里。'}
+					</p>
+				{/if}
+			</div>
 		</article>
 
 		<div class="divider" aria-hidden="true"></div>
@@ -184,9 +333,26 @@
 				<span>译文</span>
 				<small>{TARGET_LANGUAGES.find((item) => item.code === targetLanguage)?.label}</small>
 			</div>
-			<p class:placeholder={!transcript.translation}>
-				{transcript.translation || (active ? '翻译准备中…' : '目标语言字幕会同步显示在这里。')}
-			</p>
+			<div
+				class="caption-scroll"
+				bind:this={translationScroller}
+				onscroll={updateTranslationFollow}
+			>
+				{#if translatedTranscriptRuns.length > 0}
+					{#each translatedTranscriptRuns as run (run.runId)}
+						{#if translatedTranscriptRuns.length > 1 || run.sequence > 1}
+							<div class="run-separator">
+								第 {run.sequence} 段 · {runTime(run)} · {languageLabel(run.targetLanguage)}
+							</div>
+						{/if}
+						<p>{run.text}</p>
+					{/each}
+				{:else}
+					<p class="placeholder">
+						{active ? '翻译准备中…' : '目标语言字幕会同步显示在这里。'}
+					</p>
+				{/if}
+			</div>
 		</article>
 	</section>
 
@@ -392,6 +558,7 @@
 	}
 
 	.captions {
+		height: clamp(430px, 68vh, 760px);
 		min-height: 430px;
 		border: 1px solid #242b28;
 		border-radius: 22px;
@@ -404,6 +571,9 @@
 
 	article {
 		padding: clamp(24px, 5vw, 54px);
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
 	}
 	.caption-label {
 		gap: 10px;
@@ -419,6 +589,12 @@
 		color: #68726d;
 		font-size: 12px;
 	}
+	.caption-scroll {
+		min-height: 0;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-gutter: stable;
+	}
 	article p {
 		margin: 0;
 		font-size: clamp(25px, 4.4vw, 48px);
@@ -427,6 +603,17 @@
 		letter-spacing: -0.022em;
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+	article p + .run-separator,
+	.run-separator + p {
+		margin-top: 14px;
+	}
+	.run-separator {
+		padding-top: 14px;
+		border-top: 1px solid #252d29;
+		color: #68726d;
+		font-size: 11px;
+		letter-spacing: 0.04em;
 	}
 
 	article.translated p {
@@ -473,6 +660,7 @@
 			width: 100%;
 		}
 		.captions {
+			height: clamp(490px, 72vh, 680px);
 			min-height: 490px;
 		}
 		footer {
