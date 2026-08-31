@@ -29,10 +29,11 @@
 
 ## 阶段 A：领域模型与 reducer（README 第 4 步）
 
-先实现 thread、run、segment 类型和纯函数 reducer，并用内存 repository 测试以下行为：
+先实现 thread、run、segment 类型、事实 reducer 和独立投影函数，并用测试锁定以下行为：
 
-- 源文和译文增量先进入完整流，再形成段落投影。
-- 迟到译文、缺失时间点、结尾冲刷和异常中断不会丢字。
+- 源文和译文增量直接进入各自完整流，事实路径不依赖分段。
+- 迟到 delta、缺失时间点、结尾冲刷和异常中断不会丢字。
+- 阅读投影只读取两条完整字符串，独立切块后按顺序近似组合，无法成对的尾部标记为 `unpaired`。
 - 暂停结束当前 run，继续在同一 thread 中追加新 run。
 - 新 segment revision 与当前 revision 指针必须原子切换。
 
@@ -74,13 +75,13 @@ Dexie 的 schema version 和 upgrade 机制见其 [Database Versioning](https://
 
 ```ts
 interface SessionRepository {
-	saveCheckpoint(run: CaptureRun, segments: TranscriptSegment[]): Promise<void>;
+	saveCheckpoint(run: CaptureRun): Promise<void>;
 	replaceSegmentRevision(run: CaptureRun, segments: TranscriptSegment[]): Promise<void>;
 	repairAbandonedRuns(threadId: string, now: string): Promise<CaptureRun[]>;
 }
 ```
 
-- `saveCheckpoint` 在一个事务内保存完整流快照、未定稿 segment 和 run 元数据。
+- `saveCheckpoint` 保存完整流快照和 run 元数据；实时事实路径不依赖 segment。
 - `replaceSegmentRevision` 在一个事务内写入新 revision 的全部 segment，并切换 `run.currentSegmentRevision`。
 - `repairAbandonedRuns` 在页面恢复时一次性修复遗留 run。
 

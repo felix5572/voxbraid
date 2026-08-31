@@ -6,8 +6,16 @@
 	import {
 		TARGET_LANGUAGES,
 		type ConnectionStatus,
-		type TargetLanguage
+		type TargetLanguage,
+		type TranslationServerEvent
 	} from '$lib/realtime/types';
+
+	type TranscriptTimingSample = {
+		stream: 'source' | 'translation';
+		receivedAfterStartMs: number;
+		elapsedMs: number | null;
+		delta: string;
+	};
 
 	const STATUS_LABELS: Record<ConnectionStatus, string> = {
 		idle: '待机',
@@ -25,11 +33,47 @@
 	let transcript = $state({ ...EMPTY_TRANSCRIPT });
 	let error = $state('');
 	let client: RealtimeTranslationClient | null = null;
+	let timingProbeEnabled = false;
+	let timingProbeStartedAt: number | null = null;
+	let timingProbeSamples: TranscriptTimingSample[] = [];
 	const wakeLock = new ScreenWakeLock();
 
 	const active = $derived(status !== 'idle' && status !== 'failed' && status !== 'stopping');
 
+	function recordTranscriptTiming(event: TranslationServerEvent): void {
+		if (
+			!timingProbeEnabled ||
+			timingProbeStartedAt === null ||
+			(event.type !== 'session.input_transcript.delta' &&
+				event.type !== 'session.output_transcript.delta') ||
+			typeof event.delta !== 'string'
+		) {
+			return;
+		}
+
+		timingProbeSamples.push({
+			stream: event.type === 'session.input_transcript.delta' ? 'source' : 'translation',
+			receivedAfterStartMs: Math.round(performance.now() - timingProbeStartedAt),
+			elapsedMs: typeof event.elapsed_ms === 'number' ? event.elapsed_ms : null,
+			delta: event.delta
+		});
+	}
+
+	function publishTranscriptTiming(): void {
+		if (!timingProbeEnabled || timingProbeSamples.length === 0) return;
+
+		const samples = structuredClone(timingProbeSamples);
+		(
+			window as Window & { __voxbraidTranscriptTiming?: TranscriptTimingSample[] }
+		).__voxbraidTranscriptTiming = samples;
+		console.table(samples);
+		console.info(
+			'[transcript-timing-probe] 已保存到 window.__voxbraidTranscriptTiming；请复制该变量的值。'
+		);
+	}
+
 	onMount(() => {
+		timingProbeEnabled = import.meta.env.DEV && location.search.includes('timing-probe=1');
 		client = new RealtimeTranslationClient({
 			onStatus: (nextStatus) => {
 				status = nextStatus;
@@ -38,7 +82,10 @@
 					void wakeLock.release();
 				}
 			},
-			onEvent: (event) => (transcript = reduceTranscript(transcript, event)),
+			onEvent: (event) => {
+				recordTranscriptTiming(event);
+				transcript = reduceTranscript(transcript, event);
+			},
 			onError: (message) => (error = message)
 		});
 
@@ -58,6 +105,10 @@
 		if (!client) return;
 		error = '';
 		transcript = { ...EMPTY_TRANSCRIPT };
+		if (timingProbeEnabled) {
+			timingProbeSamples = [];
+			timingProbeStartedAt = performance.now();
+		}
 		try {
 			await client.start(targetLanguage);
 		} catch (startError) {
@@ -68,6 +119,8 @@
 
 	async function stop(): Promise<void> {
 		await client?.stop();
+		publishTranscriptTiming();
+		timingProbeStartedAt = null;
 	}
 </script>
 

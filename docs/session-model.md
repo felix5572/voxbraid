@@ -91,7 +91,7 @@ interface CaptureRun {
 	lastError: RunError | null;
 	sourceStream: TranscriptStreamSnapshot;
 	translationStream: TranscriptStreamSnapshot;
-	currentSegmentRevision: number;
+	currentSegmentRevision: number | null;
 }
 ```
 
@@ -105,13 +105,12 @@ Realtime Translation 当前事件不提供可靠的逐段源语言字段，因�
 
 ### Transcript Segment
 
-`Transcript Segment` 是可阅读、可保存和可导出的字幕段落。它同时容纳源文本和译文，但允许两侧在流式过程中不同步。
+`Transcript Segment` 是根据完整原文流和译文流生成的可阅读、可保存、可导出投影。它不是 Realtime 事实，也不参与实时字幕展示；投影不好看时可以用同一份完整流重新生成。
 
 建议字段：
 
 ```ts
-type TranscriptSegmentStatus = 'open' | 'settling' | 'final' | 'interrupted';
-type SegmentAlignment = 'aligned' | 'approximate' | 'unpaired';
+type SegmentAlignment = 'approximate' | 'unpaired';
 
 interface TranscriptSegment {
 	id: string;
@@ -120,48 +119,33 @@ interface TranscriptSegment {
 	sequence: number;
 	sourceText: string;
 	translatedText: string;
-	status: TranscriptSegmentStatus;
 	alignment: SegmentAlignment;
-	sourceStartMs: number | null;
-	sourceEndMs: number | null;
-	translationStartMs: number | null;
-	translationEndMs: number | null;
 	createdAt: string;
 	updatedAt: string;
 }
 ```
 
-`status` 是 reducer 推导的聚合状态，而不是 OpenAI 发出的逐侧完成信号：
+`alignment` 只有两种诚实语义：两侧都有文本时为 `approximate`；只有一侧有文本时为 `unpaired`。VoxBraid 不声称某段原文与译文具有协议级一一对应关系。segment 是否来自仍在进行或已经结束的收音，由所属 `CaptureRun.status` 推导，不再重复保存一套流式状态。
 
-- `open`：源文本仍可能追加。
-- `settling`：源文本边界已经形成，但仍允许迟到的译文回写。
-- `final`：本地归属规则判断两侧都不会再追加。
-- `interrupted`：run 被中断时该段仍未稳定。
+## 完整事实流与阅读投影
 
-这种设计能够表达“原文已经形成边界、译文仍在流入”，同时不虚构协议不存在的 `sourceDone` 或 `translationDone` 事件。`alignment` 则诚实记录两侧关联的可靠程度。
+源文本和译文是两条独立、仅追加的事实流。实时事实 reducer 只处理 `source-delta`、`translation-delta` 和 `run-closed`：每个 delta 直接追加到对应完整流，同时更新最后活动时间和近似服务端会话时长。即使 delta 在 run 关闭后迟到，也继续进入完整流并增加诊断计数，不能静默丢弃。
 
-## 分段与迟到译文归属
+实时页面直接渲染两条完整流，不依赖 segment。MVP 的阅读投影采用以下简单规则：
 
-源文本和译文是两条独立、仅追加的增量流。reducer 必须先把每个 delta 追加到 run 的完整 `sourceStream` 或 `translationStream`，再尝试更新 segment。分段失败不能造成文本丢失。
+1. 原文和译文分别按各自标点切块；没有标点的文本先作为一个完整块保留，不在缺少真实阅读反馈时提前拍定长度阈值。
+2. 两组块按生成顺序 `zip`；两侧都有文本时标记 `approximate`，多出来的尾部标记 `unpaired`。
+3. `elapsed_ms` 不参与跨流配对。本次真实探针只证明它与事件到达时间近似线性同步，足以否定“译文时间回指源音频区间”的旧假设，但不能把单次观察写成稳定 API 契约。
+4. 投影只为历史记录易读，不参与计费、审计、实时字幕或事实保全。拆句、并句造成局部错位是可接受的展示误差，不为 MVP 增加失步检测、静音重同步、语义对齐或全局最优匹配。
+5. 投影函数只读取两条完整字符串，因此可以延迟执行并随时重跑；排版效果以后根据真实历史阅读体验调整。
 
-MVP 采用以下确定性规则：
+开发期定时探针必须显式启用，只在本地内存和控制台暴露 trace，不默认保存用户谈话内容。用于自动化测试的 trace 必须是用户明确提供且适合进入仓库的内容，或经过脱敏的合成样本。
 
-1. **以源文本形成段落边界。** 根据标点、停顿和最大长度提出边界；每段使用 run 相对的半开时间区间 `[sourceStartMs, sourceEndMs)`。
-2. **边界不是立即定稿。** 源文本形成边界后，当前 segment 从 `open` 进入 `settling`，同时可以新建下一个 `open` segment。
-3. **有 `elapsed_ms` 时按时间区间归属译文。** 译文 delta 优先追加到覆盖该时间点的 `open` 或 `settling` segment；因此第 N+1 段开始后，第 N 段迟到的译文仍可回写第 N 段。
-4. **时间点只能用于近似对齐。** `elapsed_ms` 可能以约 200 ms 步进、多个 delta 共享同一值，不能充当事件 ID，也不能证明原文与译文逐句一一对应。
-5. **缺失时间点时保守处理。** 只有一个合理候选时，追加到最早的 `settling` segment 并标记 `approximate`；存在多个候选时，先只保存在完整译文流中，不强行塞入可能错误的双语段。
-6. **超出窗口再定稿。** 当译文水位超过源段结尾加 `SEGMENT_SETTLEMENT_MS`，或 run 正常关闭并完成最后冲刷后，将 segment 标记为 `final`。窗口值必须通过真实会话测量后确定并可配置，不能在领域模型中拍死。
-7. **无法对齐也不丢弃。** run 关闭时仍不能可靠归属的文本形成 `unpaired` segment；UI 可以单独展示，后续允许重新分段，而不是静默遗漏或错配。
-8. **异常关闭保留不确定性。** 连接失效、页面挂起或关闭冲刷超时后，尚未稳定的 segment 标记为 `interrupted`。
+重新分段采用**版本化投影**，不原地覆盖当前 revision：尚未生成阅读投影时 `currentSegmentRevision` 为空，首次分段使用 revision 1；后续需要改变既有段落边界或 ID 时，在同一个 IndexedDB `readwrite` 事务中跨 `segments` 和 `runs` object store 写入下一 revision 的全部 segment，并更新 `run.currentSegmentRevision`。Supabase 侧使用单个数据库事务或 RPC 完成同样的切换，不能由客户端拆成两次独立写入。普通历史界面只显示当前 revision；若 assistant message 的轻量上下文范围引用了旧 revision 中的 segment，该 revision 仍需保留。这样既不会留下“新 revision 已写入但 current 指针未切换”的半完成状态，也能保持历史问题中“截至哪一段”一类描述可解释。
 
-本地可在活动 run 期间保留有序 delta 检查点以改善分段；Supabase 仍只需保存防抖后的完整流快照和 segment，不要求每个 delta 都成为远端数据库记录。
+活动 run 只更新完整流，不要求同步维护 segment。MVP 可以在暂停、run 关闭或首次打开历史记录时生成 revision 1；“重新分段”指用相同完整流生成新的阅读投影。
 
-重新分段采用**版本化投影**，不原地覆盖当前 revision：首次分段使用 revision 1；后续需要改变既有段落边界或 ID 时，在同一个 IndexedDB `readwrite` 事务中跨 `segments` 和 `runs` object store 写入下一 revision 的全部 segment，并更新 `run.currentSegmentRevision`。Supabase 侧使用单个数据库事务或 RPC 完成同样的切换，不能由客户端拆成两次独立写入。普通历史界面只显示当前 revision；若 assistant message 的轻量上下文范围引用了旧 revision 中的 segment，该 revision 仍需保留。这样既不会留下“新 revision 已写入但 current 指针未切换”的半完成状态，也能保持历史问题中“截至哪一段”一类描述可解释。
-
-活动 run 中的正常 delta 追加和 `open → settling → final` 状态变化仍更新当前 revision，不会为每个 delta 创建新版本。“重新分段”专指对已经形成的段落结构做后续重算。
-
-以上协议能力以 OpenAI 的 [Realtime Translation server events](https://developers.openai.com/api/reference/resources/realtime/translation-server-events) 为准；`open`、`settling`、`final` 和 `alignment` 都是 VoxBraid 的领域推断，不是远端事件类型。
+以上协议能力以 OpenAI 的 [Realtime Translation server events](https://developers.openai.com/api/reference/resources/realtime/translation-server-events) 为准；`approximate` 和 `unpaired` 是 VoxBraid 的展示判断，不是远端事件类型。
 
 ## ID 与顺序分配
 
@@ -173,7 +157,7 @@ UUID 或 ULID 都不能独自解决两个离线客户端分配相同 sequence �
 
 ## 时间轴、时长与异常恢复
 
-所有 `source*Ms`、`translation*Ms` 和 `elapsed_ms` 都是 **run / OpenAI session 相对时间**，跨 run 不可直接比较。需要近似墙钟时间时使用 `mediaStartedAt + elapsedMs`；如果 `mediaStartedAt` 缺失，就只能展示相对时间或明确标记估算，不能退回使用点击按钮时的 `createdAt` 冒充媒体起点。
+`elapsed_ms` 作为可空、非负的服务端观察值保存，不假定固定量化步长，也不把单次探针结果提升为协议契约。它只能用于估算 run / OpenAI session 的活动进度，跨 run 不可直接比较，不能用于原文与译文的语义对齐。
 
 `audioDurationMs` 优先取两条流观察到的最大 `elapsed_ms`。若协议时间不可用，则使用 `lastActivityAt - mediaStartedAt` 估算，并设置 `endTimeEstimated: true`。自用 MVP 只保存时长和所用模型等事实；成本按当前价格配置近似计算，不把单价写死在 run 类型里，也暂不保存历史价格快照。
 
@@ -181,7 +165,7 @@ UUID 或 ULID 都不能独自解决两个离线客户端分配相同 sequence �
 
 - `endedAt` 依次取 `lastActivityAt`、最新 segment 的 `updatedAt`、`createdAt`。
 - `endReason` 记为 `page-terminated`，并将 `endTimeEstimated` 设为 `true`。
-- 已保存的完整流和未定稿 segment 原样保留，不能因生命周期状态不完整而删除。
+- 已保存的完整流原样保留；已有阅读投影可以保留或从完整流重建，不能因生命周期状态不完整而删除事实文本。
 
 ## GPT 上下文对话支线
 
@@ -232,7 +216,7 @@ interface AssistantUsage {
 type ContextSelection =
 	| { mode: 'through-segment'; anchorSegmentId: string }
 	| { mode: 'selected-segments'; segmentIds: string[] }
-	| { mode: 'recent-wall-window'; anchorSegmentId: string; durationMs: number };
+	| { mode: 'recent-wall-window'; endAt: string; durationMs: number };
 
 interface AssistantMessageError {
 	code: string;
@@ -291,11 +275,11 @@ OpenAI Response 状态与产品 message 状态不是直接透传关系。8a 只�
 
 “刚刚”“截至现在”和“选中这一段”必须由应用解析，而不是让模型自行猜测。VoxBraid 保存轻量的 `ContextSelection`，但不建立 `context_snapshots` 表、不复制源文和译文，也不把逐字复现历史模型输入作为自用 MVP 的目标。
 
-`recent-wall-window` 的 `durationMs` 是墙钟时长。解析跨 run 范围时必须先使用 `run.mediaStartedAt + segment elapsedMs` 换算到同一时间轴；暂停和断线的空白时间包含在窗口中。无法可靠换算绝对时间的 segment 不应被静默排除，服务端应提示用户改用明确选择范围。以后如果需要“最近十分钟实际收音内容”，应增加独立的 capture-time 模式，不能复用这一语义。
+`recent-wall-window` 使用明确的 `endAt` 和墙钟 `durationMs`，不依赖 segment 时间字段。MVP 根据 run 的 `mediaStartedAt`、`endedAt` 或 `lastActivityAt` 选择与窗口相交的完整 run，因此可能比请求范围多带一些文本；最终仍受上下文预算限制。若以后确实需要在一个很长的 run 内精确截取“最近十分钟”，应先增加块级检查点或独立 capture-time 索引，不能从阅读投影反推精确媒体时间。
 
-关系型存储可以把 `contextSelection` 映射为 message 上的 `context_mode`、`context_anchor_segment_id`、`context_duration_ms` 三个可空列；`selected-segments` 使用 `assistant_message_context_segments(message_id, segment_id, ordinal)` 关联表。只有用户消息持有这些引用。它们的目的只是保持范围可解释，不是审计证据。
+关系型存储可以把 `contextSelection` 映射为 message 上的 `context_mode`、`context_anchor_segment_id`、`context_end_at`、`context_duration_ms` 可空列：`through-segment` 使用 anchor，`recent-wall-window` 使用 end time 和 duration；`selected-segments` 使用 `assistant_message_context_segments(message_id, segment_id, ordinal)` 关联表。只有用户消息持有这些引用。它们的目的只是保持范围可解释，不是审计证据。
 
-跨 revision 重试的范围解析留到 README 第 8 步实现前定稿。segment ID 只表示用户当时在 UI 指向的位置，不能直接充当跨 revision 的稳定坐标；实现时应把它归约为一个或多个墙钟窗口或 run 相对时间区间，再选择当前 revision 中重叠的 segment。选择可能跨 run、可能不连续，时间戳也可能缺失，因此不能预设单个 `(runId, startMs, endMs)` 足够；无法可靠归约时，应保留旧 revision 解析或提示用户重新选择，不能静默换成近似范围。
+segment ID 只表示用户在某个阅读投影 revision 中指向的位置。被消息范围引用的旧 revision 按既有规则保留，重试直接从该 revision 解析轻量选择，不尝试把旧 segment 映射到新分段边界；引用已经无法解析时提示用户重新选择，不能静默换成另一个近似范围。
 
 ### 调用边界
 
@@ -397,9 +381,9 @@ Responses API 返回 usage 时，将 model、input、cached input、output、rea
 运行期间：
 
 - transcript delta 先在内存中归并，不逐条写 Supabase。
-- 当前完整流快照和 `open` / `settling` segment 经过短时间防抖后写入 IndexedDB。
-- 段落定稿、暂停、断线和页面隐藏时立即持久化检查点。
-- 页面重新打开时，按“时间轴、时长与异常恢复”的规则修复遗留 run，保留已有文本和未定稿 segment。
+- 当前完整流快照经过短时间防抖后写入 IndexedDB，实时事实路径不等待阅读投影。
+- 暂停、断线和页面隐藏时立即持久化 run 检查点；暂停或关闭后可以生成或刷新 segment revision。
+- 页面重新打开时，按“时间轴、时长与异常恢复”的规则修复遗留 run，保留已有文本；阅读投影缺失时可以重新生成。
 - 待上传状态作为本地同步元数据保存，不进入实时媒体关键路径。
 - assistant branch 和 message 由 Node 写入 Supabase，不修改已保存的 transcript segment；浏览器可以缓存查询结果，但不能成为唯一副本。
 
