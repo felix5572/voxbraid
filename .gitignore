@@ -27,6 +27,11 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Local audio recordings; keep only the fixed real-API fixtures in Git
+local-recordings/*
+!local-recordings/hello-can-you-hear-me.webm
+!local-recordings/park-story.webm
+
 # Local environment and secrets
 .env
 .env.*

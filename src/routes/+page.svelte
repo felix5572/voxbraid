@@ -15,6 +15,12 @@
 		type TranslationSessionState
 	} from '$lib/session/translation-session';
 	import { visibleTranscriptRuns, type VisibleTranscriptRun } from '$lib/session/transcript-view';
+	import type { AudioFileStreamSource } from '$lib/testing/audio-file-source';
+	import type {
+		AudioTestOutcome,
+		AudioTestReport,
+		AudioTestStatusChange
+	} from '$lib/testing/audio-test-report';
 	import {
 		TARGET_LANGUAGES,
 		type ConnectionStatus,
@@ -27,6 +33,18 @@
 		receivedAfterStartMs: number;
 		elapsedMs: number | null;
 		delta: string;
+	};
+	type ActiveAudioTest = {
+		attemptStartedAt: string;
+		mediaStartedAt: string | null;
+		targetLanguage: string;
+		fileSizeBytes: number;
+		fileMimeType: string | null;
+		fileDurationMs: number | null;
+		runSequence: number;
+		statusChanges: AudioTestStatusChange[];
+		hiddenDurationsMs: number[];
+		errors: string[];
 	};
 
 	const STATUS_LABELS: Record<ConnectionStatus, string> = {
@@ -50,6 +68,17 @@
 	let session = $state<TranslationSessionState | null>(null);
 	let error = $state('');
 	let client: RealtimeTranslationClient | null = null;
+	let AudioTestPanel = $state<typeof import('$lib/testing/AudioTestPanel.svelte').default | null>(
+		null
+	);
+	let audioFileSource: AudioFileStreamSource | null = null;
+	let buildAudioTestReport:
+		typeof import('$lib/testing/audio-test-report').createAudioTestReport | null = null;
+	let audioTestEnabled = $state(false);
+	let audioTestFile = $state<File | null>(null);
+	let lastAudioTestReport = $state<AudioTestReport | null>(null);
+	let activeAudioTest: ActiveAudioTest | null = null;
+	let stopPromise: Promise<void> | null = null;
 	let timingProbeEnabled = false;
 	let timingProbeStartedAt: number | null = null;
 	let timingProbeSamples: TranscriptTimingSample[] = [];
@@ -61,6 +90,11 @@
 	const wakeLock = new ScreenWakeLock();
 
 	const active = $derived(status !== 'idle' && status !== 'failed' && status !== 'stopping');
+	const statusLabel = $derived(
+		import.meta.env.DEV && audioTestEnabled && status === 'requesting-microphone'
+			? '准备录音'
+			: STATUS_LABELS[status]
+	);
 	const sourceTranscriptRuns = $derived(
 		session ? visibleTranscriptRuns(session.runs, 'source', VISIBLE_TAIL_CHARACTERS) : []
 	);
@@ -102,6 +136,43 @@
 				translationScroller.scrollTop = translationScroller.scrollHeight;
 			}
 		});
+	}
+
+	function finishAudioTest(outcome: AudioTestOutcome): void {
+		const test = activeAudioTest;
+		if (!test || !session || !buildAudioTestReport) return;
+
+		lastAudioTestReport = buildAudioTestReport({
+			session,
+			outcome,
+			attemptStartedAt: test.attemptStartedAt,
+			mediaStartedAt: test.mediaStartedAt,
+			finishedAt: nowIso(),
+			targetLanguage: test.targetLanguage,
+			fileSizeBytes: test.fileSizeBytes,
+			fileMimeType: test.fileMimeType,
+			fileDurationMs: test.fileDurationMs,
+			runSequence: test.runSequence,
+			statusChanges: test.statusChanges,
+			hiddenDurationsMs: test.hiddenDurationsMs,
+			errors: test.errors,
+			userAgent: navigator.userAgent
+		});
+		activeAudioTest = null;
+	}
+
+	function downloadAudioTestReport(): void {
+		if (!lastAudioTestReport) return;
+		const url = URL.createObjectURL(
+			new Blob([JSON.stringify(lastAudioTestReport, null, 2)], { type: 'application/json' })
+		);
+		const link = document.createElement('a');
+		link.href = url;
+		link.download = `voxbraid-audio-test-${lastAudioTestReport.result.finishedAt.replaceAll(':', '-')}.json`;
+		document.body.append(link);
+		link.click();
+		link.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 0);
 	}
 
 	function endFailedRun(message: string): void {
@@ -154,43 +225,96 @@
 	}
 
 	onMount(() => {
-		timingProbeEnabled = import.meta.env.DEV && location.search.includes('timing-probe=1');
-		client = new RealtimeTranslationClient({
-			onStatus: (nextStatus) => {
-				status = nextStatus;
-				if (session && nextStatus === 'connected') {
-					session = markActiveRunConnected(session, nowIso());
-				}
-				if (session && nextStatus === 'stopping') {
-					session = markActiveRunStopping(session);
-				}
-				if (nextStatus === 'connected') void wakeLock.acquire();
-				if (nextStatus === 'stopping' || nextStatus === 'idle' || nextStatus === 'failed') {
-					void wakeLock.release();
-				}
-			},
-			onEvent: (event) => {
-				recordTranscriptTiming(event);
-				if (!session) return;
+		const search = new URLSearchParams(location.search);
+		timingProbeEnabled = import.meta.env.DEV && search.get('timing-probe') === '1';
+		if (import.meta.env.DEV && search.get('audio-test') === '1') {
+			audioTestEnabled = true;
+			void Promise.all([
+				import('$lib/testing/AudioTestPanel.svelte'),
+				import('$lib/testing/audio-file-source'),
+				import('$lib/testing/audio-test-report')
+			])
+				.then(([panelModule, sourceModule, reportModule]) => {
+					AudioTestPanel = panelModule.default;
+					audioFileSource = new sourceModule.AudioFileStreamSource();
+					buildAudioTestReport = reportModule.createAudioTestReport;
+				})
+				.catch((loadError: unknown) => {
+					console.error('[audio-test] tools failed to load', loadError);
+					error = '录音回放测试工具加载失败。';
+				});
+		}
+		client = new RealtimeTranslationClient(
+			{
+				onStatus: (nextStatus) => {
+					const at = nowIso();
+					if (import.meta.env.DEV) {
+						activeAudioTest?.statusChanges.push({ status: nextStatus, at });
+					}
+					status = nextStatus;
+					if (session && nextStatus === 'connected') {
+						session = markActiveRunConnected(session, at);
+					}
+					if (session && nextStatus === 'stopping') {
+						session = markActiveRunStopping(session);
+					}
+					if (nextStatus === 'connected') {
+						if (import.meta.env.DEV) {
+							if (activeAudioTest) activeAudioTest.mediaStartedAt ??= at;
+							audioFileSource?.play();
+						}
+						void wakeLock.acquire();
+					}
+					if (nextStatus === 'stopping' || nextStatus === 'idle' || nextStatus === 'failed') {
+						void wakeLock.release();
+					}
+				},
+				onEvent: (event) => {
+					recordTranscriptTiming(event);
+					if (!session) return;
 
-				const previousDeltasAfterClose = session.diagnostics.deltasAfterClose;
-				session = appendRealtimeTranscriptEvent(session, event, nowIso());
-				followTranscriptTails();
-				if (
-					import.meta.env.DEV &&
-					session.diagnostics.deltasAfterClose > previousDeltasAfterClose
-				) {
-					console.warn('[transcript-facts] received a transcript delta after run close');
+					const previousDeltasAfterClose = session.diagnostics.deltasAfterClose;
+					session = appendRealtimeTranscriptEvent(session, event, nowIso());
+					followTranscriptTails();
+					if (
+						import.meta.env.DEV &&
+						session.diagnostics.deltasAfterClose > previousDeltasAfterClose
+					) {
+						console.warn('[transcript-facts] received a transcript delta after run close');
+					}
+				},
+				onError: (message) => {
+					if (import.meta.env.DEV) activeAudioTest?.errors.push(message);
+					error = message;
+				},
+				onConnectionFailure: (message) => {
+					if (import.meta.env.DEV) {
+						activeAudioTest?.errors.push(message);
+						audioFileSource?.stop();
+					}
+					error = message;
+					endFailedRun(message);
+					if (import.meta.env.DEV) finishAudioTest('connection-failed');
 				}
 			},
-			onError: (message) => {
-				error = message;
-			},
-			onConnectionFailure: (message) => {
-				error = message;
-				endFailedRun(message);
+			{
+				getUserMedia: async (constraints) => {
+					if (!import.meta.env.DEV || !audioTestEnabled) {
+						return navigator.mediaDevices.getUserMedia(constraints);
+					}
+					const file = audioTestFile;
+					const test = activeAudioTest;
+					if (!file || !test || !audioFileSource) {
+						throw new Error('请先选择本地录音文件。');
+					}
+					const playback = await audioFileSource.open(file, {
+						onEnded: () => void stop('audio-ended')
+					});
+					test.fileDurationMs = playback.durationMs;
+					return playback.stream;
+				}
 			}
-		});
+		);
 
 		const handleVisibility = () => {
 			if (document.visibilityState === 'hidden' && session) {
@@ -198,10 +322,12 @@
 			}
 			if (document.visibilityState === 'visible') {
 				const hiddenAt = session ? activeCaptureRun(session)?.hiddenAt : null;
+				const hiddenDurationMs = hiddenAt ? Math.max(0, Date.now() - Date.parse(hiddenAt)) : null;
+				if (import.meta.env.DEV && hiddenDurationMs !== null) {
+					activeAudioTest?.hiddenDurationsMs.push(hiddenDurationMs);
+				}
 				if (hiddenAt && import.meta.env.DEV) {
-					console.info(
-						`[visibility] page was hidden for ${Math.max(0, Date.now() - Date.parse(hiddenAt))} ms`
-					);
+					console.info(`[visibility] page was hidden for ${hiddenDurationMs} ms`);
 				}
 				if (session) session = markActiveRunVisible(session);
 				if (status === 'connected') void wakeLock.acquire();
@@ -212,6 +338,7 @@
 		return () => {
 			document.removeEventListener('visibilitychange', handleVisibility);
 			if (followFrame !== null) cancelAnimationFrame(followFrame);
+			if (import.meta.env.DEV) audioFileSource?.stop();
 			void client?.stop();
 			void wakeLock.release();
 		};
@@ -219,6 +346,10 @@
 
 	async function start(): Promise<void> {
 		if (!client) return;
+		if (import.meta.env.DEV && audioTestEnabled && !audioTestFile) {
+			error = '请先选择本地录音文件。';
+			return;
+		}
 		error = '';
 		const at = nowIso();
 		const baseSession =
@@ -234,6 +365,23 @@
 			clientPlatform: navigator.userAgent,
 			at
 		});
+		if (import.meta.env.DEV && audioTestEnabled && audioTestFile) {
+			const run = activeCaptureRun(session);
+			if (!run) throw new Error('Audio test run was not created.');
+			lastAudioTestReport = null;
+			activeAudioTest = {
+				attemptStartedAt: at,
+				mediaStartedAt: null,
+				targetLanguage,
+				fileSizeBytes: audioTestFile.size,
+				fileMimeType: audioTestFile.type || null,
+				fileDurationMs: null,
+				runSequence: run.sequence,
+				statusChanges: [],
+				hiddenDurationsMs: [],
+				errors: []
+			};
+		}
 		if (timingProbeEnabled) {
 			timingProbeSamples = [];
 			timingProbeStartedAt = performance.now();
@@ -243,12 +391,28 @@
 		} catch (startError) {
 			console.error('[realtime-client] start failed', startError);
 			const message = realtimeErrorMessage(startError);
+			if (import.meta.env.DEV) {
+				activeAudioTest?.errors.push(message);
+				audioFileSource?.stop();
+			}
 			error = message;
 			endFailedRun(message);
+			if (import.meta.env.DEV) finishAudioTest('startup-failed');
 		}
 	}
 
-	async function stop(): Promise<void> {
+	function stop(outcome: AudioTestOutcome = 'user-stopped'): Promise<void> {
+		if (stopPromise) return stopPromise;
+		const promise = performStop(outcome);
+		stopPromise = promise;
+		void promise.finally(() => {
+			if (stopPromise === promise) stopPromise = null;
+		});
+		return promise;
+	}
+
+	async function performStop(outcome: AudioTestOutcome): Promise<void> {
+		if (import.meta.env.DEV) audioFileSource?.stop();
 		await client?.stop();
 		if (session) {
 			session = endActiveCaptureRun(session, {
@@ -259,6 +423,7 @@
 		}
 		publishTranscriptTiming();
 		timingProbeStartedAt = null;
+		if (import.meta.env.DEV) finishAudioTest(outcome);
 	}
 </script>
 
@@ -277,7 +442,7 @@
 			</div>
 		</div>
 		<div class:live={status === 'connected'} class:error-state={status === 'failed'} class="status">
-			<span></span>{STATUS_LABELS[status]}
+			<span></span>{statusLabel}
 		</div>
 	</header>
 
@@ -292,13 +457,30 @@
 		</label>
 
 		{#if active}
-			<button class="stop" onclick={stop}><span class="stop-icon"></span>停止翻译</button>
+			<button class="stop" onclick={() => void stop('user-stopped')}>
+				<span class="stop-icon"></span>停止翻译
+			</button>
 		{:else}
-			<button class="start" onclick={start} disabled={status === 'stopping'}>
-				<span class="mic" aria-hidden="true"></span>开始翻译
+			<button
+				class="start"
+				onclick={start}
+				disabled={status === 'stopping' ||
+					(import.meta.env.DEV && audioTestEnabled && !audioTestFile)}
+			>
+				<span class="mic" aria-hidden="true"></span>
+				{import.meta.env.DEV && audioTestEnabled ? '开始录音回放' : '开始翻译'}
 			</button>
 		{/if}
 	</section>
+
+	{#if import.meta.env.DEV && audioTestEnabled && AudioTestPanel}
+		<AudioTestPanel
+			{active}
+			bind:file={audioTestFile}
+			report={lastAudioTestReport}
+			onDownload={downloadAudioTestReport}
+		/>
+	{/if}
 
 	{#if error}
 		<div class="error" role="alert">
@@ -357,7 +539,11 @@
 	</section>
 
 	<footer>
-		<span>音频从此设备通过 WebRTC 直达 OpenAI</span>
+		<span>
+			{import.meta.env.DEV && audioTestEnabled
+				? '本地录音通过 WebRTC 直达 OpenAI'
+				: '音频从此设备通过 WebRTC 直达 OpenAI'}
+		</span>
 		<span>当前不播放译音 · 不保存录音</span>
 	</footer>
 </main>
@@ -370,7 +556,6 @@
 		padding: max(28px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
 			max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
 		display: grid;
-		grid-template-rows: auto auto auto 1fr auto;
 		gap: 24px;
 	}
 

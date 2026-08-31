@@ -48,6 +48,32 @@ corepack pnpm dev
 
 打开 `http://localhost:5173`，选择目标语言并点击“开始翻译”。浏览器会请求麦克风权限。OpenAI 正式 API Key 仅由 SvelteKit 服务端读取；浏览器只获得短期客户端凭证。
 
+### 录音回放测试
+
+开发环境可打开 `http://localhost:5173/?audio-test=1`，选择一段本地录音，让它代替麦克风作为 WebRTC 音轨。录音只播放一次，文件结束后自动停止。日常验证使用几段 5–20 秒的录音，覆盖连接、原文、译文和正常关闭；偶尔再使用一段约 1–3 分钟的完整录音检查连续表现。
+
+测试面板的折叠区也提供“录制新的测试片段”：展开后开始录音，朗读几句公开内容，再点“停止并保存”。浏览器会把录音下载到本机，并立即将它选为当前回放文件。需要重复使用时，可以把下载的文件移到仓库根目录的 `local-recordings/`。仓库只纳入两段固定回归夹具 `hello-can-you-hear-me.webm` 和 `park-story.webm`，该目录下其他临时录音默认被 Git 忽略。也可以直接选择电脑上其他位置已有的录音。
+
+文件只在浏览器中解码，不会上传到 VoxBraid Node；音频仍会通过真实 WebRTC 连接发送至 OpenAI。
+
+达到时限、录音自然结束或用户手动停止后，页面生成可下载的诊断报告。报告只包含状态变化、运行时长、字符数、错误、后台时长和 `deltasAfterClose`，不包含录音名称、字幕正文、thread ID 或 run ID。该模式使用真实 Realtime Translation API，会按音频时长产生费用；模型能力和当前计费方式以 [OpenAI 官方模型页面](https://developers.openai.com/api/docs/models/gpt-realtime-translate) 为准。
+
+项目采用三层测试：
+
+1. 日常单元测试和事件 fixture 不连接 OpenAI，用于验证事实 reducer、阅读投影、Run 生命周期和视图裁剪。
+2. 录音回放测试连接真实 OpenAI：日常只跑数秒到数十秒，偶尔跑一段约 1–3 分钟的完整录音，用于验证 WebRTC、字幕事件和关闭时序。
+3. iPad 真机只在关键功能、较大生命周期改动和阶段性回归时执行，用于验证锁屏、后台、麦克风、Wake Lock、页面回收和网络切换等桌面无法模拟的行为。
+
+真实 Realtime 冒烟测试默认跳过，不会因普通测试命令产生费用。只有明确设置开关时才会读取本地固定录音、连接 OpenAI 并断言收到原文和译文：
+
+```sh
+corepack pnpm exec playwright-core install chromium-headless-shell
+corepack pnpm exec playwright-core install-deps chromium-headless-shell
+RUN_REALTIME_TEST=1 corepack pnpm test:realtime
+```
+
+前两条是首次运行所需的本地无头浏览器及系统依赖安装。测试默认使用 `local-recordings/hello-can-you-hear-me.webm`。两条固定录音会额外检查少量稳定的名词或动词；每侧命中约三分之二即可通过，不做逐字比较，以容忍正常的标点、措辞和识别差异，同时确认返回内容确实来自测试语料。可以通过 `REALTIME_TEST_AUDIO` 指定其他文件，通过 `REALTIME_TEST_LANGUAGE` 修改目标语言；新录音可用逗号分隔的 `REALTIME_TEST_SOURCE_KEYWORDS` 和 `REALTIME_TEST_TRANSLATION_KEYWORDS` 指定预期关键词。在非标准环境中可用 `CHROME_PATH` 指定原生 Linux 浏览器。终端默认只打印通过状态和关键词覆盖率；需要查看完整字幕时显式设置 `REALTIME_TEST_VERBOSE=1`。该测试只借用无界面浏览器提供 WebRTC 媒体运行时，不操作 VoxBraid 页面，也不验证录音按钮等界面行为。
+
 ## 实现目标
 
 第一版聚焦一个简单、通用的闭环：
@@ -259,6 +285,7 @@ Supabase 不接收每一个实时字幕 delta。客户端先聚合成片段，�
 23. **本地 schema 先允许重建。** Dexie 阶段只保存 thread、run、segment；第一次 schema epoch 变化前先提供 JSON 导出，且不自动删除旧库。一旦产生不愿丢失的真实内容，就改用正式 Dexie upgrade。
 24. **Supabase migration 延后固化。** 字段稳定后先写声明式 schema，再生成和验证首版 migration；远端保存重要数据后只追加迁移，不再重写历史。
 25. **自用阶段不保存价格快照。** 模型和 token 用量是持久事实，费用只按当前配置近似展示；面向其他用户计费时再增加不可变价格和正式对账。
+26. **测试按事件 fixture、真实录音回放和 iPad 真机分层。** 日常开发优先使用无费用的事件 fixture；真实接口回归使用 5–20 秒固定录音，连续表现只偶尔使用约 1–3 分钟的完整录音；只有关键或较大改动以及阶段性回归才要求真机。回放不循环，两段公开语料的固定录音进入 Git 以保证测试可复现，其他临时录音仍被忽略；录音和字幕正文不进入默认诊断报告。
 
 ## iPad 锁屏与后台边界
 

@@ -16,6 +16,7 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"test": "TMPDIR=/tmp vitest run",
+		"test:realtime": "node scripts/realtime-smoke.mjs",
 		"test:watch": "TMPDIR=/tmp vitest",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write ."
@@ -30,6 +31,7 @@
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.19.0",
 		"globals": "^17.6.0",
+		"playwright-core": "^1.62.1",
 		"prettier": "^3.8.3",
 		"prettier-plugin-svelte": "^4.1.0",
 		"svelte": "^5.56.1",
