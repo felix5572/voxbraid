@@ -68,7 +68,7 @@ function stopTracks(stream: MediaStream | null): void {
 	for (const track of stream?.getTracks() ?? []) track.stop();
 }
 
-function readRealtimeErrorMessage(event: TranslationServerEvent): string | null {
+export function readRealtimeErrorMessage(event: TranslationServerEvent): string | null {
 	if (
 		event.type !== 'error' ||
 		!('error' in event) ||
@@ -79,7 +79,25 @@ function readRealtimeErrorMessage(event: TranslationServerEvent): string | null 
 	) {
 		return null;
 	}
-	return event.error.message;
+	const details = [
+		'type' in event.error && typeof event.error.type === 'string'
+			? `type=${event.error.type}`
+			: null,
+		'code' in event.error && typeof event.error.code === 'string'
+			? `code=${event.error.code}`
+			: null,
+		'param' in event.error && typeof event.error.param === 'string'
+			? `param=${event.error.param}`
+			: null,
+		'event_id' in event.error && typeof event.error.event_id === 'string'
+			? `event_id=${event.error.event_id}`
+			: typeof event.event_id === 'string'
+				? `event_id=${event.event_id}`
+				: null
+	].filter((detail): detail is string => detail !== null);
+	return details.length > 0
+		? `${event.error.message}（${details.join('，')}）`
+		: event.error.message;
 }
 
 export class RealtimeTranslationClient implements TranslationClient {
@@ -217,7 +235,10 @@ export class RealtimeTranslationClient implements TranslationClient {
 				return;
 			}
 			const message = readRealtimeErrorMessage(event);
-			if (message) this.options.onError(message);
+			if (message) {
+				console.error('[realtime-client] server error', event);
+				this.options.onError(message);
+			}
 		});
 	}
 

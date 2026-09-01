@@ -24,10 +24,13 @@ export interface TranslationTokenResponse {
 
 export interface RealtimeErrorEvent {
 	type: 'error';
+	event_id?: string;
 	error: {
 		message: string;
 		code?: string | null;
 		type?: string;
+		param?: string | null;
+		event_id?: string | null;
 	};
 }
 

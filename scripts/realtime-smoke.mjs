@@ -9,6 +9,11 @@ if (process.env.RUN_REALTIME_TEST !== '1') {
 }
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+try {
+	process.loadEnvFile(join(root, '.env'));
+} catch (error) {
+	if (error?.code !== 'ENOENT') throw error;
+}
 const audioPath =
 	process.env.REALTIME_TEST_AUDIO ?? join(root, 'local-recordings', 'hello-can-you-hear-me.webm');
 const targetLanguage = process.env.REALTIME_TEST_LANGUAGE ?? 'zh';
@@ -119,7 +124,16 @@ try {
 			{ cause: error }
 		);
 	}
-	const page = await browser.newPage();
+	const basicAuthUsername = process.env.VOXBRAID_BASIC_AUTH_USERNAME;
+	const basicAuthPassword = process.env.VOXBRAID_BASIC_AUTH_PASSWORD;
+	if ((basicAuthUsername && !basicAuthPassword) || (!basicAuthUsername && basicAuthPassword)) {
+		throw new Error('Basic Auth 测试配置不完整，请同时设置用户名和密码。');
+	}
+	const page = await browser.newPage({
+		...(basicAuthUsername && basicAuthPassword
+			? { httpCredentials: { username: basicAuthUsername, password: basicAuthPassword } }
+			: {})
+	});
 	await page.route('**/api/openai/usage-summary', async (route) => {
 		await route.fulfill({
 			contentType: 'application/json',
@@ -155,6 +169,7 @@ try {
 			const audioSource = new AudioFileStreamSource();
 			const statuses = [];
 			const errors = [];
+			const eventTrace = [];
 			let source = '';
 			let translation = '';
 			let audioDurationMs = 0;
@@ -172,6 +187,7 @@ try {
 						if (status === 'connected') audioSource.play();
 					},
 					onEvent: (event) => {
+						if (event.type !== 'session.output_audio.delta') eventTrace.push(event);
 						if (event.type === 'session.input_transcript.delta') source += event.delta ?? '';
 						if (event.type === 'session.output_transcript.delta') {
 							translation += event.delta ?? '';
@@ -203,7 +219,7 @@ try {
 					)
 				)
 			]);
-			return { statuses, source, translation, errors };
+			return { statuses, source, translation, errors, eventTrace };
 		},
 		{ audioBase64, fileName: basename(audioPath), targetLanguage }
 	);
@@ -236,6 +252,7 @@ try {
 	if (process.env.REALTIME_TEST_VERBOSE === '1') {
 		console.log(`source: ${result.source.trim()}`);
 		console.log(`translation: ${result.translation.trim()}`);
+		console.log(`events: ${JSON.stringify(result.eventTrace, null, 2)}`);
 	}
 	if (result.errors.length > 0) console.log(`protocol errors: ${result.errors.join(' | ')}`);
 } finally {

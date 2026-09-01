@@ -86,6 +86,21 @@
 		windows: OfficialUsageWindow[];
 		updatedAt: string;
 	};
+	type DiagnosticEvent = {
+		receivedAfterStartMs: number;
+		event: TranslationServerEvent;
+	};
+	type DiagnosticStatus = {
+		receivedAfterStartMs: number;
+		status: ConnectionStatus;
+	};
+	type DiagnosticMediaEvent = {
+		receivedAfterStartMs: number;
+		type: 'initial' | 'mute' | 'unmute' | 'ended';
+		enabled: boolean;
+		muted: boolean;
+		readyState: MediaStreamTrackState;
+	};
 
 	const STATUS_LABELS: Record<ConnectionStatus, string> = {
 		idle: '待机',
@@ -99,6 +114,7 @@
 	};
 	const VISIBLE_TAIL_CHARACTERS = 2_000;
 	const RESTORE_TIMEOUT_MS = 5_000;
+	const DIAGNOSTIC_EVENT_LIMIT = 500;
 	const RUN_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
 		hour: '2-digit',
 		minute: '2-digit'
@@ -148,6 +164,22 @@
 	let sourceFollowsTail = true;
 	let translationFollowsTail = true;
 	let followFrame: number | null = null;
+	let diagnosticStartedAt = performance.now();
+	let diagnosticStartedAtIso = nowIso();
+	let diagnosticEvents: DiagnosticEvent[] = [];
+	let diagnosticStatuses: DiagnosticStatus[] = [];
+	let diagnosticMediaTrack: Record<string, unknown> | null = null;
+	let diagnosticMediaEvents: DiagnosticMediaEvent[] = [];
+	let diagnosticDroppedEvents = $state(0);
+	let diagnosticOmittedAudioEvents = $state(0);
+	let diagnosticSourceDeltas = $state(0);
+	let diagnosticSourceCharacters = $state(0);
+	let diagnosticSourceElapsedMs = $state<number | null>(null);
+	let diagnosticTranslationDeltas = $state(0);
+	let diagnosticTranslationCharacters = $state(0);
+	let diagnosticTranslationElapsedMs = $state<number | null>(null);
+	let diagnosticErrors = $state(0);
+	let diagnosticReportText = $state('开始一次收音后，这里会生成当前 Run 的原始诊断报告。');
 	const wakeLock = new ScreenWakeLock();
 
 	const active = $derived(status !== 'idle' && status !== 'failed' && status !== 'stopping');
@@ -175,6 +207,135 @@
 
 	function nowIso(): string {
 		return new Date().toISOString();
+	}
+
+	function resetRealtimeDiagnostics(): void {
+		diagnosticStartedAt = performance.now();
+		diagnosticStartedAtIso = nowIso();
+		diagnosticEvents = [];
+		diagnosticStatuses = [];
+		diagnosticMediaTrack = null;
+		diagnosticMediaEvents = [];
+		diagnosticDroppedEvents = 0;
+		diagnosticOmittedAudioEvents = 0;
+		diagnosticSourceDeltas = 0;
+		diagnosticSourceCharacters = 0;
+		diagnosticSourceElapsedMs = null;
+		diagnosticTranslationDeltas = 0;
+		diagnosticTranslationCharacters = 0;
+		diagnosticTranslationElapsedMs = null;
+		diagnosticErrors = 0;
+		diagnosticReportText = '当前 Run 正在采集原始事件；停止后会自动刷新报告。';
+	}
+
+	function diagnosticOffsetMs(): number {
+		return Math.max(0, Math.round(performance.now() - diagnosticStartedAt));
+	}
+
+	function recordDiagnosticStatus(nextStatus: ConnectionStatus): void {
+		diagnosticStatuses.push({ receivedAfterStartMs: diagnosticOffsetMs(), status: nextStatus });
+	}
+
+	function recordDiagnosticEvent(event: TranslationServerEvent): void {
+		if (event.type === 'session.output_audio.delta') {
+			diagnosticOmittedAudioEvents += 1;
+			return;
+		}
+
+		if (diagnosticEvents.length < DIAGNOSTIC_EVENT_LIMIT) {
+			diagnosticEvents.push({
+				receivedAfterStartMs: diagnosticOffsetMs(),
+				event: structuredClone(event)
+			});
+		} else {
+			diagnosticDroppedEvents += 1;
+		}
+
+		if (event.type === 'session.input_transcript.delta' && typeof event.delta === 'string') {
+			diagnosticSourceDeltas += 1;
+			diagnosticSourceCharacters += event.delta.length;
+			diagnosticSourceElapsedMs =
+				typeof event.elapsed_ms === 'number' ? event.elapsed_ms : diagnosticSourceElapsedMs;
+		}
+		if (event.type === 'session.output_transcript.delta' && typeof event.delta === 'string') {
+			diagnosticTranslationDeltas += 1;
+			diagnosticTranslationCharacters += event.delta.length;
+			diagnosticTranslationElapsedMs =
+				typeof event.elapsed_ms === 'number' ? event.elapsed_ms : diagnosticTranslationElapsedMs;
+		}
+		if (event.type === 'error') diagnosticErrors += 1;
+	}
+
+	function recordDiagnosticMedia(stream: MediaStream): void {
+		const track = stream.getAudioTracks()[0];
+		if (!track) {
+			diagnosticMediaTrack = { missing: true };
+			return;
+		}
+		diagnosticMediaTrack = {
+			label: track.label,
+			enabled: track.enabled,
+			muted: track.muted,
+			readyState: track.readyState,
+			settings: track.getSettings(),
+			constraints: track.getConstraints()
+		};
+		const recordTrackEvent = (type: DiagnosticMediaEvent['type']): void => {
+			diagnosticMediaEvents.push({
+				receivedAfterStartMs: diagnosticOffsetMs(),
+				type,
+				enabled: track.enabled,
+				muted: track.muted,
+				readyState: track.readyState
+			});
+		};
+		recordTrackEvent('initial');
+		track.addEventListener('mute', () => recordTrackEvent('mute'));
+		track.addEventListener('unmute', () => recordTrackEvent('unmute'));
+		track.addEventListener('ended', () => recordTrackEvent('ended'));
+	}
+
+	function refreshDiagnosticReport(): void {
+		diagnosticReportText = JSON.stringify(
+			{
+				version: 1,
+				startedAt: diagnosticStartedAtIso,
+				generatedAt: nowIso(),
+				userAgent: navigator.userAgent,
+				mediaTrack: diagnosticMediaTrack,
+				mediaEvents: diagnosticMediaEvents,
+				summary: {
+					source: {
+						deltas: diagnosticSourceDeltas,
+						characters: diagnosticSourceCharacters,
+						lastElapsedMs: diagnosticSourceElapsedMs
+					},
+					translation: {
+						deltas: diagnosticTranslationDeltas,
+						characters: diagnosticTranslationCharacters,
+						lastElapsedMs: diagnosticTranslationElapsedMs
+					},
+					errors: diagnosticErrors,
+					omittedOutputAudioEvents: diagnosticOmittedAudioEvents,
+					droppedEventsAfterLimit: diagnosticDroppedEvents
+				},
+				statuses: diagnosticStatuses,
+				events: diagnosticEvents
+			},
+			null,
+			2
+		);
+	}
+
+	async function copyDiagnosticReport(): Promise<void> {
+		refreshDiagnosticReport();
+		try {
+			await navigator.clipboard.writeText(diagnosticReportText);
+			backupMessage = 'Realtime 原始诊断报告已复制。';
+		} catch (copyError) {
+			console.error('[realtime-diagnostics] copy failed', copyError);
+			backupMessage = '复制失败；请展开报告后手动选择文本。';
+		}
 	}
 
 	function runTime(run: VisibleTranscriptRun): string {
@@ -538,6 +699,7 @@
 		const realtimeOptions: RealtimeTranslationClientOptions = {
 			onStatus: (nextStatus) => {
 				const at = nowIso();
+				recordDiagnosticStatus(nextStatus);
 				if (import.meta.env.DEV) {
 					activeAudioTest?.statusChanges.push({ status: nextStatus, at });
 				}
@@ -563,6 +725,7 @@
 				}
 			},
 			onEvent: (event) => {
+				recordDiagnosticEvent(event);
 				recordTranscriptTiming(event);
 				if (!session) return;
 
@@ -606,7 +769,9 @@
 			client = new RealtimeTranslationClient(realtimeOptions, {
 				getUserMedia: async (constraints) => {
 					if (!import.meta.env.DEV || !audioTestEnabled) {
-						return navigator.mediaDevices.getUserMedia(constraints);
+						const stream = await navigator.mediaDevices.getUserMedia(constraints);
+						recordDiagnosticMedia(stream);
+						return stream;
 					}
 					const file = audioTestFile;
 					const test = activeAudioTest;
@@ -617,6 +782,7 @@
 						onEnded: () => void stop('audio-ended')
 					});
 					test.fileDurationMs = playback.durationMs;
+					recordDiagnosticMedia(playback.stream);
 					return playback.stream;
 				}
 			});
@@ -752,6 +918,7 @@
 			return;
 		}
 		error = '';
+		resetRealtimeDiagnostics();
 		const at = nowIso();
 		const baseSession =
 			session ??
@@ -830,6 +997,7 @@
 		}
 		publishTranscriptTiming();
 		timingProbeStartedAt = null;
+		refreshDiagnosticReport();
 		if (import.meta.env.DEV) finishAudioTest(outcome);
 	}
 </script>
@@ -981,7 +1149,7 @@
 
 		{#if error}
 			<div class="error" role="alert">
-				<strong>连接没有建立</strong>
+				<strong>{status === 'failed' ? '连接没有建立' : '实时链路报告错误'}</strong>
 				<span>{error}</span>
 			</div>
 		{/if}
@@ -1075,6 +1243,41 @@
 				</div>
 			{/if}
 		</footer>
+
+		<section class="debug-diagnostics" aria-labelledby="debug-diagnostics-title">
+			<div class="debug-heading">
+				<div>
+					<p class="eyebrow">DEBUG</p>
+					<h2 id="debug-diagnostics-title">Realtime 诊断</h2>
+				</div>
+				<div class="debug-actions">
+					<button class="export" onclick={refreshDiagnosticReport}>刷新原始报告</button>
+					<button class="export" onclick={() => void copyDiagnosticReport()}>复制报告</button>
+				</div>
+			</div>
+			<div class="debug-metrics">
+				<span>
+					原文 <strong>{diagnosticSourceDeltas}</strong> delta ·
+					<strong>{diagnosticSourceCharacters}</strong> 字符 · elapsed
+					<strong>{diagnosticSourceElapsedMs ?? '—'}</strong> ms
+				</span>
+				<span>
+					译文 <strong>{diagnosticTranslationDeltas}</strong> delta ·
+					<strong>{diagnosticTranslationCharacters}</strong> 字符 · elapsed
+					<strong>{diagnosticTranslationElapsedMs ?? '—'}</strong> ms
+				</span>
+				<span>错误 <strong>{diagnosticErrors}</strong></span>
+				{#if diagnosticDroppedEvents > 0}
+					<span class="debug-warning">
+						超过 {DIAGNOSTIC_EVENT_LIMIT} 条后另有 {diagnosticDroppedEvents} 条未写入报告
+					</span>
+				{/if}
+			</div>
+			<details>
+				<summary>设备配置、状态时间线与原始事件</summary>
+				<pre>{diagnosticReportText}</pre>
+			</details>
+		</section>
 	</main>
 </div>
 
@@ -1128,6 +1331,71 @@
 		background: #122019;
 		color: #a8d8c1;
 		font-size: 13px;
+	}
+
+	.debug-diagnostics {
+		padding: 16px;
+		border: 1px solid #29332e;
+		border-radius: 14px;
+		background: #0c100e;
+		color: #87918c;
+		font-size: 12px;
+	}
+	.debug-heading,
+	.debug-actions,
+	.debug-metrics {
+		display: flex;
+		align-items: center;
+	}
+	.debug-heading {
+		justify-content: space-between;
+		gap: 16px;
+	}
+	.debug-heading h2 {
+		margin: 2px 0 0;
+		color: #d2d9d5;
+		font-size: 15px;
+	}
+	.debug-actions,
+	.debug-metrics {
+		gap: 8px 16px;
+		flex-wrap: wrap;
+	}
+	.debug-actions button {
+		width: auto;
+	}
+	.debug-metrics {
+		margin-top: 14px;
+	}
+	.debug-metrics strong {
+		color: #bdebd8;
+	}
+	.debug-warning {
+		color: #e4b66e;
+	}
+	.debug-diagnostics details {
+		margin-top: 14px;
+	}
+	.debug-diagnostics summary {
+		cursor: pointer;
+		color: #aab4af;
+	}
+	.debug-diagnostics pre {
+		max-height: 420px;
+		margin: 12px 0 0;
+		padding: 12px;
+		overflow: auto;
+		border-radius: 10px;
+		background: #070a08;
+		color: #a9b4ae;
+		font:
+			11px/1.55 ui-monospace,
+			SFMono-Regular,
+			Menlo,
+			Consolas,
+			monospace;
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 
 	.brand {

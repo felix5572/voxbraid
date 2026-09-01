@@ -197,18 +197,35 @@ describe('RealtimeTranslationClient', () => {
 	});
 
 	it('reports protocol errors without declaring the connection failed', async () => {
+		const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 		const harness = createHarness();
 		await harness.client.start('zh');
 		harness.peerConnection.emitConnectionState('connected');
 
 		harness.peerConnection.dataChannel.emitMessage(
-			JSON.stringify({ type: 'error', error: { message: 'bad realtime event' } })
+			JSON.stringify({
+				type: 'error',
+				event_id: 'server-event',
+				error: {
+					message: 'bad realtime event',
+					type: 'invalid_request_error',
+					code: 'invalid_event',
+					param: 'type'
+				}
+			})
 		);
 
-		expect(harness.onError).toHaveBeenCalledWith('bad realtime event');
+		expect(harness.onError).toHaveBeenCalledWith(
+			'bad realtime event（type=invalid_request_error，code=invalid_event，param=type，event_id=server-event）'
+		);
+		expect(consoleError).toHaveBeenCalledWith(
+			'[realtime-client] server error',
+			expect.objectContaining({ type: 'error', event_id: 'server-event' })
+		);
 		expect(harness.onConnectionFailure).not.toHaveBeenCalled();
 		expect(harness.client.currentStatus).toBe('connected');
 		await harness.client.stop();
+		consoleError.mockRestore();
 	});
 
 	it('waits for session.closed while accepting final transcript events', async () => {

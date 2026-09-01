@@ -185,12 +185,20 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await waitForReady(page);
 		await page.locator('select').selectOption('ja');
 
-		const firstSource = 'First automated capture run.';
-		const firstTranslation = '最初の自動収録です。';
+		const firstSourceChunks = [
+			'First automated capture run.',
+			' The second source sentence must remain visible.',
+			' The third source sentence must also reach IndexedDB.'
+		];
+		const firstSource = firstSourceChunks.join('');
+		const firstTitle = firstSourceChunks[0];
+		const firstTranslation = '最初の自動収録です。二つ目と三つ目の原文も保存します。';
 		await startCapture(page);
 		await page.locator('[data-thread-id]').waitFor();
 		assert.equal(await page.locator('[data-thread-id]').isDisabled(), true);
-		await emitPair(page, firstSource, firstTranslation);
+		for (const sourceChunk of firstSourceChunks) {
+			await emitPair(page, sourceChunk, firstTranslation.slice(0, 1));
+		}
 		await stopCapture(page);
 		const firstRun = await waitForRecord(
 			page,
@@ -199,13 +207,13 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 			'第一次暂停后的 Run 保存'
 		);
 		assert.equal(firstRun.endReason, 'user-paused');
-		await page.getByRole('button', { name: new RegExp(firstSource) }).waitFor();
+		await page.getByRole('button', { name: new RegExp(firstTitle) }).waitFor();
 
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
-		await page.getByRole('button', { name: new RegExp(firstSource) }).waitFor();
+		await page.getByRole('button', { name: new RegExp(firstTitle) }).waitFor();
 		await mainText(page, firstSource).waitFor();
-		await page.getByText(firstTranslation, { exact: true }).waitFor();
+		await page.getByText(firstTranslation.slice(0, 1).repeat(3), { exact: true }).waitFor();
 		assert.equal(await page.locator('select').inputValue(), 'ja');
 
 		const secondSource = 'Second capture run in the same thread.';
