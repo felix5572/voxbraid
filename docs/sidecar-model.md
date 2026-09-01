@@ -236,6 +236,8 @@ interface SidecarInvocationView {
 
 每个 thread 在 Dexie version 3 的 `cleanTranscriptBlocks` store 中保存有序块：稳定源文/译文字符范围、对应 run、状态、清稿文本、模型、任务版本、usage 和错误。失败块和成功块使用相同稳定 ID，手动重试原位替换。页面首次打开或切换 thread 时，以已存块末尾作为继续位置；没有块的既有 run 以当前全文长度为自动基线，避免仅浏览历史就产生付费调用。用户主动点击“整理未处理内容”时，新系统中没有旧清稿的 thread 可以从头分块处理。
 
+页面另提供明确的“重新整理全部”：先只清除该 thread 的 `autoSummaries` 和 `cleanTranscriptBlocks` 可重算投影，再从第一条双流事实开始分块生成。它不删除或修改 thread、run、原文和实时译文；重新生成会产生新的文本模型费用，中途失败按普通失败块保存并允许继续或重试。
+
 Dexie version 2 的 `autoSummaries` 作为旧投影只读兼容：已有整场清稿继续显示在新块之前，但不再被覆盖；有旧投影的既有 run 从页面加载位置开始产生新块，避免重复整理。每个块仍使用 64,000 token 输出预算作为异常上限，并由 Input Tokens API 在生成前做输入预算检查。分块后正常请求远小于该上限，三小时课程的累计输入恢复为随内容近似线性增长。
 
 ## 六、与正式 branch 的升级关系

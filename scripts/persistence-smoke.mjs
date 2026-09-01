@@ -380,6 +380,16 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await waitForReady(page);
 		await page.getByText('课堂清稿第1块', { exact: true }).waitFor();
 		await page.getByText('课堂清稿第2块', { exact: true }).waitFor();
+		await page.getByRole('button', { name: '重新整理全部', exact: true }).click();
+		await page.getByText('课堂清稿第4块', { exact: true }).waitFor();
+		assert.equal(await page.getByText('课堂清稿第1块', { exact: true }).count(), 0);
+		const rebuiltBlocks = (await readStore(page, 'cleanTranscriptBlocks')).filter(
+			(record) => record.threadId === firstRun.threadId
+		);
+		assert.deepEqual(
+			rebuiltBlocks.map((record) => record.sequence).sort((left, right) => left - right),
+			[1, 2]
+		);
 
 		await page.getByLabel('字幕问题', { exact: true }).fill('What was captured?');
 		await page.getByRole('button', { name: '提问', exact: true }).click();

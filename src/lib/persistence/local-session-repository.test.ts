@@ -282,6 +282,23 @@ describe('LocalSessionRepository', () => {
 		await expect(repository.loadCleanTranscriptBlocks(thread.id)).resolves.toEqual([completed]);
 	});
 
+	it('clears only cleanup projections before rebuilding a complete transcript', async () => {
+		const thread = createThread();
+		const run = createRun();
+		await repository.saveCheckpoint({ thread, run, checkpointedAt: CHECKPOINT });
+		await repository.saveAutoSummary(createAutoSummary());
+		await repository.saveCleanTranscriptBlock(createCleanBlock());
+
+		await repository.clearCleanTranscript(thread.id);
+
+		await expect(repository.loadAutoSummary(thread.id)).resolves.toBeNull();
+		await expect(repository.loadCleanTranscriptBlocks(thread.id)).resolves.toEqual([]);
+		await expect(repository.loadThread(thread.id)).resolves.toMatchObject({
+			thread,
+			runs: [{ id: run.id, sourceStream: run.sourceStream }]
+		});
+	});
+
 	it('rejects a clean transcript block without its persisted run', async () => {
 		await database.threads.put({ ...createThread(), checkpointedAt: CHECKPOINT });
 		await expect(repository.saveCleanTranscriptBlock(createCleanBlock())).rejects.toThrow(

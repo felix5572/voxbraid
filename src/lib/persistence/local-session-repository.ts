@@ -180,6 +180,22 @@ export class LocalSessionRepository {
 		);
 	}
 
+	async clearCleanTranscript(threadId: string): Promise<void> {
+		await this.database.transaction(
+			'rw',
+			this.database.threads,
+			this.database.autoSummaries,
+			this.database.cleanTranscriptBlocks,
+			async () => {
+				if (!(await this.database.threads.get(threadId))) {
+					throw new Error(`Thread not found: ${threadId}.`);
+				}
+				await this.database.autoSummaries.delete(threadId);
+				await this.database.cleanTranscriptBlocks.where('threadId').equals(threadId).delete();
+			}
+		);
+	}
+
 	async replaceSegmentRevision(input: ReplaceSegmentRevisionInput): Promise<void> {
 		const revision = validateRevision(input);
 		await this.database.transaction('rw', this.database.runs, this.database.segments, async () => {

@@ -92,6 +92,7 @@ interface SessionRepository {
 		checkpointedAt: string;
 	}): Promise<void>;
 	repairAbandonedRuns(threadId: string, checkpointedAt: string): Promise<CaptureRun[]>;
+	clearCleanTranscript(threadId: string): Promise<void>;
 	exportThread(threadId: string, exportedAt: string): Promise<string>;
 	importThread(json: string, checkpointedAt: string): Promise<string>;
 }
@@ -100,6 +101,7 @@ interface SessionRepository {
 - `saveCheckpoint` 在一个事务中保存 thread 元数据、完整流快照和 run 元数据；实时事实路径不依赖 segment。本地 record 可以保存 `checkpointedAt` 等恢复元数据，但这些字段不进入领域类型。
 - `replaceSegmentRevision` 在一个事务内写入新 revision 的全部 segment，并切换 `run.currentSegmentRevision`。
 - `repairAbandonedRuns` 在页面恢复时一次性修复遗留 run。
+- `clearCleanTranscript` 在一个事务中只删除旧整场清稿和新版分块清稿投影，供用户明确选择“重新整理全部”；它不能触碰字幕事实。
 - `exportThread` 和 `importThread` 使用带 `schemaVersion` 的 thread 级 JSON；导入前验证对象结构、跨 thread 引用和稳定顺序号，再在一个事务内替换该 thread 的本地记录。相同文件重复导入按稳定 thread ID 覆盖恢复，不创建副本；MVP 不增加整库归档格式。
 - 本地库打开后尽力调用浏览器 Storage API 请求持久存储。浏览器可能拒绝或不支持该请求，因此它只降低自动回收风险，不能替代逐会话 JSON 备份。
 - 完整流变脏后以 10 秒为最大合并间隔保存。这里使用持续写入也会周期触发的 throttle/coalescing 语义，不能把普通 trailing debounce 重置到连续讲话结束才第一次落盘。暂停、连接失败、页面隐藏和 `pagehide` 时立即 flush `saveCheckpoint`；组件卸载不能直接丢弃最后的内存状态。浏览器可能随时终止异步卸载工作，因此恢复能力不能只依赖最后一次 unload 写入。

@@ -289,6 +289,43 @@
 		}
 	}
 
+	async function rebuildAll(): Promise<void> {
+		const capturedSession = session;
+		if (
+			disabled ||
+			phase === 'loading' ||
+			phase === 'requesting' ||
+			!capturedSession ||
+			!hasTranscript
+		) {
+			return;
+		}
+		phase = 'requesting';
+		errorMessage = '';
+		persistenceMessage = '';
+		copyStatus = '';
+		onRequestingChange(true);
+		if (repository) {
+			try {
+				await repository.clearCleanTranscript(capturedSession.thread.id);
+			} catch (error) {
+				console.error('[clean-transcript] clear failed', error);
+				phase = 'failed';
+				errorMessage = '无法清除旧清稿；原字幕和现有清稿均未改变。';
+				onRequestingChange(false);
+				return;
+			}
+		}
+		if (session?.thread.id !== capturedSession.thread.id) return;
+		legacySummary = null;
+		blocks = [];
+		automaticBaselines.clear();
+		pendingRunEnds.clear();
+		phase = 'idle';
+		onRequestingChange(false);
+		await processManual();
+	}
+
 	async function copyTranscript(): Promise<void> {
 		if (!cleanText) return;
 		try {
@@ -348,13 +385,23 @@
 			<p class="eyebrow">CLEAN TRANSCRIPT</p>
 			<h3 id="auto-summary-title">课堂清稿</h3>
 		</div>
-		<button
-			type="button"
-			disabled={disabled || phase === 'loading' || phase === 'requesting' || !hasTranscript}
-			onclick={() => void processManual()}
-		>
-			{failedBlocks.length > 0 ? '重试失败块' : '整理未处理内容'}
-		</button>
+		<div class="actions">
+			{#if cleanText}
+				<button
+					type="button"
+					class="secondary"
+					disabled={disabled || phase === 'loading' || phase === 'requesting' || !hasTranscript}
+					onclick={() => void rebuildAll()}>重新整理全部</button
+				>
+			{/if}
+			<button
+				type="button"
+				disabled={disabled || phase === 'loading' || phase === 'requesting' || !hasTranscript}
+				onclick={() => void processManual()}
+			>
+				{failedBlocks.length > 0 ? '重试失败块' : '整理未处理内容'}
+			</button>
+		</div>
 	</header>
 
 	<div class="status" aria-live="polite">
@@ -416,7 +463,8 @@
 
 	header,
 	footer,
-	.messages {
+	.messages,
+	.actions {
 		display: flex;
 	}
 
@@ -455,6 +503,17 @@
 	button:hover:not(:disabled) {
 		border-color: #6f9e8c;
 		background: #1d3028;
+	}
+
+	.actions {
+		flex-wrap: wrap;
+		justify-content: flex-end;
+		gap: 8px;
+	}
+
+	button.secondary {
+		background: transparent;
+		color: #9aaba3;
 	}
 
 	button:disabled {
