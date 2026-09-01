@@ -27,8 +27,26 @@ function visibleTail(value: string, maxCharacters: number): { text: string; trun
 export function visibleTranscriptRuns(
 	runs: CaptureRun[],
 	stream: TranscriptViewStream,
-	maxCharacters: number
+	maxCharacters?: number
 ): VisibleTranscriptRun[] {
+	if (maxCharacters === undefined) {
+		return runs.flatMap((run) => {
+			const text = streamText(run, stream).trim();
+			return text
+				? [
+						{
+							runId: run.id,
+							sequence: run.sequence,
+							targetLanguage: run.targetLanguage,
+							startedAt: run.mediaStartedAt ?? run.createdAt,
+							text,
+							truncated: false
+						}
+					]
+				: [];
+		});
+	}
+
 	if (!Number.isInteger(maxCharacters) || maxCharacters <= 0) {
 		throw new RangeError('maxCharacters must be a positive integer.');
 	}

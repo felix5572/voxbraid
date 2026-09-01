@@ -27,6 +27,19 @@ function run(id: string, sequence: number, source: string, translation: string):
 }
 
 describe('visibleTranscriptRuns', () => {
+	it('shows the complete transcript when no view limit is requested', () => {
+		const longOpening = `opening ${'x'.repeat(2_100)} ending`;
+		const runs = [
+			run('run-1', 1, longOpening, '第一段'),
+			run('run-2', 2, 'second source', '第二段')
+		];
+
+		expect(visibleTranscriptRuns(runs, 'source')).toEqual([
+			expect.objectContaining({ runId: 'run-1', text: longOpening, truncated: false }),
+			expect.objectContaining({ runId: 'run-2', text: 'second source', truncated: false })
+		]);
+	});
+
 	it('keeps completed run text visible while a new run is still empty', () => {
 		const runs = [run('run-1', 1, 'first source', '第一段'), run('run-2', 2, '', '')];
 

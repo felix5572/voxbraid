@@ -118,7 +118,6 @@
 		stopping: '正在停止',
 		failed: '连接异常'
 	};
-	const VISIBLE_TAIL_CHARACTERS = 2_000;
 	const RESTORE_TIMEOUT_MS = 5_000;
 	const DIAGNOSTIC_EVENT_LIMIT = 500;
 	const RUN_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
@@ -206,10 +205,10 @@
 				: STATUS_LABELS[status]
 	);
 	const sourceTranscriptRuns = $derived(
-		session ? visibleTranscriptRuns(session.runs, 'source', VISIBLE_TAIL_CHARACTERS) : []
+		session ? visibleTranscriptRuns(session.runs, 'source') : []
 	);
 	const translatedTranscriptRuns = $derived(
-		session ? visibleTranscriptRuns(session.runs, 'translation', VISIBLE_TAIL_CHARACTERS) : []
+		session ? visibleTranscriptRuns(session.runs, 'translation') : []
 	);
 	const usageEstimate = $derived(estimateRealtimeUsage(session?.runs ?? [], usageNowMs));
 	const estimatedCostLabel = $derived(formatEstimatedCostUsd(usageEstimate.estimatedCostUsd));
@@ -1313,8 +1312,8 @@
 				</span>
 				<span>错误 <strong>{diagnosticErrors}</strong></span>
 				{#if diagnosticDroppedEvents > 0}
-					<span class="debug-warning">
-						超过 {DIAGNOSTIC_EVENT_LIMIT} 条后另有 {diagnosticDroppedEvents} 条未写入报告
+					<span class="debug-note">
+						报告截断 · 另有 {diagnosticDroppedEvents} 条未收录
 					</span>
 				{/if}
 			</div>
@@ -1431,8 +1430,10 @@
 	.debug-metrics strong {
 		color: #bdebd8;
 	}
-	.debug-warning {
-		color: #e4b66e;
+	.debug-note {
+		display: block;
+		margin-top: 6px;
+		color: #87918c;
 	}
 	.debug-diagnostics details {
 		margin-top: 14px;
