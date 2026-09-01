@@ -2,10 +2,12 @@ import { parseServerEvent } from './transcript';
 import { exchangeTranslationSdp, fetchTranslationToken } from './transport';
 import type {
 	ConnectionStatus,
+	RealtimeTranscriptionModel,
 	TargetLanguage,
 	TranslationServerEvent,
 	TranslationTokenResponse
 } from './types';
+import { DEFAULT_REALTIME_TRANSCRIPTION_MODEL } from './types';
 
 const CONNECTION_TIMEOUT_MS = 15_000;
 const RECOVERY_GRACE_MS = 8_000;
@@ -22,7 +24,10 @@ export interface RealtimeTranslationClientOptions {
 
 export interface TranslationClient {
 	readonly currentStatus: ConnectionStatus;
-	start(targetLanguage: TargetLanguage): Promise<void>;
+	start(
+		targetLanguage: TargetLanguage,
+		transcriptionModel?: RealtimeTranscriptionModel
+	): Promise<void>;
 	stop(): Promise<void>;
 }
 
@@ -31,6 +36,7 @@ export interface RealtimeTranslationClientDependencies {
 	createPeerConnection: () => RTCPeerConnection;
 	fetchToken: (
 		targetLanguage: TargetLanguage,
+		transcriptionModel: RealtimeTranscriptionModel,
 		signal: AbortSignal
 	) => Promise<TranslationTokenResponse>;
 	exchangeSdp: (clientSecret: string, offerSdp: string, signal: AbortSignal) => Promise<string>;
@@ -45,7 +51,8 @@ export interface RealtimeTranslationClientDependencies {
 const DEFAULT_DEPENDENCIES: RealtimeTranslationClientDependencies = {
 	getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
 	createPeerConnection: () => new RTCPeerConnection(),
-	fetchToken: (targetLanguage, signal) => fetchTranslationToken(targetLanguage, fetch, signal),
+	fetchToken: (targetLanguage, transcriptionModel, signal) =>
+		fetchTranslationToken(targetLanguage, fetch, signal, transcriptionModel),
 	exchangeSdp: (clientSecret, offerSdp, signal) =>
 		exchangeTranslationSdp(clientSecret, offerSdp, fetch, signal),
 	now: () => Date.now(),
@@ -124,7 +131,10 @@ export class RealtimeTranslationClient implements TranslationClient {
 		return this.status;
 	}
 
-	async start(targetLanguage: TargetLanguage): Promise<void> {
+	async start(
+		targetLanguage: TargetLanguage,
+		transcriptionModel: RealtimeTranscriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL
+	): Promise<void> {
 		if (this.status !== 'idle' && this.status !== 'failed') return;
 
 		const runId = ++this.runId;
@@ -148,7 +158,11 @@ export class RealtimeTranslationClient implements TranslationClient {
 			this.mediaStream = mediaStream;
 
 			this.setStatus('requesting-token');
-			const token = await this.dependencies.fetchToken(targetLanguage, abortController.signal);
+			const token = await this.dependencies.fetchToken(
+				targetLanguage,
+				transcriptionModel,
+				abortController.signal
+			);
 			if (!this.isRunActive(runId, abortController)) return;
 			if (token.expiresAt * 1_000 <= this.dependencies.now()) {
 				throw new Error('实时翻译凭证已过期，请重新开始。');

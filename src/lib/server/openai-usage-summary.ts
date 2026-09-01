@@ -1,10 +1,12 @@
-import {
-	REALTIME_TRANSCRIPTION_MODEL,
-	REALTIME_TRANSLATION_MODEL
-} from '../realtime/usage-estimate';
+import { REALTIME_TRANSLATION_MODEL } from '../realtime/usage-estimate';
+import { REALTIME_TRANSCRIPTION_MODELS } from '../realtime/types';
 
 const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organization/costs';
-const REALTIME_LINE_ITEMS = new Set([REALTIME_TRANSLATION_MODEL, REALTIME_TRANSCRIPTION_MODEL]);
+const REALTIME_TRANSCRIPTION_LINE_ITEMS = REALTIME_TRANSCRIPTION_MODELS.map((model) => model.code);
+const REALTIME_LINE_ITEMS = new Set([
+	REALTIME_TRANSLATION_MODEL,
+	...REALTIME_TRANSCRIPTION_LINE_ITEMS
+]);
 const DAY_SECONDS = 24 * 60 * 60;
 const WINDOW_DAYS = [1, 7, 30] as const;
 
@@ -137,8 +139,15 @@ function summarizeWindow(
 	}
 
 	const translation = totals.get(REALTIME_TRANSLATION_MODEL);
-	const transcription = totals.get(REALTIME_TRANSCRIPTION_MODEL);
-	if (!translation || !transcription) throw new Error('Realtime cost totals were not initialized.');
+	const transcription = REALTIME_TRANSCRIPTION_LINE_ITEMS.reduce(
+		(sum, model) => {
+			const total = totals.get(model);
+			if (!total) throw new Error('Realtime cost totals were not initialized.');
+			return { seconds: sum.seconds + total.seconds, usd: sum.usd + total.usd };
+		},
+		{ seconds: 0, usd: 0 }
+	);
+	if (!translation) throw new Error('Realtime cost totals were not initialized.');
 	return {
 		days,
 		durationSeconds: Math.round(Math.max(translation.seconds, transcription.seconds)),

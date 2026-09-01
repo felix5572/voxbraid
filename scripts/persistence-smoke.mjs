@@ -183,7 +183,11 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 	const { browserErrors, context, page } = await createPage(browser, baseUrl);
 	try {
 		await waitForReady(page);
-		await page.locator('select').selectOption('ja');
+		const targetLanguageSelect = page.getByLabel('目标语言', { exact: true });
+		const transcriptionModelSelect = page.getByLabel('原文模型', { exact: true });
+		await targetLanguageSelect.selectOption('ja');
+		await transcriptionModelSelect.selectOption('gpt-live-transcribe');
+		assert.equal(await transcriptionModelSelect.inputValue(), 'gpt-live-transcribe');
 
 		const firstSourceChunks = [
 			'First automated capture run.',
@@ -194,6 +198,7 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		const firstTitle = firstSourceChunks[0];
 		const firstTranslation = '最初の自動収録です。二つ目と三つ目の原文も保存します。';
 		await startCapture(page);
+		assert.equal(await transcriptionModelSelect.isDisabled(), true);
 		await page.locator('[data-thread-id]').waitFor();
 		assert.equal(await page.locator('[data-thread-id]').isDisabled(), true);
 		for (const sourceChunk of firstSourceChunks) {
@@ -214,7 +219,7 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await page.getByRole('button', { name: new RegExp(firstTitle) }).waitFor();
 		await mainText(page, firstSource).waitFor();
 		await page.getByText(firstTranslation.slice(0, 1).repeat(3), { exact: true }).waitFor();
-		assert.equal(await page.locator('select').inputValue(), 'ja');
+		assert.equal(await page.getByLabel('目标语言', { exact: true }).inputValue(), 'ja');
 
 		const secondSource = 'Second capture run in the same thread.';
 		const secondTranslation = '同じ会話の二つ目の収録です。';

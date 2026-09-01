@@ -44,9 +44,12 @@
 		AudioTestStatusChange
 	} from '$lib/testing/audio-test-report';
 	import {
+		DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+		REALTIME_TRANSCRIPTION_MODELS,
 		TARGET_LANGUAGES,
 		isTargetLanguage,
 		type ConnectionStatus,
+		type RealtimeTranscriptionModel,
 		type TargetLanguage,
 		type TranslationServerEvent
 	} from '$lib/realtime/types';
@@ -126,6 +129,7 @@
 
 	let status = $state<ConnectionStatus>('idle');
 	let targetLanguage = $state<TargetLanguage>('zh');
+	let transcriptionModel = $state<RealtimeTranscriptionModel>(DEFAULT_REALTIME_TRANSCRIPTION_MODEL);
 	let session = $state<TranslationSessionState | null>(null);
 	let error = $state('');
 	let persistencePhase = $state<PersistencePhase>('restoring');
@@ -166,6 +170,8 @@
 	let followFrame: number | null = null;
 	let diagnosticStartedAt = performance.now();
 	let diagnosticStartedAtIso = nowIso();
+	let diagnosticRequestedTranscriptionModel: RealtimeTranscriptionModel =
+		DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
 	let diagnosticEvents: DiagnosticEvent[] = [];
 	let diagnosticStatuses: DiagnosticStatus[] = [];
 	let diagnosticMediaTrack: Record<string, unknown> | null = null;
@@ -212,6 +218,7 @@
 	function resetRealtimeDiagnostics(): void {
 		diagnosticStartedAt = performance.now();
 		diagnosticStartedAtIso = nowIso();
+		diagnosticRequestedTranscriptionModel = transcriptionModel;
 		diagnosticEvents = [];
 		diagnosticStatuses = [];
 		diagnosticMediaTrack = null;
@@ -301,6 +308,7 @@
 				version: 1,
 				startedAt: diagnosticStartedAtIso,
 				generatedAt: nowIso(),
+				requestedTranscriptionModel: diagnosticRequestedTranscriptionModel,
 				userAgent: navigator.userAgent,
 				mediaTrack: diagnosticMediaTrack,
 				mediaEvents: diagnosticMediaEvents,
@@ -958,7 +966,7 @@
 			timingProbeStartedAt = performance.now();
 		}
 		try {
-			await client.start(targetLanguage);
+			await client.start(targetLanguage, transcriptionModel);
 		} catch (startError) {
 			console.error('[realtime-client] start failed', startError);
 			const message = realtimeErrorMessage(startError);
@@ -1052,7 +1060,11 @@
 		<section class="controls" aria-label="翻译控制">
 			<label>
 				<span>目标语言</span>
-				<select bind:value={targetLanguage} disabled={active || persistencePhase === 'restoring'}>
+				<select
+					aria-label="目标语言"
+					bind:value={targetLanguage}
+					disabled={active || persistencePhase === 'restoring'}
+				>
 					{#each TARGET_LANGUAGES as language (language.code)}
 						<option value={language.code}>{language.label}</option>
 					{/each}
@@ -1251,6 +1263,18 @@
 					<h2 id="debug-diagnostics-title">Realtime 诊断</h2>
 				</div>
 				<div class="debug-actions">
+					<label class="debug-model">
+						<span>原文模型</span>
+						<select
+							aria-label="原文模型"
+							bind:value={transcriptionModel}
+							disabled={active || status === 'stopping'}
+						>
+							{#each REALTIME_TRANSCRIPTION_MODELS as model (model.code)}
+								<option value={model.code}>{model.label}</option>
+							{/each}
+						</select>
+					</label>
 					<button class="export" onclick={refreshDiagnosticReport}>刷新原始报告</button>
 					<button class="export" onclick={() => void copyDiagnosticReport()}>复制报告</button>
 				</div>
@@ -1363,6 +1387,22 @@
 	}
 	.debug-actions button {
 		width: auto;
+	}
+	.debug-model {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.debug-model span {
+		white-space: nowrap;
+	}
+	.debug-model select {
+		min-width: 170px;
+		padding: 8px 10px;
+		border: 1px solid #34413b;
+		border-radius: 9px;
+		background: #111713;
+		color: #d2d9d5;
 	}
 	.debug-metrics {
 		margin-top: 14px;

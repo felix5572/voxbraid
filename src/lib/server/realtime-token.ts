@@ -2,7 +2,7 @@ import {
 	REALTIME_TRANSCRIPTION_MODEL,
 	REALTIME_TRANSLATION_MODEL
 } from '../realtime/usage-estimate';
-import { isTargetLanguage } from '../realtime/types';
+import { isRealtimeTranscriptionModel, isTargetLanguage } from '../realtime/types';
 import { json } from '@sveltejs/kit';
 
 const CLIENT_SECRET_URL = 'https://api.openai.com/v1/realtime/translations/client_secrets';
@@ -50,10 +50,20 @@ export async function issueTranslationToken({
 		typeof body === 'object' && body !== null && 'targetLanguage' in body
 			? body.targetLanguage
 			: null;
+	const requestedTranscriptionModel =
+		typeof body === 'object' && body !== null && 'transcriptionModel' in body
+			? body.transcriptionModel
+			: REALTIME_TRANSCRIPTION_MODEL;
 
 	if (!isTargetLanguage(targetLanguage)) {
 		return json(
 			{ message: '请选择受支持的目标语言。' },
+			{ status: 400, headers: noStoreHeaders() }
+		);
+	}
+	if (!isRealtimeTranscriptionModel(requestedTranscriptionModel)) {
+		return json(
+			{ message: '请选择受支持的原文转写模型。' },
 			{ status: 400, headers: noStoreHeaders() }
 		);
 	}
@@ -75,7 +85,7 @@ export async function issueTranslationToken({
 					model: REALTIME_TRANSLATION_MODEL,
 					audio: {
 						input: {
-							transcription: { model: REALTIME_TRANSCRIPTION_MODEL },
+							transcription: { model: requestedTranscriptionModel },
 							noise_reduction: { type: 'far_field' }
 						},
 						output: { language: targetLanguage }

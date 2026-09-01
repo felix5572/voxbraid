@@ -3,11 +3,11 @@ import { issueTranslationToken } from './realtime-token';
 
 const API_KEY = 'server-only-test-key';
 
-function tokenRequest(targetLanguage: unknown): Request {
+function tokenRequest(targetLanguage: unknown, transcriptionModel?: unknown): Request {
 	return new Request('http://localhost/api/realtime/token', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ targetLanguage })
+		body: JSON.stringify({ targetLanguage, ...(transcriptionModel ? { transcriptionModel } : {}) })
 	});
 }
 
@@ -25,6 +25,18 @@ describe('issueTranslationToken', () => {
 		expect(response.status).toBe(400);
 		expect(fetcher).not.toHaveBeenCalled();
 		expect(await response.text()).not.toContain(API_KEY);
+	});
+
+	it('rejects an unsupported transcription model before calling OpenAI', async () => {
+		const fetcher = vi.fn();
+		const response = await issueTranslationToken({
+			request: tokenRequest('zh', 'unsupported'),
+			fetcher,
+			apiKey: API_KEY
+		});
+
+		expect(response.status).toBe(400);
+		expect(fetcher).not.toHaveBeenCalled();
 	});
 
 	it('rejects an incomplete OpenAI response without exposing the API key', async () => {
@@ -70,12 +82,40 @@ describe('issueTranslationToken', () => {
 		expect(JSON.parse(String(requestInit?.body))).toMatchObject({
 			session: {
 				model: 'gpt-realtime-translate',
-				audio: { input: { transcription: { model: 'gpt-realtime-whisper' } } }
+				audio: { input: { transcription: { model: 'gpt-live-transcribe' } } }
 			}
 		});
 		expect(await response.json()).toEqual({
 			clientSecret: 'temporary-client-secret',
 			expiresAt: 2_000_000_000
+		});
+	});
+
+	it('passes the selected transcription model to OpenAI', async () => {
+		let requestInit: RequestInit | undefined;
+		const fetcher = vi.fn(async (...args: [RequestInfo | URL, RequestInit?]) => {
+			requestInit = args[1];
+			return new Response(
+				JSON.stringify({
+					value: 'temporary-client-secret',
+					expires_at: 2_000_000_000,
+					session: { id: 'session-test' }
+				}),
+				{ status: 200, headers: { 'Content-Type': 'application/json' } }
+			);
+		});
+
+		const response = await issueTranslationToken({
+			request: tokenRequest('zh', 'gpt-live-transcribe'),
+			fetcher,
+			apiKey: API_KEY
+		});
+
+		expect(response.status).toBe(200);
+		expect(JSON.parse(String(requestInit?.body))).toMatchObject({
+			session: {
+				audio: { input: { transcription: { model: 'gpt-live-transcribe' } } }
+			}
 		});
 	});
 });

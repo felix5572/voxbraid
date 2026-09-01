@@ -99,9 +99,22 @@ afterEach(() => {
 });
 
 describe('RealtimeTranslationClient', () => {
+	it('requests the selected source transcription model', async () => {
+		const harness = createHarness();
+
+		await harness.client.start('zh', 'gpt-live-transcribe');
+
+		expect(harness.dependencies.fetchToken).toHaveBeenCalledWith(
+			'zh',
+			'gpt-live-transcribe',
+			expect.any(AbortSignal)
+		);
+		await harness.client.stop();
+	});
+
 	it('cancels a pending start without reporting a failure', async () => {
 		const fetchToken = vi.fn(
-			(_targetLanguage, signal: AbortSignal) =>
+			(_targetLanguage, _transcriptionModel, signal: AbortSignal) =>
 				new Promise<never>((_resolve, reject) => {
 					signal.addEventListener(
 						'abort',

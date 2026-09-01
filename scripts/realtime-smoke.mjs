@@ -17,6 +17,10 @@ try {
 const audioPath =
 	process.env.REALTIME_TEST_AUDIO ?? join(root, 'local-recordings', 'hello-can-you-hear-me.webm');
 const targetLanguage = process.env.REALTIME_TEST_LANGUAGE ?? 'zh';
+const transcriptionModel = process.env.REALTIME_TEST_TRANSCRIPTION_MODEL ?? 'gpt-live-transcribe';
+if (!['gpt-realtime-whisper', 'gpt-live-transcribe'].includes(transcriptionModel)) {
+	throw new Error(`不支持的原文转写模型：${transcriptionModel}`);
+}
 const fixtureExpectations = {
 	'hello-can-you-hear-me.webm': {
 		source: ['hello', 'testing', 'hear'],
@@ -159,7 +163,7 @@ try {
 
 	const audioBase64 = (await readFile(audioPath)).toString('base64');
 	const result = await page.evaluate(
-		async ({ audioBase64, fileName, targetLanguage }) => {
+		async ({ audioBase64, fileName, targetLanguage, transcriptionModel }) => {
 			const [{ RealtimeTranslationClient }, { AudioFileStreamSource }] = await Promise.all([
 				import('/src/lib/realtime/client.ts'),
 				import('/src/lib/testing/audio-file-source.ts')
@@ -209,7 +213,7 @@ try {
 				}
 			);
 
-			await client.start(targetLanguage);
+			await client.start(targetLanguage, transcriptionModel);
 			await Promise.race([
 				finished,
 				new Promise((_, reject) =>
@@ -221,7 +225,7 @@ try {
 			]);
 			return { statuses, source, translation, errors, eventTrace };
 		},
-		{ audioBase64, fileName: basename(audioPath), targetLanguage }
+		{ audioBase64, fileName: basename(audioPath), targetLanguage, transcriptionModel }
 	);
 
 	if (!result.statuses.includes('connected')) throw new Error('WebRTC 没有进入 connected。');
@@ -243,7 +247,7 @@ try {
 		translationKeywords
 	);
 
-	console.log('[realtime-smoke] passed');
+	console.log(`[realtime-smoke] passed · ${transcriptionModel}`);
 	if (sourceCoverage || translationCoverage) {
 		console.log(
 			`keyword coverage: source ${sourceCoverage?.matched ?? 0}/${sourceCoverage?.total ?? 0}, translation ${translationCoverage?.matched ?? 0}/${translationCoverage?.total ?? 0}`

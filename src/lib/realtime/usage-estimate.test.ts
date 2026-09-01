@@ -72,7 +72,7 @@ describe('realtime usage estimate', () => {
 
 		expect(REALTIME_TRANSLATION_PRICING.components).toEqual([
 			{ model: 'gpt-realtime-translate', usdPerMinute: 0.034 },
-			{ model: 'gpt-realtime-whisper', usdPerMinute: 0.017 }
+			{ model: 'gpt-live-transcribe', usdPerMinute: 0.017 }
 		]);
 		expect(estimate.durationSeconds).toBe(60);
 		expect(estimate.estimatedCostUsd).toBeCloseTo(0.051);

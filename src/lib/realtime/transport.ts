@@ -1,4 +1,9 @@
-import type { TargetLanguage, TranslationTokenResponse } from './types';
+import {
+	DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+	type RealtimeTranscriptionModel,
+	type TargetLanguage,
+	type TranslationTokenResponse
+} from './types';
 
 export const REALTIME_TRANSLATION_CALLS_URL =
 	'https://api.openai.com/v1/realtime/translations/calls';
@@ -32,12 +37,13 @@ export async function apiResponseError(response: Response, fallback: string): Pr
 export async function fetchTranslationToken(
 	targetLanguage: TargetLanguage,
 	fetcher: Fetcher = fetch,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	transcriptionModel: RealtimeTranscriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL
 ): Promise<TranslationTokenResponse> {
 	const response = await fetcher('/api/realtime/token', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ targetLanguage }),
+		body: JSON.stringify({ targetLanguage, transcriptionModel }),
 		signal
 	});
 

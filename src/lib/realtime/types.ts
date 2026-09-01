@@ -5,7 +5,15 @@ export const TARGET_LANGUAGES = [
 	{ code: 'es', label: 'Español' }
 ] as const;
 
+export const REALTIME_TRANSCRIPTION_MODELS = [
+	{ code: 'gpt-live-transcribe', label: 'Live Transcribe' },
+	{ code: 'gpt-realtime-whisper', label: 'Realtime Whisper' }
+] as const;
+
+export const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = 'gpt-live-transcribe';
+
 export type TargetLanguage = (typeof TARGET_LANGUAGES)[number]['code'];
+export type RealtimeTranscriptionModel = (typeof REALTIME_TRANSCRIPTION_MODELS)[number]['code'];
 
 export type ConnectionStatus =
 	| 'idle'
@@ -50,4 +58,8 @@ export type TranslationServerEvent =
 
 export function isTargetLanguage(value: unknown): value is TargetLanguage {
 	return TARGET_LANGUAGES.some((language) => language.code === value);
+}
+
+export function isRealtimeTranscriptionModel(value: unknown): value is RealtimeTranscriptionModel {
+	return REALTIME_TRANSCRIPTION_MODELS.some((model) => model.code === value);
 }

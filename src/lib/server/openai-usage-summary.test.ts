@@ -61,7 +61,8 @@ describe('fetchOpenAIUsageSummary', () => {
 				]),
 				bucket(1, [
 					cost('gpt-realtime-translate', 30, 0.017),
-					cost('gpt-realtime-whisper', 29, 0.0085),
+					cost('gpt-realtime-whisper', 19, 0.0055),
+					cost('gpt-live-transcribe', 10, 0.003),
 					cost('gpt-5', 999, 9.99)
 				])
 			]);

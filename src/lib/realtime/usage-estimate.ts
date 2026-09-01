@@ -1,7 +1,8 @@
 import type { CaptureRun } from '../session/types';
+import { DEFAULT_REALTIME_TRANSCRIPTION_MODEL } from './types';
 
 export const REALTIME_TRANSLATION_MODEL = 'gpt-realtime-translate';
-export const REALTIME_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
+export const REALTIME_TRANSCRIPTION_MODEL = DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
 
 export const REALTIME_TRANSLATION_PRICING = Object.freeze({
 	components: Object.freeze([

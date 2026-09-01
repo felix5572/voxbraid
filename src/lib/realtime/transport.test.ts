@@ -7,20 +7,43 @@ import {
 
 describe('fetchTranslationToken', () => {
 	it('validates the complete token response', async () => {
-		const fetcher = vi.fn(
-			async () =>
-				new Response(
-					JSON.stringify({
-						clientSecret: 'test-client-secret',
-						expiresAt: 2_000_000_000
-					}),
-					{ status: 200, headers: { 'Content-Type': 'application/json' } }
-				)
-		);
+		let requestInit: RequestInit | undefined;
+		const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			requestInit = init;
+			return new Response(
+				JSON.stringify({
+					clientSecret: 'test-client-secret',
+					expiresAt: 2_000_000_000
+				}),
+				{ status: 200, headers: { 'Content-Type': 'application/json' } }
+			);
+		});
 
 		await expect(fetchTranslationToken('zh', fetcher)).resolves.toEqual({
 			clientSecret: 'test-client-secret',
 			expiresAt: 2_000_000_000
+		});
+		expect(JSON.parse(String(requestInit?.body))).toEqual({
+			targetLanguage: 'zh',
+			transcriptionModel: 'gpt-live-transcribe'
+		});
+	});
+
+	it('requests the selected source transcription model', async () => {
+		let requestInit: RequestInit | undefined;
+		const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+			requestInit = init;
+			return new Response(
+				JSON.stringify({ clientSecret: 'test-client-secret', expiresAt: 2_000_000_000 }),
+				{ status: 200, headers: { 'Content-Type': 'application/json' } }
+			);
+		});
+
+		await fetchTranslationToken('zh', fetcher, undefined, 'gpt-live-transcribe');
+
+		expect(JSON.parse(String(requestInit?.body))).toEqual({
+			targetLanguage: 'zh',
+			transcriptionModel: 'gpt-live-transcribe'
 		});
 	});
 
