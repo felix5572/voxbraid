@@ -2,7 +2,12 @@
 	import { onMount } from 'svelte';
 	import { CheckpointWriter } from '$lib/persistence/checkpoint-writer';
 	import type { LocalSessionRepository } from '$lib/persistence/local-session-repository';
-	import { RealtimeTranslationClient, realtimeErrorMessage } from '$lib/realtime/client';
+	import {
+		RealtimeTranslationClient,
+		realtimeErrorMessage,
+		type RealtimeTranslationClientOptions,
+		type TranslationClient
+	} from '$lib/realtime/client';
 	import { ScreenWakeLock } from '$lib/screen-wake-lock';
 	import {
 		activeCaptureRun,
@@ -80,7 +85,8 @@
 	let error = $state('');
 	let persistencePhase = $state<PersistencePhase>('restoring');
 	let persistenceError = $state('');
-	let client: RealtimeTranslationClient | null = null;
+	let client: TranslationClient | null = null;
+	let clientReady = $state(false);
 	let repository: LocalSessionRepository | null = null;
 	let checkpointWriter: CheckpointWriter<CheckpointSnapshot> | null = null;
 	let AudioTestPanel = $state<typeof import('$lib/testing/AudioTestPanel.svelte').default | null>(
@@ -135,7 +141,10 @@
 		if (!session || !checkpointWriter) return;
 		const run = currentCaptureRun(session);
 		if (!run) return;
-		checkpointWriter.markDirty({ thread: session.thread, run });
+		checkpointWriter.markDirty({
+			thread: $state.snapshot(session.thread),
+			run: $state.snapshot(run)
+		});
 	}
 
 	async function flushCheckpoint(): Promise<boolean> {
@@ -319,64 +328,75 @@
 					error = '录音回放测试工具加载失败。';
 				});
 		}
-		client = new RealtimeTranslationClient(
-			{
-				onStatus: (nextStatus) => {
-					const at = nowIso();
-					if (import.meta.env.DEV) {
-						activeAudioTest?.statusChanges.push({ status: nextStatus, at });
-					}
-					status = nextStatus;
-					if (session && nextStatus === 'connected') {
-						session = markActiveRunConnected(session, at);
-						markCheckpointDirty();
-						void flushCheckpoint();
-					}
-					if (session && nextStatus === 'stopping') {
-						session = markActiveRunStopping(session);
-						markCheckpointDirty();
-					}
-					if (nextStatus === 'connected') {
-						if (import.meta.env.DEV) {
-							if (activeAudioTest) activeAudioTest.mediaStartedAt ??= at;
-							audioFileSource?.play();
-						}
-						void wakeLock.acquire();
-					}
-					if (nextStatus === 'stopping' || nextStatus === 'idle' || nextStatus === 'failed') {
-						void wakeLock.release();
-					}
-				},
-				onEvent: (event) => {
-					recordTranscriptTiming(event);
-					if (!session) return;
-
-					const previousDeltasAfterClose = session.diagnostics.deltasAfterClose;
-					session = appendRealtimeTranscriptEvent(session, event, nowIso());
+		const realtimeOptions: RealtimeTranslationClientOptions = {
+			onStatus: (nextStatus) => {
+				const at = nowIso();
+				if (import.meta.env.DEV) {
+					activeAudioTest?.statusChanges.push({ status: nextStatus, at });
+				}
+				status = nextStatus;
+				if (session && nextStatus === 'connected') {
+					session = markActiveRunConnected(session, at);
 					markCheckpointDirty();
-					followTranscriptTails();
-					if (
-						import.meta.env.DEV &&
-						session.diagnostics.deltasAfterClose > previousDeltasAfterClose
-					) {
-						console.warn('[transcript-facts] received a transcript delta after run close');
-					}
-				},
-				onError: (message) => {
-					if (import.meta.env.DEV) activeAudioTest?.errors.push(message);
-					error = message;
-				},
-				onConnectionFailure: (message) => {
+					void flushCheckpoint();
+				}
+				if (session && nextStatus === 'stopping') {
+					session = markActiveRunStopping(session);
+					markCheckpointDirty();
+				}
+				if (nextStatus === 'connected') {
 					if (import.meta.env.DEV) {
-						activeAudioTest?.errors.push(message);
-						audioFileSource?.stop();
+						if (activeAudioTest) activeAudioTest.mediaStartedAt ??= at;
+						audioFileSource?.play();
 					}
-					error = message;
-					endFailedRun(message);
-					if (import.meta.env.DEV) finishAudioTest('connection-failed');
+					void wakeLock.acquire();
+				}
+				if (nextStatus === 'stopping' || nextStatus === 'idle' || nextStatus === 'failed') {
+					void wakeLock.release();
 				}
 			},
-			{
+			onEvent: (event) => {
+				recordTranscriptTiming(event);
+				if (!session) return;
+
+				const previousDeltasAfterClose = session.diagnostics.deltasAfterClose;
+				session = appendRealtimeTranscriptEvent(session, event, nowIso());
+				markCheckpointDirty();
+				followTranscriptTails();
+				if (
+					import.meta.env.DEV &&
+					session.diagnostics.deltasAfterClose > previousDeltasAfterClose
+				) {
+					console.warn('[transcript-facts] received a transcript delta after run close');
+				}
+			},
+			onError: (message) => {
+				if (import.meta.env.DEV) activeAudioTest?.errors.push(message);
+				error = message;
+			},
+			onConnectionFailure: (message) => {
+				if (import.meta.env.DEV) {
+					activeAudioTest?.errors.push(message);
+					audioFileSource?.stop();
+				}
+				error = message;
+				endFailedRun(message);
+				if (import.meta.env.DEV) finishAudioTest('connection-failed');
+			}
+		};
+		if (import.meta.env.DEV && search.get('browser-test') === '1') {
+			void import('$lib/testing/browser-test-client')
+				.then(({ BrowserTestRealtimeClient }) => {
+					if (disposed) return;
+					client = new BrowserTestRealtimeClient(realtimeOptions);
+					clientReady = true;
+				})
+				.catch((testClientError: unknown) => {
+					console.error('[browser-test] client failed to load', testClientError);
+					error = '浏览器测试客户端加载失败。';
+				});
+		} else {
+			client = new RealtimeTranslationClient(realtimeOptions, {
 				getUserMedia: async (constraints) => {
 					if (!import.meta.env.DEV || !audioTestEnabled) {
 						return navigator.mediaDevices.getUserMedia(constraints);
@@ -392,59 +412,63 @@
 					test.fileDurationMs = playback.durationMs;
 					return playback.stream;
 				}
-			}
-		);
-
-		const restorePromise = Promise.all([
-			import('$lib/persistence/local-session-repository'),
-			import('$lib/persistence/local-session-database')
-		]).then(async ([{ LocalSessionRepository }, { LOCAL_CHECKPOINT_INTERVAL_MS }]) => {
-			const localRepository = new LocalSessionRepository();
-			if (disposed || !restoreAllowed) {
-				localRepository.close();
-				return;
-			}
-
-			repository = localRepository;
-			checkpointWriter = new CheckpointWriter(async (snapshot) => {
-				await localRepository.saveCheckpoint({ ...snapshot, checkpointedAt: nowIso() });
 			});
+			clientReady = true;
+		}
 
-			const [latestThread] = await localRepository.listThreads();
-			if (disposed || !restoreAllowed) {
-				localRepository.close();
-				return;
-			}
-			if (latestThread) {
-				await localRepository.repairAbandonedRuns(latestThread.id, nowIso());
-				if (disposed || !restoreAllowed) {
-					localRepository.close();
-					return;
-				}
-				const stored = await localRepository.loadThread(latestThread.id);
-				if (stored && !disposed && restoreAllowed) {
-					session = {
-						thread: stored.thread,
-						runs: stored.runs,
-						activeRunId: null,
-						diagnostics: { deltasAfterClose: 0 }
-					};
-					const restoredLanguage =
-						stored.runs.at(-1)?.targetLanguage ?? stored.thread.defaultTargetLanguage;
-					if (isTargetLanguage(restoredLanguage)) targetLanguage = restoredLanguage;
-				}
-			}
+		const restorePromise =
+			import.meta.env.DEV && search.get('storage-test') === 'hang'
+				? new Promise<void>(() => undefined)
+				: Promise.all([
+						import('$lib/persistence/local-session-repository'),
+						import('$lib/persistence/local-session-database')
+					]).then(async ([{ LocalSessionRepository }, { LOCAL_CHECKPOINT_INTERVAL_MS }]) => {
+						const localRepository = new LocalSessionRepository();
+						if (disposed || !restoreAllowed) {
+							localRepository.close();
+							return;
+						}
 
-			if (disposed || !restoreAllowed) {
-				localRepository.close();
-				return;
-			}
-			persistencePhase = 'ready';
-			checkpointTimer = window.setInterval(
-				() => void flushCheckpoint(),
-				LOCAL_CHECKPOINT_INTERVAL_MS
-			);
-		});
+						repository = localRepository;
+						checkpointWriter = new CheckpointWriter(async (snapshot) => {
+							await localRepository.saveCheckpoint({ ...snapshot, checkpointedAt: nowIso() });
+						});
+
+						const [latestThread] = await localRepository.listThreads();
+						if (disposed || !restoreAllowed) {
+							localRepository.close();
+							return;
+						}
+						if (latestThread) {
+							await localRepository.repairAbandonedRuns(latestThread.id, nowIso());
+							if (disposed || !restoreAllowed) {
+								localRepository.close();
+								return;
+							}
+							const stored = await localRepository.loadThread(latestThread.id);
+							if (stored && !disposed && restoreAllowed) {
+								session = {
+									thread: stored.thread,
+									runs: stored.runs,
+									activeRunId: null,
+									diagnostics: { deltasAfterClose: 0 }
+								};
+								const restoredLanguage =
+									stored.runs.at(-1)?.targetLanguage ?? stored.thread.defaultTargetLanguage;
+								if (isTargetLanguage(restoredLanguage)) targetLanguage = restoredLanguage;
+							}
+						}
+
+						if (disposed || !restoreAllowed) {
+							localRepository.close();
+							return;
+						}
+						persistencePhase = 'ready';
+						checkpointTimer = window.setInterval(
+							() => void flushCheckpoint(),
+							LOCAL_CHECKPOINT_INTERVAL_MS
+						);
+					});
 		const restoreDeadline = new Promise<never>((_, reject) => {
 			restoreTimer = window.setTimeout(() => {
 				restoreAllowed = false;
@@ -643,7 +667,8 @@
 				<button
 					class="start"
 					onclick={start}
-					disabled={persistencePhase === 'restoring' ||
+					disabled={!clientReady ||
+						persistencePhase === 'restoring' ||
 						status === 'stopping' ||
 						(import.meta.env.DEV && audioTestEnabled && !audioTestFile)}
 				>

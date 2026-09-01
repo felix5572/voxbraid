@@ -20,6 +20,12 @@ export interface RealtimeTranslationClientOptions {
 	onConnectionFailure: (message: string) => void;
 }
 
+export interface TranslationClient {
+	readonly currentStatus: ConnectionStatus;
+	start(targetLanguage: TargetLanguage): Promise<void>;
+	stop(): Promise<void>;
+}
+
 export interface RealtimeTranslationClientDependencies {
 	getUserMedia: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
 	createPeerConnection: () => RTCPeerConnection;
@@ -76,7 +82,7 @@ function readRealtimeErrorMessage(event: TranslationServerEvent): string | null 
 	return event.error.message;
 }
 
-export class RealtimeTranslationClient {
+export class RealtimeTranslationClient implements TranslationClient {
 	private status: ConnectionStatus = 'idle';
 	private peerConnection: RTCPeerConnection | null = null;
 	private dataChannel: RTCDataChannel | null = null;

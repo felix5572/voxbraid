@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -119,8 +120,11 @@ try {
 		);
 	}
 	const page = await browser.newPage();
+	const browserErrors = [];
 	page.on('console', (message) => {
-		if (message.type() === 'error') console.error('[browser]', message.text());
+		if (message.type() !== 'error') return;
+		browserErrors.push(message.text());
+		console.error('[browser]', message.text());
 	});
 	await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'networkidle' });
 
@@ -192,6 +196,7 @@ try {
 	if (!result.statuses.includes('connected')) throw new Error('WebRTC 没有进入 connected。');
 	if (!result.source.trim()) throw new Error('没有收到源语言字幕。');
 	if (!result.translation.trim()) throw new Error('没有收到目标语言字幕。');
+	assert.deepEqual(browserErrors, []);
 
 	const fixtureExpectation = fixtureExpectations[basename(audioPath)];
 	const sourceKeywords =
