@@ -1,5 +1,6 @@
 import { REALTIME_TRANSLATION_MODEL } from '../realtime/usage-estimate';
 import { REALTIME_TRANSCRIPTION_MODELS } from '../realtime/types';
+import { SIDECAR_FAST_MODEL, SIDECAR_INTERACTIVE_MODEL } from './sidecar-tasks';
 
 const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organization/costs';
 const REALTIME_TRANSCRIPTION_LINE_ITEMS = REALTIME_TRANSCRIPTION_MODELS.map((model) => model.code);
@@ -7,6 +8,11 @@ const REALTIME_LINE_ITEMS = new Set([
 	REALTIME_TRANSLATION_MODEL,
 	...REALTIME_TRANSCRIPTION_LINE_ITEMS
 ]);
+const SIDECAR_LINE_ITEM_MODELS = [
+	SIDECAR_FAST_MODEL,
+	SIDECAR_INTERACTIVE_MODEL,
+	'gpt-5.6-terra'
+] as const;
 const DAY_SECONDS = 24 * 60 * 60;
 const WINDOW_DAYS = [1, 7, 30] as const;
 
@@ -51,7 +57,8 @@ interface CostTotals {
 interface DailyCostBucket {
 	startTime: number;
 	endTime: number;
-	totals: Map<string, CostTotals>;
+	realtimeTotals: Map<string, CostTotals>;
+	sidecarUsd: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -70,8 +77,14 @@ function readErrorField(body: unknown, field: 'code' | 'message'): string | null
 	return typeof value === 'string' ? value : null;
 }
 
-function emptyTotals(): Map<string, CostTotals> {
+function emptyRealtimeTotals(): Map<string, CostTotals> {
 	return new Map([...REALTIME_LINE_ITEMS].map((lineItem) => [lineItem, { seconds: 0, usd: 0 }]));
+}
+
+function isSidecarLineItem(lineItem: string): boolean {
+	return SIDECAR_LINE_ITEM_MODELS.some(
+		(model) => lineItem === model || lineItem.startsWith(`${model},`)
+	);
 }
 
 function addBuckets(body: unknown, buckets: DailyCostBucket[]): void {
@@ -96,11 +109,13 @@ function addBuckets(body: unknown, buckets: DailyCostBucket[]): void {
 			);
 		}
 
-		const totals = emptyTotals();
+		const realtimeTotals = emptyRealtimeTotals();
+		let sidecarUsd = 0;
 		for (const result of bucket.results) {
 			if (!isRecord(result) || typeof result.line_item !== 'string') continue;
-			const total = totals.get(result.line_item);
-			if (!total) continue;
+			const realtimeTotal = realtimeTotals.get(result.line_item);
+			const sidecarLineItem = isSidecarLineItem(result.line_item);
+			if (!realtimeTotal && !sidecarLineItem) continue;
 
 			const quantity = finiteNumber(result.quantity);
 			const amount = isRecord(result.amount) ? finiteNumber(result.amount.value) : null;
@@ -114,10 +129,14 @@ function addBuckets(body: unknown, buckets: DailyCostBucket[]): void {
 				);
 			}
 
-			if (result.quantity_unit === 'duration_seconds') total.seconds += quantity;
-			total.usd += amount;
+			if (realtimeTotal) {
+				if (result.quantity_unit === 'duration_seconds') realtimeTotal.seconds += quantity;
+				realtimeTotal.usd += amount;
+			} else {
+				sidecarUsd += amount;
+			}
 		}
-		buckets.push({ startTime, endTime, totals });
+		buckets.push({ startTime, endTime, realtimeTotals, sidecarUsd });
 	}
 }
 
@@ -127,15 +146,17 @@ function summarizeWindow(
 	days: OpenAIUsageWindow['days']
 ): OpenAIUsageWindow {
 	const cutoff = endTimeSeconds - days * DAY_SECONDS;
-	const totals = emptyTotals();
+	const totals = emptyRealtimeTotals();
+	let sidecarUsd = 0;
 	for (const bucket of buckets) {
 		if (bucket.endTime <= cutoff) continue;
-		for (const [lineItem, bucketTotal] of bucket.totals) {
+		for (const [lineItem, bucketTotal] of bucket.realtimeTotals) {
 			const total = totals.get(lineItem);
 			if (!total) continue;
 			total.seconds += bucketTotal.seconds;
 			total.usd += bucketTotal.usd;
 		}
+		sidecarUsd += bucket.sidecarUsd;
 	}
 
 	const translation = totals.get(REALTIME_TRANSLATION_MODEL);
@@ -151,7 +172,7 @@ function summarizeWindow(
 	return {
 		days,
 		durationSeconds: Math.round(Math.max(translation.seconds, transcription.seconds)),
-		costUsd: Number((translation.usd + transcription.usd).toFixed(10))
+		costUsd: Number((translation.usd + transcription.usd + sidecarUsd).toFixed(10))
 	};
 }
 

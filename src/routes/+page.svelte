@@ -162,7 +162,7 @@
 	let durationLimitNotice = $state('');
 	let client: TranslationClient | null = null;
 	let clientReady = $state(false);
-	let repository: LocalSessionRepository | null = null;
+	let repository = $state.raw<LocalSessionRepository | null>(null);
 	let checkpointWriter: CheckpointWriter<CheckpointSnapshot> | null = null;
 	let AudioTestPanel = $state<typeof import('$lib/testing/AudioTestPanel.svelte').default | null>(
 		null
@@ -1335,6 +1335,7 @@
 
 		<SidecarPanel
 			{session}
+			{repository}
 			outputLanguage={`${languageLabel(targetLanguage)} (${targetLanguage})`}
 			disabled={persistencePhase === 'restoring' || sessionSwitching}
 		/>

@@ -25,6 +25,10 @@ function request(overrides: Partial<SidecarInvokeRequest> = {}): Request {
 		},
 		...overrides
 	};
+	return rawRequest(body);
+}
+
+function rawRequest(body: unknown): Request {
 	return new Request('http://localhost/api/sidecar/invoke', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -51,10 +55,10 @@ afterEach(() => vi.restoreAllMocks());
 describe('invokeSidecar', () => {
 	it('rejects invalid requests before calling OpenAI', async () => {
 		const fetcher = vi.fn();
+		const invalidBody = (await request().json()) as Record<string, unknown>;
+		invalidBody.intent = { kind: 'retranslate', trigger: 'periodic', targetLanguage: 'zh' };
 		const response = await invokeSidecar({
-			request: request({
-				intent: { kind: 'summarize', trigger: 'periodic', outputLanguage: 'zh' }
-			}),
+			request: rawRequest(invalidBody),
 			fetcher,
 			apiKey: API_KEY,
 			now: () => NOW
@@ -126,7 +130,7 @@ describe('invokeSidecar', () => {
 				? jsonResponse({ input_tokens: 42 })
 				: jsonResponse({
 						id: 'resp-1',
-						model: 'gpt-5.6-terra',
+						model: 'gpt-5.6-luna',
 						status: 'completed',
 						output_text: '总结结果',
 						usage: {
@@ -147,7 +151,7 @@ describe('invokeSidecar', () => {
 
 		expect(response.status).toBe(200);
 		expect(requestBodies[0]).toMatchObject({
-			model: 'gpt-5.6-terra',
+			model: 'gpt-5.6-luna',
 			truncation: 'disabled'
 		});
 		expect(requestBodies[1]).toMatchObject({
@@ -161,7 +165,7 @@ describe('invokeSidecar', () => {
 			status: 'completed',
 			clientRequestId: 'request-1',
 			responseId: 'resp-1',
-			model: 'gpt-5.6-terra',
+			model: 'gpt-5.6-luna',
 			outputText: '总结结果',
 			usageStatus: 'recorded',
 			usage: {
@@ -182,7 +186,7 @@ describe('invokeSidecar', () => {
 			.mockResolvedValueOnce(
 				jsonResponse({
 					id: 'resp-incomplete',
-					model: 'gpt-5.6-terra',
+					model: 'gpt-5.6-luna',
 					status: 'incomplete',
 					output: [
 						{

@@ -1,4 +1,5 @@
 import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
+import type { StoredAutoSummary } from '../sidecar/auto-summary';
 import {
 	fromRunRecord,
 	fromThreadRecord,
@@ -128,6 +129,16 @@ export class LocalSessionRepository {
 	async listThreads(): Promise<TranslationThread[]> {
 		const records = await this.database.threads.orderBy('updatedAt').reverse().toArray();
 		return records.map(fromThreadRecord);
+	}
+
+	async loadAutoSummary(threadId: string): Promise<StoredAutoSummary | null> {
+		return (await this.database.autoSummaries.get(threadId)) ?? null;
+	}
+
+	async saveAutoSummary(summary: StoredAutoSummary): Promise<void> {
+		const thread = await this.database.threads.get(summary.threadId);
+		if (!thread) throw new Error(`Thread not found: ${summary.threadId}.`);
+		await this.database.autoSummaries.put(summary);
 	}
 
 	async replaceSegmentRevision(input: ReplaceSegmentRevisionInput): Promise<void> {

@@ -5,7 +5,7 @@
 ## 已确定的方向
 
 - 当前不立即接入 Supabase，也不为每次字段调整积累 Postgres migration。
-- 浏览器本地持久化使用 Dexie 封装 IndexedDB；第一阶段只保存转录主线的 thread、run 和 segment。
+- 浏览器本地持久化使用 Dexie 封装 IndexedDB；转录主线保存 thread、run 和 segment，旁路第二批额外保存每个 thread 最新一版可重算自动总结。
 - GPT branch 和 message 等 Supabase 可用后再实现，由 Node 作为权威写入者；浏览器不能成为模型回答的唯一持有者。
 - 不建立 `context_snapshots` 或字幕全文副本。用户消息只保留轻量的上下文范围，精确模型输入不作为审计对象。
 - 自用 MVP 不建立 `pricing_snapshots`。保存模型和 token 用量事实，费用仅按当前配置近似展示；正式对外计费前再设计历史价格与对账。
@@ -41,15 +41,18 @@
 
 ## 阶段 B：可重建的 Dexie 本地库（README 第 5 步）
 
-第一版 Dexie 只建立三个 store：
+转录第一版建立三个事实与投影 store；自动总结第二批增加一个可重算投影 store：
 
-| Store      | 内容                                                        |
-| ---------- | ----------------------------------------------------------- |
-| `threads`  | 产品会话、默认目标语言、标题和归档状态                      |
-| `runs`     | 收音生命周期、完整双流快照、恢复信息和当前 segment revision |
-| `segments` | 当前及必要历史 revision 的可读双语段落                      |
+| Store           | 内容                                                        |
+| --------------- | ----------------------------------------------------------- |
+| `threads`       | 产品会话、默认目标语言、标题和归档状态                      |
+| `runs`          | 收音生命周期、完整双流快照、恢复信息和当前 segment revision |
+| `segments`      | 当前及必要历史 revision 的可读双语段落                      |
+| `autoSummaries` | 每个 thread 最新一版完整重算总结、捕获长度、模型和 usage    |
 
 assistant branch 和 message 不进入这一阶段。待上传标记可以先作为上述 record 的本地元数据存在；真正设计同步队列时再决定是否增加独立 outbox。
+
+`autoSummaries` 通过 Dexie version 2 正式向前升级，不能递增生产数据库名。它不保存总结历史，也不进入当前 thread JSON 导出：原始双流仍是可重新生成该投影的完整事实来源。
 
 ### Schema epoch
 
@@ -102,7 +105,7 @@ interface SessionRepository {
 - 页面侧 checkpoint 协调器使用 `clean / dirty / saving / saving-dirty` 四态，而不是单个 dirty 布尔值。保存期间出现的新 delta 必须进入 `saving-dirty`，旧快照完成后仍保持待保存；写入失败回到 `dirty` 并保留原始错误供日志和重试，不另设会阻断实时翻译的失败终态。
 - `SessionRepository` 的输入必须是可结构化克隆的普通领域对象。Svelte `$state` 的深层代理不能直接交给 IndexedDB；页面在 Repository 边界必须先取得普通对象快照。该约束需要由真实浏览器持久化测试覆盖，`fake-indexeddb` 上使用普通测试对象无法暴露代理克隆错误；以后每增加一条 Repository 页面写入路径，必须同步增加一个真实浏览器场景并保持控制台零错误断言。
 - 页面启动时先修复最近 thread 中遗留的活动 run，再恢复完整双流；恢复完成前暂不允许选择语言或开始新 run，避免新状态被异步恢复覆盖。恢复设有有限等待时间，IndexedDB 拒绝或持续阻塞时都明确降级，但实时翻译可继续以内存模式运行。
-- 已有 thread 停止收音后可以显式新建会话；旧 thread 保留在本地库中，后续 run 不再永久追加到同一个产品会话。页面使用轻量 thread 列表切换会话，只有选中时才加载对应 runs 和完整字幕；活动收音期间禁止切换。会话首次获得足够的源文时本地生成稳定标题；搜索、手动重命名、删除、归档和历史阅读投影留到会话管理后续阶段。
+- 已有 thread 停止收音后可以显式新建会话；旧 thread 保留在本地库中，后续 run 不再永久追加到同一个产品会话。页面使用轻量 thread 列表切换会话，只有选中时才加载对应 runs 和完整字幕；活动收音期间禁止切换。会话首次获得足够的源文时本地生成稳定标题；搜索、手动重命名、删除、归档和历史阅读投影留到会话管理后续阶段。以后实现 thread 删除时，必须在同一事务中删除该 thread 的 runs、segments 和 `autoSummaries` 投影，不能遗留总结孤儿记录。
 - 当前 checkpoint 会重写 run 内两条完整流，累计写入量随长会话呈二次增长。如果 10 秒的崩溃丢失窗口以后不可接受，正式解法是增加追加式 `stream_chunks`，让每次只保存新增文本；不能单纯缩短完整快照间隔来换取更高写入放大。MVP 暂不增加该 store。
 
 不要先设计 `saveThread`、`saveRun`、`saveSegment` 一类通用接口再由页面拼事务；这会让关键原子性依赖每个调用方都正确组合。

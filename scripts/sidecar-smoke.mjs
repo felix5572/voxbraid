@@ -52,7 +52,7 @@ try {
 		},
 		{
 			kind: 'summarize',
-			expectedModel: 'gpt-5.6-terra',
+			expectedModel: 'gpt-5.6-luna',
 			intent: { kind: 'summarize', trigger: 'manual', outputLanguage: '中文 (zh)' }
 		},
 		{

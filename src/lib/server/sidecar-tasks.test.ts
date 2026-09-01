@@ -31,7 +31,7 @@ describe('sidecar task preparation', () => {
 	it('keeps both transcript channels for summaries and questions', () => {
 		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(request('summarize')));
 
-		expect(prepared.model).toBe('gpt-5.6-terra');
+		expect(prepared.model).toBe('gpt-5.6-luna');
 		expect(prepared.inputText).toContain('The original source.');
 		expect(prepared.inputText).toContain('已有的实时译文。');
 	});
@@ -50,11 +50,21 @@ describe('sidecar task preparation', () => {
 		expect(prepared.model).toBe('gpt-5.6-sol');
 	});
 
-	it('rejects periodic triggers in the first version', () => {
+	it('accepts periodic summaries but keeps questions and retranslations manual', () => {
 		const value = request('summarize');
 		value.intent.trigger = 'periodic';
+		expect(parseSidecarInvokeRequest(value).intent).toMatchObject({
+			kind: 'summarize',
+			trigger: 'periodic'
+		});
 
-		expect(() => parseSidecarInvokeRequest(value)).toThrow('手动触发');
+		const question = request('ask');
+		question.intent.trigger = 'periodic';
+		expect(() => parseSidecarInvokeRequest(question)).toThrow('手动触发');
+
+		const retranslation = request('retranslate');
+		retranslation.intent.trigger = 'periodic';
+		expect(() => parseSidecarInvokeRequest(retranslation)).toThrow('手动触发');
 	});
 
 	it('rejects non-increasing run sequences', () => {

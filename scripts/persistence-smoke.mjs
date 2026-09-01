@@ -58,6 +58,16 @@ async function waitForRecord(page, storeName, predicate, description, timeoutMs 
 	throw new Error(`等待 ${description} 超时。`);
 }
 
+async function waitForSidecarRequest(page, requests, predicate, description, timeoutMs = 4_000) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const request = requests.find(predicate);
+		if (request) return request;
+		await page.waitForTimeout(50);
+	}
+	throw new Error(`等待 ${description} 超时。`);
+}
+
 async function waitForReady(page) {
 	const start = page.getByRole('button', { name: '开始翻译' });
 	await start.waitFor({ state: 'visible' });
@@ -157,7 +167,7 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 					body.intent.kind === 'ask'
 						? 'gpt-5.6-sol'
 						: body.intent.kind === 'summarize'
-							? 'gpt-5.6-terra'
+							? 'gpt-5.6-luna'
 							: 'gpt-5.6-luna',
 				outputText: outputs[body.intent.kind],
 				usageStatus: 'recorded',
@@ -294,8 +304,7 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await mainText(page, firstSource).waitFor();
 		await mainText(page, secondSource).waitFor();
 
-		await page.getByLabel('旁路上下文范围', { exact: true }).selectOption('current-thread');
-		const summarize = page.getByRole('button', { name: '总结', exact: true });
+		const summarize = page.getByRole('button', { name: '立即更新', exact: true });
 		await summarize.click();
 		assert.equal(await summarize.isDisabled(), true);
 		await page.getByText('自动摘要结果', { exact: true }).waitFor();
@@ -304,14 +313,41 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		assert.equal(sidecarRequests[0].context.scope, 'current-thread');
 		assert.equal(sidecarRequests[0].context.runs.length, 2);
 		assert.equal(sidecarRequests[0].context.runs[0].sourceText, firstSource);
-		await page.getByRole('button', { name: '复制结果', exact: true }).click();
+		await waitForRecord(
+			page,
+			'autoSummaries',
+			(record) => record.threadId === firstRun.threadId && record.text === '自动摘要结果',
+			'自动总结保存'
+		);
+		await page.getByRole('button', { name: '复制', exact: true }).first().click();
 		await page.getByText('已复制', { exact: true }).waitFor();
+		await page.reload({ waitUntil: 'networkidle' });
+		await waitForReady(page);
+		await page.getByText('自动摘要结果', { exact: true }).waitFor();
 
 		await page.getByLabel('字幕问题', { exact: true }).fill('What was captured?');
 		await page.getByRole('button', { name: '提问', exact: true }).click();
 		await page.getByText('自动问答结果', { exact: true }).waitFor();
 		assert.equal(sidecarRequests.length, 2);
 		assert.equal(sidecarRequests[1].intent.question, 'What was captured?');
+
+		await startCapture(page);
+		await emitPair(page, 'x'.repeat(3_000), '自動要約'.repeat(300));
+		await stopCapture(page);
+		const automaticSummary = await waitForSidecarRequest(
+			page,
+			sidecarRequests,
+			(request) => request.intent.kind === 'summarize' && request.intent.trigger === 'periodic',
+			'达到字符阈值后的自动总结'
+		);
+		assert.equal(automaticSummary.context.scope, 'current-thread');
+		assert.equal(automaticSummary.context.runs.length, 3);
+		await waitForRecord(
+			page,
+			'autoSummaries',
+			(record) => record.threadId === firstRun.threadId && record.revision === 2,
+			'自动重算总结替换'
+		);
 
 		const threadsBeforeNew = await readStore(page, 'threads');
 		assert.equal(threadsBeforeNew.length, 1);

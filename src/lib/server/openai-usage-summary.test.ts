@@ -43,6 +43,15 @@ function cost(lineItem: string, seconds: number, usd: number): object {
 	};
 }
 
+function tokenCost(lineItem: string, tokens: number, usd: number): object {
+	return {
+		line_item: lineItem,
+		quantity: tokens,
+		quantity_unit: 'tokens',
+		amount: { value: usd, currency: 'usd' }
+	};
+}
+
 describe('fetchOpenAIUsageSummary', () => {
 	it('derives one, seven, and thirty-day windows from one daily-bucket query', async () => {
 		let requestedUrl: RequestInfo | URL | undefined;
@@ -63,6 +72,10 @@ describe('fetchOpenAIUsageSummary', () => {
 					cost('gpt-realtime-translate', 30, 0.017),
 					cost('gpt-realtime-whisper', 19, 0.0055),
 					cost('gpt-live-transcribe', 10, 0.003),
+					tokenCost('gpt-5.6-luna, input_tokens', 1_000, 0.001),
+					tokenCost('gpt-5.6-luna, output_tokens', 200, 0.002),
+					tokenCost('gpt-5.6-sol, input_tokens', 1_000, 0.003),
+					tokenCost('gpt-5.6-terra, output_tokens', 200, 0.004),
 					cost('gpt-5', 999, 9.99)
 				])
 			]);
@@ -74,9 +87,9 @@ describe('fetchOpenAIUsageSummary', () => {
 			periodStart: '2026-08-16T12:34:56.000Z',
 			periodEnd: NOW.toISOString(),
 			windows: [
-				{ days: 1, durationSeconds: 30, costUsd: 0.0255 },
-				{ days: 7, durationSeconds: 50, costUsd: 0.0425 },
-				{ days: 30, durationSeconds: 60, costUsd: 0.051 }
+				{ days: 1, durationSeconds: 30, costUsd: 0.0355 },
+				{ days: 7, durationSeconds: 50, costUsd: 0.0525 },
+				{ days: 30, durationSeconds: 60, costUsd: 0.061 }
 			],
 			updatedAt: NOW.toISOString()
 		});

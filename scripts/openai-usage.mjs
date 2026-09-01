@@ -1,5 +1,6 @@
 const ADMIN_ENV_FILE = '.env.admin.local';
-const REALTIME_MODELS = ['gpt-realtime-translate', 'gpt-realtime-whisper'];
+const REALTIME_MODELS = ['gpt-realtime-translate', 'gpt-live-transcribe', 'gpt-realtime-whisper'];
+const SIDECAR_MODELS = ['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra'];
 
 try {
 	process.loadEnvFile(ADMIN_ENV_FILE);
@@ -51,25 +52,45 @@ async function costBuckets() {
 const totals = new Map(
 	REALTIME_MODELS.map((model) => [model, { seconds: 0, usd: 0, units: new Set() }])
 );
+const sidecarTotals = new Map(SIDECAR_MODELS.map((model) => [model, { usd: 0, lineItems: 0 }]));
 for (const bucket of await costBuckets()) {
 	for (const result of bucket.results ?? []) {
 		const total = totals.get(result.line_item);
-		if (!total) continue;
-		total.seconds += Number(result.quantity ?? 0);
-		total.usd += Number(result.amount?.value ?? 0);
-		if (result.quantity_unit) total.units.add(result.quantity_unit);
+		if (total) {
+			if (result.quantity_unit === 'duration_seconds') {
+				total.seconds += Number(result.quantity ?? 0);
+			}
+			total.usd += Number(result.amount?.value ?? 0);
+			if (result.quantity_unit) total.units.add(result.quantity_unit);
+			continue;
+		}
+		const sidecarModel = SIDECAR_MODELS.find(
+			(model) => result.line_item === model || result.line_item?.startsWith(`${model},`)
+		);
+		if (!sidecarModel) continue;
+		const sidecarTotal = sidecarTotals.get(sidecarModel);
+		sidecarTotal.usd += Number(result.amount?.value ?? 0);
+		sidecarTotal.lineItems += 1;
 	}
 }
 
-const [translation, transcription] = REALTIME_MODELS.map((model) => totals.get(model));
-const totalUsd = translation.usd + transcription.usd;
-const audioSeconds = Math.max(translation.seconds, transcription.seconds);
+const translation = totals.get('gpt-realtime-translate');
+const transcriptionSeconds =
+	totals.get('gpt-live-transcribe').seconds + totals.get('gpt-realtime-whisper').seconds;
+const realtimeUsd = [...totals.values()].reduce((sum, total) => sum + total.usd, 0);
+const sidecarUsd = [...sidecarTotals.values()].reduce((sum, total) => sum + total.usd, 0);
+const totalUsd = realtimeUsd + sidecarUsd;
+const audioSeconds = Math.max(translation.seconds, transcriptionSeconds);
 
-console.log(`OpenAI Realtime 用量（${startDate} 至今）`);
+console.log(`VoxBraid OpenAI 用量（${startDate} 至今）`);
 for (const model of REALTIME_MODELS) {
 	const total = totals.get(model);
 	const unit = total.units.size > 0 ? ` ${[...total.units].join(', ')}` : '';
 	console.log(`- ${model}: ${total.seconds} 秒${unit}，$${total.usd.toFixed(5)}`);
+}
+for (const model of SIDECAR_MODELS) {
+	const total = sidecarTotals.get(model);
+	console.log(`- ${model}: $${total.usd.toFixed(5)}（${total.lineItems} 条费用明细）`);
 }
 console.log(`- 实际音频：${audioSeconds} 秒（两模型处理同一段音频，不重复相加）`);
 console.log(`- 官方总费用：$${totalUsd.toFixed(5)}`);

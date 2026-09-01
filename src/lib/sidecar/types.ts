@@ -16,7 +16,7 @@ export type SidecarIntent =
 	  }
 	| {
 			kind: 'retranslate';
-			trigger: SidecarTrigger;
+			trigger: 'manual';
 			targetLanguage: string;
 	  };
 

@@ -1,11 +1,35 @@
 import 'fake-indexeddb/auto';
+import Dexie from 'dexie';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
+import type { StoredAutoSummary } from '../sidecar/auto-summary';
 import { VoxBraidLocalDatabase } from './local-session-database';
 import { LocalSessionRepository } from './local-session-repository';
 
 const START = '2026-09-01T00:00:00.000Z';
 const CHECKPOINT = '2026-09-01T00:00:10.000Z';
+
+function createAutoSummary(overrides: Partial<StoredAutoSummary> = {}): StoredAutoSummary {
+	return {
+		threadId: 'thread-1',
+		revision: 1,
+		text: 'A complete current summary.',
+		capturedAt: '2026-09-01T00:00:09.000Z',
+		sourceCharacters: 120,
+		translationCharacters: 48,
+		model: 'gpt-5.6-luna',
+		usageStatus: 'recorded',
+		usage: {
+			inputTokens: 100,
+			cachedInputTokens: 0,
+			outputTokens: 20,
+			reasoningTokens: 0,
+			totalTokens: 120
+		},
+		updatedAt: CHECKPOINT,
+		...overrides
+	};
+}
 
 function createThread(id = 'thread-1'): TranslationThread {
 	return {
@@ -85,6 +109,29 @@ afterEach(async () => {
 });
 
 describe('LocalSessionRepository', () => {
+	it('upgrades an existing version 1 database without losing transcript records', async () => {
+		const name = `voxbraid-upgrade-test-${crypto.randomUUID()}`;
+		const legacy = new Dexie(name);
+		legacy.version(1).stores({
+			threads: '&id,status,updatedAt',
+			runs: '&id,threadId,status,&[threadId+sequence],[threadId+status]',
+			segments: '&id,runId,[runId+revision],&[runId+revision+sequence]'
+		});
+		const thread = createThread();
+		await legacy.open();
+		await legacy.table('threads').put({ ...thread, checkpointedAt: CHECKPOINT });
+		legacy.close();
+
+		const upgraded = new VoxBraidLocalDatabase(name);
+		try {
+			await upgraded.open();
+			expect(await upgraded.threads.get(thread.id)).toMatchObject(thread);
+			expect(await upgraded.autoSummaries.toArray()).toEqual([]);
+		} finally {
+			await upgraded.delete();
+		}
+	});
+
 	it('saves the thread and full run checkpoint in one domain-shaped load', async () => {
 		const thread = createThread();
 		const run = createRun();
@@ -136,6 +183,32 @@ describe('LocalSessionRepository', () => {
 		const stored = await repository.loadThread(thread.id);
 		expect(stored?.thread.title).toBeNull();
 		expect(stored?.runs.map((run) => run.id)).toEqual(['run-1']);
+	});
+
+	it('stores the latest replaceable automatic summary separately from transcript facts', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({ thread, run: createRun(), checkpointedAt: CHECKPOINT });
+		const first = createAutoSummary();
+		await repository.saveAutoSummary(first);
+		await expect(repository.loadAutoSummary(thread.id)).resolves.toEqual(first);
+
+		const replacement = createAutoSummary({
+			revision: 2,
+			text: 'A newly regenerated complete summary.',
+			sourceCharacters: 240
+		});
+		await repository.saveAutoSummary(replacement);
+		await expect(repository.loadAutoSummary(thread.id)).resolves.toEqual(replacement);
+		await expect(repository.loadThread(thread.id)).resolves.toMatchObject({
+			thread,
+			runs: [{ sourceStream: { text: createRun().sourceStream.text } }]
+		});
+	});
+
+	it('rejects an automatic summary for a missing thread', async () => {
+		await expect(
+			repository.saveAutoSummary(createAutoSummary({ threadId: 'missing-thread' }))
+		).rejects.toThrow('Thread not found');
 	});
 
 	it('atomically switches revisions while preserving older projections', async () => {
