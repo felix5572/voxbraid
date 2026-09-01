@@ -80,7 +80,11 @@ async function waitForReady(page) {
 }
 
 async function createPage(browser, baseUrl, query = '?browser-test=1') {
-	const context = await browser.newContext({ ...(httpCredentials ? { httpCredentials } : {}) });
+	const context = await browser.newContext({
+		...(httpCredentials ? { httpCredentials } : {}),
+		permissions: ['clipboard-read', 'clipboard-write']
+	});
+	const sidecarRequests = [];
 	await context.addInitScript(() => {
 		const stats = { releases: 0, requests: 0 };
 		const storageStats = { persistedChecks: 0, persistRequests: 0 };
@@ -134,12 +138,46 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 			})
 		});
 	});
+	await page.route('**/api/sidecar/invoke', async (route) => {
+		const body = route.request().postDataJSON();
+		sidecarRequests.push(body);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		const outputs = {
+			summarize: '自动摘要结果',
+			retranslate: '自动重译结果',
+			ask: '自动问答结果'
+		};
+		await route.fulfill({
+			contentType: 'application/json',
+			body: JSON.stringify({
+				status: 'completed',
+				clientRequestId: body.clientRequestId,
+				responseId: `response-${sidecarRequests.length}`,
+				model:
+					body.intent.kind === 'ask'
+						? 'gpt-5.6-sol'
+						: body.intent.kind === 'summarize'
+							? 'gpt-5.6-terra'
+							: 'gpt-5.6-luna',
+				outputText: outputs[body.intent.kind],
+				usageStatus: 'recorded',
+				usage: {
+					inputTokens: 120,
+					cachedInputTokens: 0,
+					outputTokens: 20,
+					reasoningTokens: 2,
+					totalTokens: 140
+				},
+				completedAt: '2026-09-01T12:00:00.000Z'
+			})
+		});
+	});
 	const browserErrors = [];
 	page.on('console', (message) => {
 		if (message.type() === 'error') browserErrors.push(message.text());
 	});
 	await page.goto(`${baseUrl}/${query}`, { waitUntil: 'networkidle' });
-	return { browserErrors, context, page };
+	return { browserErrors, context, page, sidecarRequests };
 }
 
 async function emitPair(page, source, translation) {
@@ -180,7 +218,7 @@ function mainText(page, text) {
 }
 
 async function testPauseResumeAndNewThread(browser, baseUrl) {
-	const { browserErrors, context, page } = await createPage(browser, baseUrl);
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
 	try {
 		await waitForReady(page);
 		await page.getByText('字号 22', { exact: true }).click();
@@ -255,6 +293,25 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await waitForReady(page);
 		await mainText(page, firstSource).waitFor();
 		await mainText(page, secondSource).waitFor();
+
+		await page.getByLabel('旁路上下文范围', { exact: true }).selectOption('current-thread');
+		const summarize = page.getByRole('button', { name: '总结', exact: true });
+		await summarize.click();
+		assert.equal(await summarize.isDisabled(), true);
+		await page.getByText('自动摘要结果', { exact: true }).waitFor();
+		assert.equal(sidecarRequests.length, 1);
+		assert.equal(sidecarRequests[0].intent.kind, 'summarize');
+		assert.equal(sidecarRequests[0].context.scope, 'current-thread');
+		assert.equal(sidecarRequests[0].context.runs.length, 2);
+		assert.equal(sidecarRequests[0].context.runs[0].sourceText, firstSource);
+		await page.getByRole('button', { name: '复制结果', exact: true }).click();
+		await page.getByText('已复制', { exact: true }).waitFor();
+
+		await page.getByLabel('字幕问题', { exact: true }).fill('What was captured?');
+		await page.getByRole('button', { name: '提问', exact: true }).click();
+		await page.getByText('自动问答结果', { exact: true }).waitFor();
+		assert.equal(sidecarRequests.length, 2);
+		assert.equal(sidecarRequests[1].intent.question, 'What was captured?');
 
 		const threadsBeforeNew = await readStore(page, 'threads');
 		assert.equal(threadsBeforeNew.length, 1);
@@ -552,7 +609,7 @@ try {
 	await testCaptureRunDurationLimit(browser, baseUrl);
 	await testStorageTimeoutFallback(browser, baseUrl);
 	console.log(
-		'[persistence-smoke] passed: pause/resume, session switching, degrade/recover, checkpoints, reload repair, failure, duration protection, and storage fallback'
+		'[persistence-smoke] passed: pause/resume, session switching, sidecar tasks, degrade/recover, checkpoints, reload repair, failure, duration protection, and storage fallback'
 	);
 } finally {
 	await browser?.close();

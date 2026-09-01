@@ -56,6 +56,7 @@ corepack pnpm dev
 
 ```dotenv
 OPENAI_API_KEY=sk-...
+BODY_SIZE_LIMIT=2M
 VOXBRAID_BASIC_AUTH_USERNAME=your-name
 VOXBRAID_BASIC_AUTH_PASSWORD=use-a-long-random-password
 ```
@@ -80,7 +81,8 @@ VOXBRAID_BASIC_AUTH_PASSWORD=use-a-long-random-password
 
 1. 日常单元测试、事件 fixture 和浏览器持久化验收不连接 OpenAI，用于验证事实 reducer、阅读投影、Run 生命周期、视图裁剪、刷新恢复以及多个会话的新建与切换。
 2. 录音回放测试连接真实 OpenAI：日常只跑数秒到数十秒，偶尔跑一段约 1–3 分钟的完整录音，用于验证 WebRTC、字幕事件和关闭时序。
-3. iPad 真机只在关键功能、较大生命周期改动和阶段性回归时执行，用于验证麦克风收音质量、权限弹窗、锁屏、后台挂起、Wake Lock、页面回收、功耗和真实网络切换等桌面无法可靠模拟的行为。
+3. 旁路 Responses 冒烟测试使用一小段固定公开字幕，验证 input token 计数、预算门和非流式生成端点；它与 Realtime 测试一样默认跳过，只有显式开启才产生费用。
+4. iPad 真机只在关键功能、较大生命周期改动和阶段性回归时执行，用于验证麦克风收音质量、权限弹窗、锁屏、后台挂起、Wake Lock、页面回收、功耗和真实网络切换等桌面无法可靠模拟的行为。
 
 浏览器 API 的测试替身从 Playwright `addInitScript` 注入，不在应用页面中增加运行时门控；这样可以驱动真实的 Wake Lock 和页面生命周期代码，同时保证替身不进入生产包。对无法可靠制造的真实 WebRTC 网络故障采用分层覆盖：客户端单元测试验证 `connection-degraded` 的产生和宽限计时，浏览器测试验证页面对该状态的消费，共享接口和 `ConnectionStatus` 类型负责锁定两层契约。
 
@@ -91,9 +93,10 @@ corepack pnpm exec playwright-core install chromium-headless-shell
 corepack pnpm exec playwright-core install-deps chromium-headless-shell
 corepack pnpm test:persistence
 RUN_REALTIME_TEST=1 corepack pnpm test:realtime
+RUN_SIDECAR_TEST=1 corepack pnpm test:sidecar
 ```
 
-前两条是首次运行所需的本地无头浏览器及系统依赖安装。`test:persistence` 使用隔离的浏览器上下文和仅开发环境可启用的假 Realtime 输入，驱动真实页面完成开始、暂停继续、多 Run、新建 thread、连接降级与恢复、周期与 `pagehide` checkpoint、刷新修复、连接失败保存和 IndexedDB 超时降级；它不连接 OpenAI，也不产生费用。真实链路测试默认使用 `local-recordings/hello-can-you-hear-me.webm`。两条固定录音会额外检查少量稳定的名词或动词；每侧命中约三分之二即可通过，不做逐字比较，以容忍正常的标点、措辞和识别差异，同时确认返回内容确实来自测试语料。可以通过 `REALTIME_TEST_AUDIO` 指定其他文件，通过 `REALTIME_TEST_LANGUAGE` 修改目标语言，通过 `REALTIME_TEST_TRANSCRIPTION_MODEL` 在两个白名单原文模型之间切换，通过 `REALTIME_TEST_NOISE_REDUCTION` 在 `off`、`far_field` 和 `near_field` 之间切换；新录音可用逗号分隔的 `REALTIME_TEST_SOURCE_KEYWORDS` 和 `REALTIME_TEST_TRANSLATION_KEYWORDS` 指定预期关键词。在非标准环境中可用 `CHROME_PATH` 指定原生 Linux 浏览器。终端默认只打印通过状态和关键词覆盖率；需要查看完整字幕时显式设置 `REALTIME_TEST_VERBOSE=1`。该测试只借用无界面浏览器提供 WebRTC 媒体运行时，不操作 VoxBraid 页面，也不验证录音按钮等界面行为。
+前两条是首次运行所需的本地无头浏览器及系统依赖安装。`test:persistence` 使用隔离的浏览器上下文和仅开发环境可启用的假 Realtime 输入，驱动真实页面完成开始、暂停继续、多 Run、新建 thread、旁路请求与复制、连接降级与恢复、周期与 `pagehide` checkpoint、刷新修复、连接失败保存和 IndexedDB 超时降级；它不连接 OpenAI，也不产生费用。真实链路测试默认使用 `local-recordings/hello-can-you-hear-me.webm`。两条固定录音会额外检查少量稳定的名词或动词；每侧命中约三分之二即可通过，不做逐字比较，以容忍正常的标点、措辞和识别差异，同时确认返回内容确实来自测试语料。可以通过 `REALTIME_TEST_AUDIO` 指定其他文件，通过 `REALTIME_TEST_LANGUAGE` 修改目标语言，通过 `REALTIME_TEST_TRANSCRIPTION_MODEL` 在两个白名单原文模型之间切换，通过 `REALTIME_TEST_NOISE_REDUCTION` 在 `off`、`far_field` 和 `near_field` 之间切换；新录音可用逗号分隔的 `REALTIME_TEST_SOURCE_KEYWORDS` 和 `REALTIME_TEST_TRANSLATION_KEYWORDS` 指定预期关键词。在非标准环境中可用 `CHROME_PATH` 指定原生 Linux 浏览器。终端默认只打印通过状态和关键词覆盖率；需要查看完整字幕时显式设置 `REALTIME_TEST_VERBOSE=1`。该测试只借用无界面浏览器提供 WebRTC 媒体运行时，不操作 VoxBraid 页面，也不验证录音按钮等界面行为。`test:sidecar` 通过 VoxBraid 自己的 Node 端点发送固定短字幕，验证计数和生成使用同一准备态；设置 `SIDECAR_TEST_VERBOSE=1` 才会打印模型正文。
 
 ## 实现目标
 
@@ -121,6 +124,7 @@ RUN_REALTIME_TEST=1 corepack pnpm test:realtime
 - 将连续增量文本整理成可阅读的双语片段
 - 保存翻译会话及整理后的字幕片段
 - 使用 IndexedDB 保存尚未提交的字幕，刷新、短暂断网或页面被系统回收后能够恢复
+- 基于最近一段或当前会话字幕手动执行总结、重译和自由提问
 - 翻译期间请求 Screen Wake Lock，并提供适合低亮度使用的深色界面
 - 检测页面可见性、麦克风轨道和 WebRTC 状态，明确提示中断并在回到前台后恢复
 - 针对 iPad Safari 优先验证，并兼容 iPad Chrome

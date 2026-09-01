@@ -21,6 +21,7 @@
 		formatEstimatedCostUsd
 	} from '$lib/realtime/usage-estimate';
 	import { ScreenWakeLock } from '$lib/screen-wake-lock';
+	import SidecarPanel from '$lib/sidecar/SidecarPanel.svelte';
 	import SessionSidebar from '$lib/session/SessionSidebar.svelte';
 	import {
 		CAPTURE_RUN_DURATION_LIMIT_MS,
@@ -1331,6 +1332,12 @@
 				</div>
 			</article>
 		</section>
+
+		<SidecarPanel
+			{session}
+			outputLanguage={`${languageLabel(targetLanguage)} (${targetLanguage})`}
+			disabled={persistencePhase === 'restoring' || sessionSwitching}
+		/>
 
 		<footer>
 			<div class="footer-copy">
