@@ -1,3 +1,7 @@
+import {
+	REALTIME_TRANSCRIPTION_MODEL,
+	REALTIME_TRANSLATION_MODEL
+} from '../realtime/usage-estimate';
 import { isTargetLanguage } from '../realtime/types';
 import { json } from '@sveltejs/kit';
 
@@ -68,10 +72,10 @@ export async function issueTranslationToken({
 					seconds: 120
 				},
 				session: {
-					model: 'gpt-realtime-translate',
+					model: REALTIME_TRANSLATION_MODEL,
 					audio: {
 						input: {
-							transcription: { model: 'gpt-realtime-whisper' },
+							transcription: { model: REALTIME_TRANSCRIPTION_MODEL },
 							noise_reduction: { type: 'far_field' }
 						},
 						output: { language: targetLanguage }

@@ -47,18 +47,19 @@ describe('issueTranslationToken', () => {
 	});
 
 	it('returns only the validated short-lived credential fields', async () => {
-		const fetcher = vi.fn(
-			async () =>
-				new Response(
-					JSON.stringify({
-						value: 'temporary-client-secret',
-						expires_at: 2_000_000_000,
-						session: { id: 'session-test' },
-						ignored: API_KEY
-					}),
-					{ status: 200, headers: { 'Content-Type': 'application/json' } }
-				)
-		);
+		let requestInit: RequestInit | undefined;
+		const fetcher = vi.fn(async (...args: [RequestInfo | URL, RequestInit?]) => {
+			requestInit = args[1];
+			return new Response(
+				JSON.stringify({
+					value: 'temporary-client-secret',
+					expires_at: 2_000_000_000,
+					session: { id: 'session-test' },
+					ignored: API_KEY
+				}),
+				{ status: 200, headers: { 'Content-Type': 'application/json' } }
+			);
+		});
 		const response = await issueTranslationToken({
 			request: tokenRequest('zh'),
 			fetcher,
@@ -66,6 +67,12 @@ describe('issueTranslationToken', () => {
 		});
 
 		expect(response.status).toBe(200);
+		expect(JSON.parse(String(requestInit?.body))).toMatchObject({
+			session: {
+				model: 'gpt-realtime-translate',
+				audio: { input: { transcription: { model: 'gpt-realtime-whisper' } } }
+			}
+		});
 		expect(await response.json()).toEqual({
 			clientSecret: 'temporary-client-secret',
 			expiresAt: 2_000_000_000

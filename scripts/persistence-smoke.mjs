@@ -108,6 +108,17 @@ async function startCapture(page) {
 	await page.getByText('实时翻译中', { exact: true }).waitFor();
 }
 
+async function waitForRunningUsageEstimate(page) {
+	await page.waitForFunction(() => {
+		const duration = document.querySelector('[data-duration-seconds]');
+		const cost = document.querySelector('[data-estimated-cost-usd]');
+		return (
+			Number(duration?.getAttribute('data-duration-seconds')) >= 1 &&
+			Number(cost?.getAttribute('data-estimated-cost-usd')) > 0
+		);
+	});
+}
+
 async function stopCapture(page) {
 	await page.getByRole('button', { name: '停止翻译' }).click();
 	await page.getByRole('button', { name: '开始翻译' }).waitFor();
@@ -269,6 +280,7 @@ async function testDegradeAndRecover(browser, baseUrl) {
 	try {
 		await waitForReady(page);
 		await startCapture(page);
+		await waitForRunningUsageEstimate(page);
 		await page.waitForFunction(() => window.__voxbraidWakeLockTest?.requests === 1);
 		await emitPair(page, 'Before a temporary network problem.', '一時的な通信問題の前です。');
 		await page.evaluate(() => window.__voxbraidBrowserTest?.degrade());

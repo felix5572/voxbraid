@@ -159,7 +159,7 @@ UUID 或 ULID 都不能独自解决两个离线客户端分配相同 sequence �
 
 `elapsed_ms` 作为可空、非负的服务端观察值保存，不假定固定量化步长，也不把单次探针结果提升为协议契约。它只能用于估算 run / OpenAI session 的活动进度，跨 run 不可直接比较，不能用于原文与译文的语义对齐。
 
-`audioDurationMs` 优先取两条流观察到的最大 `elapsed_ms`。若协议时间不可用，则使用 `lastActivityAt - mediaStartedAt` 估算，并设置 `endTimeEstimated: true`。自用 MVP 只保存时长和所用模型等事实；成本按当前价格配置近似计算，不把单价写死在 run 类型里，也暂不保存历史价格快照。
+`audioDurationMs` 优先取两条流观察到的最大 `elapsed_ms`。若协议时间不可用，则使用 `lastActivityAt - mediaStartedAt` 估算，并设置 `endTimeEstimated: true`。页面上的当前会话估算跨 run 累加 `max(audioDurationMs, connectedWallClockMs)`，因此即使暂时没有字幕 delta，活跃连接的预计费用仍会增长；暂停后该 run 使用 `endedAt - mediaStartedAt` 固定下来。当前价格配置必须覆盖同一音频时长上的翻译模型和源文转写模型两条收费项，不能只估算其中之一，也不能把两项的音频秒数重复相加。自用 MVP 只保存时长和所用模型等事实；成本按当前价格配置近似计算，不把单价写死在 run 类型里，也暂不保存历史价格快照。该估算不是账单事实，最终金额以 OpenAI Platform 为准。
 
 页面重新打开时，遗留的 `starting`、`live` 或 `stopping` run 标记为 `interrupted`：
 

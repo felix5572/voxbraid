@@ -11,6 +11,11 @@
 		type RealtimeTranslationClientOptions,
 		type TranslationClient
 	} from '$lib/realtime/client';
+	import {
+		REALTIME_TRANSLATION_PRICING,
+		estimateRealtimeUsage,
+		formatEstimatedCostUsd
+	} from '$lib/realtime/usage-estimate';
 	import { ScreenWakeLock } from '$lib/screen-wake-lock';
 	import SessionSidebar from '$lib/session/SessionSidebar.svelte';
 	import {
@@ -92,6 +97,7 @@
 	let threads = $state<TranslationThread[]>([]);
 	let sessionSidebarOpen = $state(false);
 	let sessionSwitching = $state(false);
+	let usageNowMs = $state(Date.now());
 	let client: TranslationClient | null = null;
 	let clientReady = $state(false);
 	let repository: LocalSessionRepository | null = null;
@@ -135,6 +141,8 @@
 	const translatedTranscriptRuns = $derived(
 		session ? visibleTranscriptRuns(session.runs, 'translation', VISIBLE_TAIL_CHARACTERS) : []
 	);
+	const usageEstimate = $derived(estimateRealtimeUsage(session?.runs ?? [], usageNowMs));
+	const estimatedCostLabel = $derived(formatEstimatedCostUsd(usageEstimate.estimatedCostUsd));
 
 	function nowIso(): string {
 		return new Date().toISOString();
@@ -386,6 +394,12 @@
 		let restoreAllowed = true;
 		let restoreTimer: number | null = null;
 		let checkpointTimer: number | null = null;
+		const usageTimer = window.setInterval(() => {
+			const activeRun = session ? activeCaptureRun(session) : null;
+			if (activeRun?.mediaStartedAt) {
+				usageNowMs = Date.now();
+			}
+		}, 1_000);
 		const search = new URLSearchParams(location.search);
 		timingProbeEnabled = import.meta.env.DEV && search.get('timing-probe') === '1';
 		if (import.meta.env.DEV && search.get('audio-test') === '1') {
@@ -594,6 +608,7 @@
 			document.removeEventListener('visibilitychange', handleVisibility);
 			window.removeEventListener('pagehide', handlePageHide);
 			if (checkpointTimer !== null) clearInterval(checkpointTimer);
+			clearInterval(usageTimer);
 			if (followFrame !== null) cancelAnimationFrame(followFrame);
 			if (import.meta.env.DEV) audioFileSource?.stop();
 			void client?.stop();
@@ -748,6 +763,22 @@
 					{/each}
 				</select>
 			</label>
+
+			<div
+				class="usage-estimate"
+				title={`翻译与源文转写合计按 $${REALTIME_TRANSLATION_PRICING.usdPerMinute}/分钟估算；实际费用以 OpenAI Platform 为准。`}
+			>
+				<span>本会话估算</span>
+				<strong>
+					<span data-duration-seconds={usageEstimate.durationSeconds}
+						>{usageEstimate.durationSeconds} 秒</span
+					>
+					<i aria-hidden="true">·</i>
+					<span data-estimated-cost-usd={usageEstimate.estimatedCostUsd}
+						>约 ${estimatedCostLabel}</span
+					>
+				</strong>
+			</div>
 
 			{#if active}
 				<button class="stop" onclick={() => void stop('user-stopped')}>
@@ -1060,6 +1091,25 @@
 		display: flex;
 		gap: 10px;
 	}
+	.usage-estimate {
+		min-width: 164px;
+		display: grid;
+		gap: 3px;
+		color: #727c77;
+		font-size: 11px;
+		text-align: center;
+	}
+	.usage-estimate strong {
+		color: #c3cec8;
+		font-size: 13px;
+		font-variant-numeric: tabular-nums;
+		font-weight: 620;
+	}
+	.usage-estimate i {
+		padding: 0 4px;
+		color: #59625d;
+		font-style: normal;
+	}
 	.mic {
 		width: 10px;
 		height: 15px;
@@ -1216,6 +1266,13 @@
 		.controls {
 			align-items: stretch;
 			flex-direction: column;
+		}
+		.usage-estimate {
+			min-width: 0;
+			grid-template-columns: auto auto;
+			align-items: baseline;
+			justify-content: space-between;
+			text-align: left;
 		}
 		.control-actions {
 			width: 100%;
