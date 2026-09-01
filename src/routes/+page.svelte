@@ -779,12 +779,6 @@
 			/>
 		{/if}
 
-		{#if import.meta.env.DEV && session && persistencePhase === 'ready'}
-			<div class="developer-tools">
-				<button class="export" onclick={() => void downloadSessionArchive()}>导出会话 JSON</button>
-			</div>
-		{/if}
-
 		{#if error}
 			<div class="error" role="alert">
 				<strong>连接没有建立</strong>
@@ -849,12 +843,17 @@
 		</section>
 
 		<footer>
-			<span>
-				{import.meta.env.DEV && audioTestEnabled
-					? '本地录音通过 WebRTC 直达 OpenAI'
-					: '音频从此设备通过 WebRTC 直达 OpenAI'}
-			</span>
-			<span>当前不播放译音 · 不保存录音</span>
+			<div class="footer-copy">
+				<span>
+					{import.meta.env.DEV && audioTestEnabled
+						? '本地录音通过 WebRTC 直达 OpenAI'
+						: '音频从此设备通过 WebRTC 直达 OpenAI'}
+				</span>
+				<span>当前不播放译音 · 不保存录音</span>
+			</div>
+			{#if import.meta.env.DEV && session && persistencePhase === 'ready'}
+				<button class="export" onclick={() => void downloadSessionArchive()}>导出会话 JSON</button>
+			{/if}
 		</footer>
 	</main>
 </div>
@@ -863,7 +862,7 @@
 	.app-shell {
 		min-height: 100vh;
 		display: grid;
-		grid-template-columns: 276px minmax(0, 1fr);
+		grid-template-columns: 248px minmax(0, 1fr);
 	}
 
 	main {
@@ -871,10 +870,10 @@
 		width: min(1120px, 100%);
 		min-height: 100vh;
 		margin: 0 auto;
-		padding: max(28px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
-			max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+		padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+			max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
 		display: grid;
-		gap: 24px;
+		gap: 16px;
 	}
 
 	header,
@@ -922,10 +921,10 @@
 	}
 
 	.mark {
-		width: 48px;
-		height: 48px;
+		width: 44px;
+		height: 44px;
 		border: 1px solid #39433f;
-		border-radius: 15px;
+		border-radius: 13px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -1001,9 +1000,9 @@
 
 	.controls {
 		gap: 16px;
-		padding: 18px;
+		padding: 14px 16px;
 		border: 1px solid #252c29;
-		border-radius: 18px;
+		border-radius: 14px;
 		background: rgba(14, 18, 16, 0.74);
 	}
 
@@ -1016,7 +1015,7 @@
 	}
 	select {
 		min-width: 150px;
-		padding: 11px 38px 11px 13px;
+		padding: 9px 36px 9px 12px;
 		border: 1px solid #343d39;
 		border-radius: 11px;
 		background: #111613;
@@ -1025,7 +1024,7 @@
 
 	button {
 		min-width: 160px;
-		padding: 12px 18px;
+		padding: 10px 16px;
 		border: 0;
 		border-radius: 12px;
 		display: inline-flex;
@@ -1101,13 +1100,9 @@
 	.warning strong {
 		color: #f0e8bc;
 	}
-	.developer-tools {
-		display: flex;
-		justify-content: flex-end;
-	}
 	.export {
 		min-width: 0;
-		padding: 8px 12px;
+		padding: 6px 10px;
 		border: 1px solid #343d39;
 		background: #111613;
 		color: #aeb8b3;
@@ -1115,10 +1110,10 @@
 	}
 
 	.captions {
-		height: clamp(430px, 68vh, 760px);
-		min-height: 430px;
-		border: 1px solid #242b28;
-		border-radius: 22px;
+		height: clamp(500px, calc(100dvh - 224px), 760px);
+		min-height: 500px;
+		border: 1px solid #202724;
+		border-radius: 16px;
 		display: grid;
 		grid-template-rows: 1fr auto 1fr;
 		overflow: hidden;
@@ -1127,14 +1122,14 @@
 	}
 
 	article {
-		padding: clamp(24px, 5vw, 54px);
+		padding: clamp(20px, 2.35vw, 30px);
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
 	}
 	.caption-label {
 		gap: 10px;
-		margin-bottom: 20px;
+		margin-bottom: 12px;
 	}
 	.caption-label span {
 		color: #87c5b0;
@@ -1154,10 +1149,10 @@
 	}
 	article p {
 		margin: 0;
-		font-size: clamp(25px, 4.4vw, 48px);
-		font-weight: 570;
-		line-height: 1.42;
-		letter-spacing: -0.022em;
+		font-size: clamp(22px, 2.15vw, 30px);
+		font-weight: 530;
+		line-height: 1.45;
+		letter-spacing: -0.016em;
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
@@ -1182,13 +1177,17 @@
 	}
 	.divider {
 		height: 1px;
-		margin: 0 clamp(24px, 5vw, 54px);
+		margin: 0 clamp(20px, 2.35vw, 30px);
 		background: #252d29;
 	}
 	footer {
 		gap: 20px;
 		color: #59615d;
 		font-size: 11px;
+	}
+	.footer-copy {
+		display: flex;
+		gap: 18px;
 	}
 
 	@media (max-width: 820px) {
@@ -1203,7 +1202,6 @@
 	@media (max-width: 640px) {
 		main {
 			padding-inline: 16px;
-			gap: 16px;
 		}
 		header {
 			align-items: flex-start;
@@ -1230,13 +1228,19 @@
 			width: 100%;
 		}
 		.captions {
-			height: clamp(490px, 72vh, 680px);
-			min-height: 490px;
+			height: clamp(520px, calc(100dvh - 238px), 760px);
+			min-height: 520px;
 		}
 		footer {
 			align-items: flex-start;
+			gap: 10px;
+		}
+		.footer-copy {
 			flex-direction: column;
 			gap: 5px;
+		}
+		.export {
+			width: auto;
 		}
 	}
 </style>

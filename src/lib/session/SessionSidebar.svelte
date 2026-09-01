@@ -99,7 +99,7 @@
 		position: sticky;
 		top: 0;
 		z-index: 20;
-		width: 276px;
+		width: 248px;
 		height: 100vh;
 		padding: max(24px, env(safe-area-inset-top)) 16px max(18px, env(safe-area-inset-bottom));
 		border-right: 1px solid #252c29;
