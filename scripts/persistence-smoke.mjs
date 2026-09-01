@@ -239,6 +239,9 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 			true
 		);
 		await page.keyboard.press('Escape');
+		await page.waitForFunction(
+			() => document.activeElement?.getAttribute('aria-label') === '打开会话列表'
+		);
 		assert.equal(await sessionMenu.evaluate((element) => element === document.activeElement), true);
 		await sessionMenu.click();
 		await firstThreadButton.click();
