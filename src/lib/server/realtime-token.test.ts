@@ -3,11 +3,19 @@ import { issueTranslationToken } from './realtime-token';
 
 const API_KEY = 'server-only-test-key';
 
-function tokenRequest(targetLanguage: unknown, transcriptionModel?: unknown): Request {
+function tokenRequest(
+	targetLanguage: unknown,
+	transcriptionModel?: unknown,
+	noiseReduction?: unknown
+): Request {
 	return new Request('http://localhost/api/realtime/token', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ targetLanguage, ...(transcriptionModel ? { transcriptionModel } : {}) })
+		body: JSON.stringify({
+			targetLanguage,
+			...(transcriptionModel ? { transcriptionModel } : {}),
+			...(noiseReduction ? { noiseReduction } : {})
+		})
 	});
 }
 
@@ -31,6 +39,18 @@ describe('issueTranslationToken', () => {
 		const fetcher = vi.fn();
 		const response = await issueTranslationToken({
 			request: tokenRequest('zh', 'unsupported'),
+			fetcher,
+			apiKey: API_KEY
+		});
+
+		expect(response.status).toBe(400);
+		expect(fetcher).not.toHaveBeenCalled();
+	});
+
+	it('rejects an unsupported noise reduction mode before calling OpenAI', async () => {
+		const fetcher = vi.fn();
+		const response = await issueTranslationToken({
+			request: tokenRequest('zh', 'gpt-live-transcribe', 'unsupported'),
 			fetcher,
 			apiKey: API_KEY
 		});
@@ -82,7 +102,12 @@ describe('issueTranslationToken', () => {
 		expect(JSON.parse(String(requestInit?.body))).toMatchObject({
 			session: {
 				model: 'gpt-realtime-translate',
-				audio: { input: { transcription: { model: 'gpt-live-transcribe' } } }
+				audio: {
+					input: {
+						transcription: { model: 'gpt-live-transcribe' },
+						noise_reduction: null
+					}
+				}
 			}
 		});
 		expect(await response.json()).toEqual({
@@ -91,7 +116,7 @@ describe('issueTranslationToken', () => {
 		});
 	});
 
-	it('passes the selected transcription model to OpenAI', async () => {
+	it('passes the selected transcription model and noise reduction mode to OpenAI', async () => {
 		let requestInit: RequestInit | undefined;
 		const fetcher = vi.fn(async (...args: [RequestInfo | URL, RequestInit?]) => {
 			requestInit = args[1];
@@ -106,7 +131,7 @@ describe('issueTranslationToken', () => {
 		});
 
 		const response = await issueTranslationToken({
-			request: tokenRequest('zh', 'gpt-live-transcribe'),
+			request: tokenRequest('zh', 'gpt-live-transcribe', 'far_field'),
 			fetcher,
 			apiKey: API_KEY
 		});
@@ -114,7 +139,12 @@ describe('issueTranslationToken', () => {
 		expect(response.status).toBe(200);
 		expect(JSON.parse(String(requestInit?.body))).toMatchObject({
 			session: {
-				audio: { input: { transcription: { model: 'gpt-live-transcribe' } } }
+				audio: {
+					input: {
+						transcription: { model: 'gpt-live-transcribe' },
+						noise_reduction: { type: 'far_field' }
+					}
+				}
 			}
 		});
 	});

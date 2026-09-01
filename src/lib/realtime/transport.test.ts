@@ -25,11 +25,12 @@ describe('fetchTranslationToken', () => {
 		});
 		expect(JSON.parse(String(requestInit?.body))).toEqual({
 			targetLanguage: 'zh',
-			transcriptionModel: 'gpt-live-transcribe'
+			transcriptionModel: 'gpt-live-transcribe',
+			noiseReduction: 'off'
 		});
 	});
 
-	it('requests the selected source transcription model', async () => {
+	it('requests the selected source transcription model and noise reduction mode', async () => {
 		let requestInit: RequestInit | undefined;
 		const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
 			requestInit = init;
@@ -39,11 +40,12 @@ describe('fetchTranslationToken', () => {
 			);
 		});
 
-		await fetchTranslationToken('zh', fetcher, undefined, 'gpt-live-transcribe');
+		await fetchTranslationToken('zh', fetcher, undefined, 'gpt-live-transcribe', 'near_field');
 
 		expect(JSON.parse(String(requestInit?.body))).toEqual({
 			targetLanguage: 'zh',
-			transcriptionModel: 'gpt-live-transcribe'
+			transcriptionModel: 'gpt-live-transcribe',
+			noiseReduction: 'near_field'
 		});
 	});
 

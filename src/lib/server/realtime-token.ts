@@ -2,7 +2,12 @@ import {
 	REALTIME_TRANSCRIPTION_MODEL,
 	REALTIME_TRANSLATION_MODEL
 } from '../realtime/usage-estimate';
-import { isRealtimeTranscriptionModel, isTargetLanguage } from '../realtime/types';
+import {
+	DEFAULT_REALTIME_NOISE_REDUCTION_MODE,
+	isRealtimeNoiseReductionMode,
+	isRealtimeTranscriptionModel,
+	isTargetLanguage
+} from '../realtime/types';
 import { json } from '@sveltejs/kit';
 
 const CLIENT_SECRET_URL = 'https://api.openai.com/v1/realtime/translations/client_secrets';
@@ -54,6 +59,10 @@ export async function issueTranslationToken({
 		typeof body === 'object' && body !== null && 'transcriptionModel' in body
 			? body.transcriptionModel
 			: REALTIME_TRANSCRIPTION_MODEL;
+	const requestedNoiseReduction =
+		typeof body === 'object' && body !== null && 'noiseReduction' in body
+			? body.noiseReduction
+			: DEFAULT_REALTIME_NOISE_REDUCTION_MODE;
 
 	if (!isTargetLanguage(targetLanguage)) {
 		return json(
@@ -64,6 +73,12 @@ export async function issueTranslationToken({
 	if (!isRealtimeTranscriptionModel(requestedTranscriptionModel)) {
 		return json(
 			{ message: '请选择受支持的原文转写模型。' },
+			{ status: 400, headers: noStoreHeaders() }
+		);
+	}
+	if (!isRealtimeNoiseReductionMode(requestedNoiseReduction)) {
+		return json(
+			{ message: '请选择受支持的输入降噪模式。' },
 			{ status: 400, headers: noStoreHeaders() }
 		);
 	}
@@ -86,7 +101,8 @@ export async function issueTranslationToken({
 					audio: {
 						input: {
 							transcription: { model: requestedTranscriptionModel },
-							noise_reduction: { type: 'far_field' }
+							noise_reduction:
+								requestedNoiseReduction === 'off' ? null : { type: requestedNoiseReduction }
 						},
 						output: { language: targetLanguage }
 					}

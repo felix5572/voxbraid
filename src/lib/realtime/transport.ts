@@ -1,5 +1,7 @@
 import {
+	DEFAULT_REALTIME_NOISE_REDUCTION_MODE,
 	DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+	type RealtimeNoiseReductionMode,
 	type RealtimeTranscriptionModel,
 	type TargetLanguage,
 	type TranslationTokenResponse
@@ -38,12 +40,13 @@ export async function fetchTranslationToken(
 	targetLanguage: TargetLanguage,
 	fetcher: Fetcher = fetch,
 	signal?: AbortSignal,
-	transcriptionModel: RealtimeTranscriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL
+	transcriptionModel: RealtimeTranscriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+	noiseReduction: RealtimeNoiseReductionMode = DEFAULT_REALTIME_NOISE_REDUCTION_MODE
 ): Promise<TranslationTokenResponse> {
 	const response = await fetcher('/api/realtime/token', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ targetLanguage, transcriptionModel }),
+		body: JSON.stringify({ targetLanguage, transcriptionModel, noiseReduction }),
 		signal
 	});
 

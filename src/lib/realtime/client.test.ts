@@ -99,14 +99,15 @@ afterEach(() => {
 });
 
 describe('RealtimeTranslationClient', () => {
-	it('requests the selected source transcription model', async () => {
+	it('requests the selected source transcription model and noise reduction mode', async () => {
 		const harness = createHarness();
 
-		await harness.client.start('zh', 'gpt-live-transcribe');
+		await harness.client.start('zh', 'gpt-live-transcribe', 'far_field');
 
 		expect(harness.dependencies.fetchToken).toHaveBeenCalledWith(
 			'zh',
 			'gpt-live-transcribe',
+			'far_field',
 			expect.any(AbortSignal)
 		);
 		await harness.client.stop();
@@ -114,7 +115,7 @@ describe('RealtimeTranslationClient', () => {
 
 	it('cancels a pending start without reporting a failure', async () => {
 		const fetchToken = vi.fn(
-			(_targetLanguage, _transcriptionModel, signal: AbortSignal) =>
+			(_targetLanguage, _transcriptionModel, _noiseReduction, signal: AbortSignal) =>
 				new Promise<never>((_resolve, reject) => {
 					signal.addEventListener(
 						'abort',

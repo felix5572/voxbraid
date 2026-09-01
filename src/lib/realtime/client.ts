@@ -2,12 +2,16 @@ import { parseServerEvent } from './transcript';
 import { exchangeTranslationSdp, fetchTranslationToken } from './transport';
 import type {
 	ConnectionStatus,
+	RealtimeNoiseReductionMode,
 	RealtimeTranscriptionModel,
 	TargetLanguage,
 	TranslationServerEvent,
 	TranslationTokenResponse
 } from './types';
-import { DEFAULT_REALTIME_TRANSCRIPTION_MODEL } from './types';
+import {
+	DEFAULT_REALTIME_NOISE_REDUCTION_MODE,
+	DEFAULT_REALTIME_TRANSCRIPTION_MODEL
+} from './types';
 
 const CONNECTION_TIMEOUT_MS = 15_000;
 const RECOVERY_GRACE_MS = 8_000;
@@ -26,7 +30,8 @@ export interface TranslationClient {
 	readonly currentStatus: ConnectionStatus;
 	start(
 		targetLanguage: TargetLanguage,
-		transcriptionModel?: RealtimeTranscriptionModel
+		transcriptionModel?: RealtimeTranscriptionModel,
+		noiseReduction?: RealtimeNoiseReductionMode
 	): Promise<void>;
 	stop(): Promise<void>;
 }
@@ -37,6 +42,7 @@ export interface RealtimeTranslationClientDependencies {
 	fetchToken: (
 		targetLanguage: TargetLanguage,
 		transcriptionModel: RealtimeTranscriptionModel,
+		noiseReduction: RealtimeNoiseReductionMode,
 		signal: AbortSignal
 	) => Promise<TranslationTokenResponse>;
 	exchangeSdp: (clientSecret: string, offerSdp: string, signal: AbortSignal) => Promise<string>;
@@ -51,8 +57,8 @@ export interface RealtimeTranslationClientDependencies {
 const DEFAULT_DEPENDENCIES: RealtimeTranslationClientDependencies = {
 	getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
 	createPeerConnection: () => new RTCPeerConnection(),
-	fetchToken: (targetLanguage, transcriptionModel, signal) =>
-		fetchTranslationToken(targetLanguage, fetch, signal, transcriptionModel),
+	fetchToken: (targetLanguage, transcriptionModel, noiseReduction, signal) =>
+		fetchTranslationToken(targetLanguage, fetch, signal, transcriptionModel, noiseReduction),
 	exchangeSdp: (clientSecret, offerSdp, signal) =>
 		exchangeTranslationSdp(clientSecret, offerSdp, fetch, signal),
 	now: () => Date.now(),
@@ -133,7 +139,8 @@ export class RealtimeTranslationClient implements TranslationClient {
 
 	async start(
 		targetLanguage: TargetLanguage,
-		transcriptionModel: RealtimeTranscriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL
+		transcriptionModel: RealtimeTranscriptionModel = DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+		noiseReduction: RealtimeNoiseReductionMode = DEFAULT_REALTIME_NOISE_REDUCTION_MODE
 	): Promise<void> {
 		if (this.status !== 'idle' && this.status !== 'failed') return;
 
@@ -161,6 +168,7 @@ export class RealtimeTranslationClient implements TranslationClient {
 			const token = await this.dependencies.fetchToken(
 				targetLanguage,
 				transcriptionModel,
+				noiseReduction,
 				abortController.signal
 			);
 			if (!this.isRunActive(runId, abortController)) return;

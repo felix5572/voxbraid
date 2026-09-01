@@ -93,7 +93,7 @@ corepack pnpm test:persistence
 RUN_REALTIME_TEST=1 corepack pnpm test:realtime
 ```
 
-前两条是首次运行所需的本地无头浏览器及系统依赖安装。`test:persistence` 使用隔离的浏览器上下文和仅开发环境可启用的假 Realtime 输入，驱动真实页面完成开始、暂停继续、多 Run、新建 thread、连接降级与恢复、周期与 `pagehide` checkpoint、刷新修复、连接失败保存和 IndexedDB 超时降级；它不连接 OpenAI，也不产生费用。真实链路测试默认使用 `local-recordings/hello-can-you-hear-me.webm`。两条固定录音会额外检查少量稳定的名词或动词；每侧命中约三分之二即可通过，不做逐字比较，以容忍正常的标点、措辞和识别差异，同时确认返回内容确实来自测试语料。可以通过 `REALTIME_TEST_AUDIO` 指定其他文件，通过 `REALTIME_TEST_LANGUAGE` 修改目标语言，通过 `REALTIME_TEST_TRANSCRIPTION_MODEL` 在两个白名单原文模型之间切换；新录音可用逗号分隔的 `REALTIME_TEST_SOURCE_KEYWORDS` 和 `REALTIME_TEST_TRANSLATION_KEYWORDS` 指定预期关键词。在非标准环境中可用 `CHROME_PATH` 指定原生 Linux 浏览器。终端默认只打印通过状态和关键词覆盖率；需要查看完整字幕时显式设置 `REALTIME_TEST_VERBOSE=1`。该测试只借用无界面浏览器提供 WebRTC 媒体运行时，不操作 VoxBraid 页面，也不验证录音按钮等界面行为。
+前两条是首次运行所需的本地无头浏览器及系统依赖安装。`test:persistence` 使用隔离的浏览器上下文和仅开发环境可启用的假 Realtime 输入，驱动真实页面完成开始、暂停继续、多 Run、新建 thread、连接降级与恢复、周期与 `pagehide` checkpoint、刷新修复、连接失败保存和 IndexedDB 超时降级；它不连接 OpenAI，也不产生费用。真实链路测试默认使用 `local-recordings/hello-can-you-hear-me.webm`。两条固定录音会额外检查少量稳定的名词或动词；每侧命中约三分之二即可通过，不做逐字比较，以容忍正常的标点、措辞和识别差异，同时确认返回内容确实来自测试语料。可以通过 `REALTIME_TEST_AUDIO` 指定其他文件，通过 `REALTIME_TEST_LANGUAGE` 修改目标语言，通过 `REALTIME_TEST_TRANSCRIPTION_MODEL` 在两个白名单原文模型之间切换，通过 `REALTIME_TEST_NOISE_REDUCTION` 在 `off`、`far_field` 和 `near_field` 之间切换；新录音可用逗号分隔的 `REALTIME_TEST_SOURCE_KEYWORDS` 和 `REALTIME_TEST_TRANSLATION_KEYWORDS` 指定预期关键词。在非标准环境中可用 `CHROME_PATH` 指定原生 Linux 浏览器。终端默认只打印通过状态和关键词覆盖率；需要查看完整字幕时显式设置 `REALTIME_TEST_VERBOSE=1`。该测试只借用无界面浏览器提供 WebRTC 媒体运行时，不操作 VoxBraid 页面，也不验证录音按钮等界面行为。
 
 ## 实现目标
 
@@ -180,7 +180,7 @@ RUN_REALTIME_TEST=1 corepack pnpm test:realtime
 | 身份          | 初期采用简单的单用户保护    | 以后开放使用时再接入 Supabase Auth         |
 | 文件存储      | Supabase Storage（按需）    | 后续可能产生的录音或导出文件               |
 
-当前 OpenAI 官方模型目录和真实链路已经确认存在并接受 `gpt-realtime-translate`、`gpt-realtime-whisper` 与 `gpt-live-transcribe`。使用前者进行实时翻译，原文字幕默认使用已经通过固定录音链路验证的 `gpt-live-transcribe`；页面诊断区仍允许在开始收音前切换到 `gpt-realtime-whisper`，仅用于比较 iPad 实时 WebRTC 输入下两条官方转写支路的行为。服务端只接受这两个明确列入白名单的原文模型。
+当前 OpenAI 官方模型目录和真实链路已经确认存在并接受 `gpt-realtime-translate`、`gpt-realtime-whisper` 与 `gpt-live-transcribe`。使用前者进行实时翻译，原文字幕默认使用已经通过固定录音链路验证的 `gpt-live-transcribe`；页面诊断区仍允许在开始收音前切换到 `gpt-realtime-whisper`，仅用于比较 iPad 实时 WebRTC 输入下两条官方转写支路的行为。OpenAI 输入降噪默认关闭，开始收音前可以切换到 `far_field` 或 `near_field`；浏览器端仍明确请求关闭回声消除、噪声抑制和自动增益，以尽量保持麦克风输入原貌。服务端只接受明确列入白名单的模型和降噪模式。
 
 ChatGPT 订阅与 OpenAI API 使用量是两套独立的产品和账单，部署后的 API 调用需要单独配置 Platform 项目、密钥和项目级预算提醒。第一阶段仅供自己使用，不实现面向其他用户的产品计费。
 

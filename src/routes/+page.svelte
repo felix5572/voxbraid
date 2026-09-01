@@ -44,11 +44,14 @@
 		AudioTestStatusChange
 	} from '$lib/testing/audio-test-report';
 	import {
+		DEFAULT_REALTIME_NOISE_REDUCTION_MODE,
 		DEFAULT_REALTIME_TRANSCRIPTION_MODEL,
+		REALTIME_NOISE_REDUCTION_MODES,
 		REALTIME_TRANSCRIPTION_MODELS,
 		TARGET_LANGUAGES,
 		isTargetLanguage,
 		type ConnectionStatus,
+		type RealtimeNoiseReductionMode,
 		type RealtimeTranscriptionModel,
 		type TargetLanguage,
 		type TranslationServerEvent
@@ -130,6 +133,7 @@
 	let status = $state<ConnectionStatus>('idle');
 	let targetLanguage = $state<TargetLanguage>('zh');
 	let transcriptionModel = $state<RealtimeTranscriptionModel>(DEFAULT_REALTIME_TRANSCRIPTION_MODEL);
+	let noiseReduction = $state<RealtimeNoiseReductionMode>(DEFAULT_REALTIME_NOISE_REDUCTION_MODE);
 	let session = $state<TranslationSessionState | null>(null);
 	let error = $state('');
 	let persistencePhase = $state<PersistencePhase>('restoring');
@@ -172,6 +176,8 @@
 	let diagnosticStartedAtIso = nowIso();
 	let diagnosticRequestedTranscriptionModel: RealtimeTranscriptionModel =
 		DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
+	let diagnosticRequestedNoiseReduction: RealtimeNoiseReductionMode =
+		DEFAULT_REALTIME_NOISE_REDUCTION_MODE;
 	let diagnosticEvents: DiagnosticEvent[] = [];
 	let diagnosticStatuses: DiagnosticStatus[] = [];
 	let diagnosticMediaTrack: Record<string, unknown> | null = null;
@@ -219,6 +225,7 @@
 		diagnosticStartedAt = performance.now();
 		diagnosticStartedAtIso = nowIso();
 		diagnosticRequestedTranscriptionModel = transcriptionModel;
+		diagnosticRequestedNoiseReduction = noiseReduction;
 		diagnosticEvents = [];
 		diagnosticStatuses = [];
 		diagnosticMediaTrack = null;
@@ -309,6 +316,7 @@
 				startedAt: diagnosticStartedAtIso,
 				generatedAt: nowIso(),
 				requestedTranscriptionModel: diagnosticRequestedTranscriptionModel,
+				requestedNoiseReduction: diagnosticRequestedNoiseReduction,
 				userAgent: navigator.userAgent,
 				mediaTrack: diagnosticMediaTrack,
 				mediaEvents: diagnosticMediaEvents,
@@ -966,7 +974,7 @@
 			timingProbeStartedAt = performance.now();
 		}
 		try {
-			await client.start(targetLanguage, transcriptionModel);
+			await client.start(targetLanguage, transcriptionModel, noiseReduction);
 		} catch (startError) {
 			console.error('[realtime-client] start failed', startError);
 			const message = realtimeErrorMessage(startError);
@@ -1263,6 +1271,18 @@
 					<h2 id="debug-diagnostics-title">Realtime 诊断</h2>
 				</div>
 				<div class="debug-actions">
+					<label class="debug-model">
+						<span>输入降噪</span>
+						<select
+							aria-label="输入降噪"
+							bind:value={noiseReduction}
+							disabled={active || status === 'stopping'}
+						>
+							{#each REALTIME_NOISE_REDUCTION_MODES as mode (mode.code)}
+								<option value={mode.code}>{mode.label}</option>
+							{/each}
+						</select>
+					</label>
 					<label class="debug-model">
 						<span>原文模型</span>
 						<select

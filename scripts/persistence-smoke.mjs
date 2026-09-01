@@ -185,9 +185,12 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await waitForReady(page);
 		const targetLanguageSelect = page.getByLabel('目标语言', { exact: true });
 		const transcriptionModelSelect = page.getByLabel('原文模型', { exact: true });
+		const noiseReductionSelect = page.getByLabel('输入降噪', { exact: true });
 		await targetLanguageSelect.selectOption('ja');
 		await transcriptionModelSelect.selectOption('gpt-live-transcribe');
+		await noiseReductionSelect.selectOption('off');
 		assert.equal(await transcriptionModelSelect.inputValue(), 'gpt-live-transcribe');
+		assert.equal(await noiseReductionSelect.inputValue(), 'off');
 
 		const firstSourceChunks = [
 			'First automated capture run.',
@@ -199,6 +202,7 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		const firstTranslation = '最初の自動収録です。二つ目と三つ目の原文も保存します。';
 		await startCapture(page);
 		assert.equal(await transcriptionModelSelect.isDisabled(), true);
+		assert.equal(await noiseReductionSelect.isDisabled(), true);
 		await page.locator('[data-thread-id]').waitFor();
 		assert.equal(await page.locator('[data-thread-id]').isDisabled(), true);
 		for (const sourceChunk of firstSourceChunks) {

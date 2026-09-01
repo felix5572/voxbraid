@@ -21,6 +21,10 @@ const transcriptionModel = process.env.REALTIME_TEST_TRANSCRIPTION_MODEL ?? 'gpt
 if (!['gpt-realtime-whisper', 'gpt-live-transcribe'].includes(transcriptionModel)) {
 	throw new Error(`不支持的原文转写模型：${transcriptionModel}`);
 }
+const noiseReduction = process.env.REALTIME_TEST_NOISE_REDUCTION ?? 'off';
+if (!['off', 'far_field', 'near_field'].includes(noiseReduction)) {
+	throw new Error(`不支持的输入降噪模式：${noiseReduction}`);
+}
 const fixtureExpectations = {
 	'hello-can-you-hear-me.webm': {
 		source: ['hello', 'testing', 'hear'],
@@ -163,7 +167,7 @@ try {
 
 	const audioBase64 = (await readFile(audioPath)).toString('base64');
 	const result = await page.evaluate(
-		async ({ audioBase64, fileName, targetLanguage, transcriptionModel }) => {
+		async ({ audioBase64, fileName, targetLanguage, transcriptionModel, noiseReduction }) => {
 			const [{ RealtimeTranslationClient }, { AudioFileStreamSource }] = await Promise.all([
 				import('/src/lib/realtime/client.ts'),
 				import('/src/lib/testing/audio-file-source.ts')
@@ -213,7 +217,7 @@ try {
 				}
 			);
 
-			await client.start(targetLanguage, transcriptionModel);
+			await client.start(targetLanguage, transcriptionModel, noiseReduction);
 			await Promise.race([
 				finished,
 				new Promise((_, reject) =>
@@ -225,7 +229,13 @@ try {
 			]);
 			return { statuses, source, translation, errors, eventTrace };
 		},
-		{ audioBase64, fileName: basename(audioPath), targetLanguage, transcriptionModel }
+		{
+			audioBase64,
+			fileName: basename(audioPath),
+			targetLanguage,
+			transcriptionModel,
+			noiseReduction
+		}
 	);
 
 	if (!result.statuses.includes('connected')) throw new Error('WebRTC 没有进入 connected。');
@@ -247,7 +257,9 @@ try {
 		translationKeywords
 	);
 
-	console.log(`[realtime-smoke] passed · ${transcriptionModel}`);
+	console.log(
+		`[realtime-smoke] passed · ${transcriptionModel} · noise reduction ${noiseReduction}`
+	);
 	if (sourceCoverage || translationCoverage) {
 		console.log(
 			`keyword coverage: source ${sourceCoverage?.matched ?? 0}/${sourceCoverage?.total ?? 0}, translation ${translationCoverage?.matched ?? 0}/${translationCoverage?.total ?? 0}`

@@ -12,8 +12,17 @@ export const REALTIME_TRANSCRIPTION_MODELS = [
 
 export const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = 'gpt-live-transcribe';
 
+export const REALTIME_NOISE_REDUCTION_MODES = [
+	{ code: 'off', label: '关闭' },
+	{ code: 'far_field', label: '远场 far_field' },
+	{ code: 'near_field', label: '近场 near_field' }
+] as const;
+
+export const DEFAULT_REALTIME_NOISE_REDUCTION_MODE = 'off';
+
 export type TargetLanguage = (typeof TARGET_LANGUAGES)[number]['code'];
 export type RealtimeTranscriptionModel = (typeof REALTIME_TRANSCRIPTION_MODELS)[number]['code'];
+export type RealtimeNoiseReductionMode = (typeof REALTIME_NOISE_REDUCTION_MODES)[number]['code'];
 
 export type ConnectionStatus =
 	| 'idle'
@@ -62,4 +71,8 @@ export function isTargetLanguage(value: unknown): value is TargetLanguage {
 
 export function isRealtimeTranscriptionModel(value: unknown): value is RealtimeTranscriptionModel {
 	return REALTIME_TRANSCRIPTION_MODELS.some((model) => model.code === value);
+}
+
+export function isRealtimeNoiseReductionMode(value: unknown): value is RealtimeNoiseReductionMode {
+	return REALTIME_NOISE_REDUCTION_MODES.some((mode) => mode.code === value);
 }
