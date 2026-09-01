@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
+	import type { StorageDurability } from '../persistence/storage-durability';
 	import type { TranslationThread } from './types';
 
 	interface Props {
@@ -7,12 +8,22 @@
 		currentThreadId: string | null;
 		open: boolean;
 		disabled: boolean;
+		storageDurability: StorageDurability | 'checking';
 		onClose: () => void;
 		onNew: () => void;
 		onSelect: (threadId: string) => void;
 	}
 
-	let { threads, currentThreadId, open, disabled, onClose, onNew, onSelect }: Props = $props();
+	let {
+		threads,
+		currentThreadId,
+		open,
+		disabled,
+		storageDurability,
+		onClose,
+		onNew,
+		onSelect
+	}: Props = $props();
 	let closeButton: HTMLButtonElement | null = null;
 
 	const TITLE_FORMATTER = new Intl.DateTimeFormat(undefined, {
@@ -41,6 +52,12 @@
 		if (!open || event.key !== 'Escape') return;
 		event.preventDefault();
 		onClose();
+	}
+
+	function storageLabel(): string {
+		if (storageDurability === 'persistent') return '本地持久存储已启用';
+		if (storageDurability === 'checking') return '正在检查本地存储';
+		return '会话保存在此设备 · 请定期备份';
 	}
 
 	$effect(() => {
@@ -91,7 +108,7 @@
 		{/if}
 	</nav>
 
-	<p class="storage-note">会话保存在此设备</p>
+	<p class="storage-note">{storageLabel()}</p>
 </aside>
 
 <style>

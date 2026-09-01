@@ -247,7 +247,9 @@ describe('LocalSessionRepository', () => {
 		);
 		const importedRepository = new LocalSessionRepository(importedDatabase);
 		try {
-			await importedRepository.importThread(exported, '2026-09-01T00:03:00.000Z');
+			await expect(
+				importedRepository.importThread(exported, '2026-09-01T00:03:00.000Z')
+			).resolves.toBe(thread.id);
 			await expect(importedRepository.loadThread(thread.id)).resolves.toEqual({
 				thread,
 				runs: [run],

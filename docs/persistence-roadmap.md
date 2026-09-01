@@ -62,7 +62,7 @@ const LOCAL_DB_NAME = import.meta.env.DEV ? `voxbraid-dev-${LOCAL_DB_EPOCH}` : '
 
 较大的 schema 改动可以递增开发 epoch，直接让新代码打开一套干净结构，而不为每次试验写升级脚本；epoch 变化不能影响生产库。若重要内容是在开发服务器中录制，它仍属于开发 epoch 数据，不能因为生产库名稳定就跳过以下纪律：
 
-1. 第一次递增 epoch 之前先实现覆盖当前开发库中全部 thread 的 JSON 导出；只导出页面当前 thread 不满足备份条件。恢复可以采用多 thread 归档整体导入，或先提供 thread 列表再逐个导入，但必须有经过验证的路径能够找回全部记录。
+1. 第一次递增 epoch 之前，逐个导出仍需保留的 thread；开发期测试会话允许直接放弃，不为整库备份增加合并、去重和对账规则。
 2. 递增 epoch 时不自动删除旧 IndexedDB；旧库作为人工恢复来源保留。
 3. 一旦保存了任何不愿丢失的真实会议、课堂或讲座，epoch 阶段立即结束。
 4. epoch 阶段结束后，所有本地 schema 变化使用 Dexie `version().upgrade()`，并测试从仍可能存在的旧版本升级。
@@ -89,14 +89,15 @@ interface SessionRepository {
 	}): Promise<void>;
 	repairAbandonedRuns(threadId: string, checkpointedAt: string): Promise<CaptureRun[]>;
 	exportThread(threadId: string, exportedAt: string): Promise<string>;
-	importThread(json: string, checkpointedAt: string): Promise<void>;
+	importThread(json: string, checkpointedAt: string): Promise<string>;
 }
 ```
 
 - `saveCheckpoint` 在一个事务中保存 thread 元数据、完整流快照和 run 元数据；实时事实路径不依赖 segment。本地 record 可以保存 `checkpointedAt` 等恢复元数据，但这些字段不进入领域类型。
 - `replaceSegmentRevision` 在一个事务内写入新 revision 的全部 segment，并切换 `run.currentSegmentRevision`。
 - `repairAbandonedRuns` 在页面恢复时一次性修复遗留 run。
-- `exportThread` 和 `importThread` 使用带 `schemaVersion` 的 thread 级 JSON；导入前验证对象结构、跨 thread 引用和稳定顺序号，再在一个事务内替换该 thread 的本地记录。
+- `exportThread` 和 `importThread` 使用带 `schemaVersion` 的 thread 级 JSON；导入前验证对象结构、跨 thread 引用和稳定顺序号，再在一个事务内替换该 thread 的本地记录。相同文件重复导入按稳定 thread ID 覆盖恢复，不创建副本；MVP 不增加整库归档格式。
+- 本地库打开后尽力调用浏览器 Storage API 请求持久存储。浏览器可能拒绝或不支持该请求，因此它只降低自动回收风险，不能替代逐会话 JSON 备份。
 - 完整流变脏后以 10 秒为最大合并间隔保存。这里使用持续写入也会周期触发的 throttle/coalescing 语义，不能把普通 trailing debounce 重置到连续讲话结束才第一次落盘。暂停、连接失败、页面隐藏和 `pagehide` 时立即 flush `saveCheckpoint`；组件卸载不能直接丢弃最后的内存状态。浏览器可能随时终止异步卸载工作，因此恢复能力不能只依赖最后一次 unload 写入。
 - 页面侧 checkpoint 协调器使用 `clean / dirty / saving / saving-dirty` 四态，而不是单个 dirty 布尔值。保存期间出现的新 delta 必须进入 `saving-dirty`，旧快照完成后仍保持待保存；写入失败回到 `dirty` 并保留原始错误供日志和重试，不另设会阻断实时翻译的失败终态。
 - `SessionRepository` 的输入必须是可结构化克隆的普通领域对象。Svelte `$state` 的深层代理不能直接交给 IndexedDB；页面在 Repository 边界必须先取得普通对象快照。该约束需要由真实浏览器持久化测试覆盖，`fake-indexeddb` 上使用普通测试对象无法暴露代理克隆错误；以后每增加一条 Repository 页面写入路径，必须同步增加一个真实浏览器场景并保持控制台零错误断言。

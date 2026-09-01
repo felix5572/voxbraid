@@ -5,6 +5,19 @@ import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
+try {
+	process.loadEnvFile('.env');
+} catch (error) {
+	if (error?.code !== 'ENOENT') throw error;
+}
+
+const basicAuthUsername = process.env.VOXBRAID_BASIC_AUTH_USERNAME;
+const basicAuthPassword = process.env.VOXBRAID_BASIC_AUTH_PASSWORD;
+const httpCredentials =
+	basicAuthUsername && basicAuthPassword
+		? { username: basicAuthUsername, password: basicAuthPassword }
+		: undefined;
+
 async function firstAccessible(paths) {
 	for (const path of paths.filter(Boolean)) {
 		try {
@@ -56,16 +69,36 @@ async function waitForReady(page) {
 	});
 	assert.equal(await start.isEnabled(), true);
 	await page.waitForFunction(() => window.__voxbraidBrowserTest !== undefined);
+	await page.getByText('本地持久存储已启用', { exact: true }).waitFor();
+	assert.deepEqual(await page.evaluate(() => window.__voxbraidStorageTest), {
+		persistedChecks: 1,
+		persistRequests: 1
+	});
 	await page
 		.locator('[data-official-window-days="30"] [data-official-cost-usd="0.10285"]')
 		.waitFor();
 }
 
 async function createPage(browser, baseUrl, query = '?browser-test=1') {
-	const context = await browser.newContext();
+	const context = await browser.newContext({ ...(httpCredentials ? { httpCredentials } : {}) });
 	await context.addInitScript(() => {
 		const stats = { releases: 0, requests: 0 };
+		const storageStats = { persistedChecks: 0, persistRequests: 0 };
 		Object.defineProperty(window, '__voxbraidWakeLockTest', { value: stats });
+		Object.defineProperty(window, '__voxbraidStorageTest', { value: storageStats });
+		Object.defineProperty(navigator, 'storage', {
+			configurable: true,
+			value: {
+				persisted: async () => {
+					storageStats.persistedChecks += 1;
+					return false;
+				},
+				persist: async () => {
+					storageStats.persistRequests += 1;
+					return true;
+				}
+			}
+		});
 		Object.defineProperty(navigator, 'wakeLock', {
 			configurable: true,
 			value: {
@@ -226,6 +259,27 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await mainText(page, newThreadSource).waitFor();
 		assert.equal(await newThreadButton.getAttribute('aria-current'), 'page');
 		assert.equal(await mainText(page, firstSource).count(), 0);
+
+		await firstThreadButton.click();
+		const downloadPromise = page.waitForEvent('download');
+		await page.getByRole('button', { name: '导出当前会话 JSON' }).click();
+		const download = await downloadPromise;
+		const archivePath = await download.path();
+		assert.ok(archivePath);
+		await newThreadButton.click();
+		const importButton = page.getByRole('button', { name: '导入会话 JSON' });
+		await page.waitForFunction(() => {
+			const button = [...document.querySelectorAll('button')].find((item) =>
+				item.textContent?.includes('导入会话 JSON')
+			);
+			return button instanceof HTMLButtonElement && !button.disabled;
+		});
+		assert.equal(await importButton.isEnabled(), true);
+		const importInput = page.locator('input[type="file"][accept*="json"]');
+		await importInput.setInputFiles(archivePath);
+		await page.getByText('会话已恢复。重复导入同一文件不会创建副本。', { exact: true }).waitFor();
+		await mainText(page, firstSource).waitFor();
+		assert.equal((await readStore(page, 'threads')).length, 2);
 
 		await page.setViewportSize({ width: 768, height: 1_024 });
 		const sessionMenu = page.getByRole('button', { name: '打开会话列表' });

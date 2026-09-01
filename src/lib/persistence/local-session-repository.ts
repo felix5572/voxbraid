@@ -188,7 +188,7 @@ export class LocalSessionRepository {
 		});
 	}
 
-	async importThread(value: string, checkpointedAt: string): Promise<void> {
+	async importThread(value: string, checkpointedAt: string): Promise<string> {
 		const archive = parseSessionArchive(value);
 		await this.database.transaction(
 			'rw',
@@ -234,6 +234,7 @@ export class LocalSessionRepository {
 				await this.database.segments.bulkPut(archive.segments);
 			}
 		);
+		return archive.thread.id;
 	}
 
 	close(): void {

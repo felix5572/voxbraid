@@ -1,6 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { CheckpointWriter } from '$lib/persistence/checkpoint-writer';
+	import {
+		requestStoragePersistence,
+		type StorageDurability
+	} from '$lib/persistence/storage-durability';
 	import type {
 		LocalSessionRepository,
 		StoredThread
@@ -110,6 +114,8 @@
 	let error = $state('');
 	let persistencePhase = $state<PersistencePhase>('restoring');
 	let persistenceError = $state('');
+	let backupMessage = $state('');
+	let storageDurability = $state<StorageDurability | 'checking'>('checking');
 	let threads = $state<TranslationThread[]>([]);
 	let sessionSidebarOpen = $state(false);
 	let sessionSwitching = $state(false);
@@ -138,6 +144,7 @@
 	let sourceScroller: HTMLDivElement | null = null;
 	let translationScroller: HTMLDivElement | null = null;
 	let sessionMenuButton: HTMLButtonElement | null = null;
+	let backupInput = $state<HTMLInputElement | null>(null);
 	let sourceFollowsTail = true;
 	let translationFollowsTail = true;
 	let followFrame: number | null = null;
@@ -291,10 +298,44 @@
 			link.click();
 			link.remove();
 			setTimeout(() => URL.revokeObjectURL(url), 0);
+			backupMessage = '当前会话已导出。';
 		} catch (exportError) {
 			console.error('[persistence] export failed', exportError);
 			persistenceError = '会话导出失败，请稍后重试。';
 		}
+	}
+
+	async function importSessionArchive(file: File): Promise<void> {
+		if (!repository || sessionActionsDisabled) return;
+		sessionSwitching = true;
+		backupMessage = '';
+		try {
+			if (checkpointWriter && session) {
+				markCheckpointDirty();
+				if (!(await flushCheckpoint())) return;
+			}
+			const importedThreadId = await repository.importThread(await file.text(), nowIso());
+			await repository.repairAbandonedRuns(importedThreadId, nowIso());
+			const stored = await repository.loadThread(importedThreadId);
+			if (!stored) throw new Error(`Imported thread not found: ${importedThreadId}.`);
+			applyStoredThread(stored);
+			await refreshThreadList();
+			persistenceError = '';
+			backupMessage = '会话已恢复。重复导入同一文件不会创建副本。';
+		} catch (importError) {
+			console.error('[persistence] import failed', importError);
+			persistenceError = '会话文件无效或恢复失败，本地原有会话未被清除。';
+		} finally {
+			sessionSwitching = false;
+			if (backupInput) backupInput.value = '';
+		}
+	}
+
+	function handleBackupFile(event: Event): void {
+		const input = event.currentTarget;
+		if (!(input instanceof HTMLInputElement)) return;
+		const [file] = input.files ?? [];
+		if (file) void importSessionArchive(file);
 	}
 
 	async function startNewThread(): Promise<void> {
@@ -624,6 +665,14 @@
 							return;
 						}
 						persistencePhase = 'ready';
+						void requestStoragePersistence()
+							.then((result) => {
+								if (!disposed) storageDurability = result;
+							})
+							.catch((storageError: unknown) => {
+								console.warn('[persistence] persistent storage request failed', storageError);
+								if (!disposed) storageDurability = 'best-effort';
+							});
 						checkpointTimer = window.setInterval(
 							() => void flushCheckpoint(),
 							LOCAL_CHECKPOINT_INTERVAL_MS
@@ -644,6 +693,7 @@
 				repository = null;
 				checkpointWriter = null;
 				persistencePhase = 'unavailable';
+				storageDurability = 'best-effort';
 				persistenceError = '本地历史记录不可用；实时翻译仍可继续。';
 			})
 			.finally(() => {
@@ -795,6 +845,7 @@
 		currentThreadId={session?.thread.id ?? null}
 		open={sessionSidebarOpen}
 		disabled={sessionActionsDisabled}
+		{storageDurability}
 		onClose={closeSessionSidebar}
 		onNew={() => void startNewThread()}
 		onSelect={(threadId) => void selectThread(threadId)}
@@ -940,6 +991,8 @@
 				<strong>本地记录未保存</strong>
 				<span>{persistenceError}</span>
 			</div>
+		{:else if backupMessage}
+			<div class="backup-message" role="status">{backupMessage}</div>
 		{/if}
 
 		<section class="captions" aria-live="polite">
@@ -1000,10 +1053,26 @@
 				</span>
 				<span>当前不播放译音 · 不保存录音</span>
 			</div>
-			{#if session && persistencePhase === 'ready'}
-				<button class="export" onclick={() => void downloadSessionArchive()}
-					>导出当前会话 JSON</button
-				>
+			{#if persistencePhase === 'ready'}
+				<div class="backup-actions">
+					<button
+						class="export"
+						disabled={sessionActionsDisabled || !session}
+						onclick={() => void downloadSessionArchive()}>导出当前会话 JSON</button
+					>
+					<button
+						class="export"
+						disabled={sessionActionsDisabled}
+						onclick={() => backupInput?.click()}>导入会话 JSON</button
+					>
+					<input
+						bind:this={backupInput}
+						class="backup-input"
+						type="file"
+						accept="application/json,.json"
+						onchange={handleBackupFile}
+					/>
+				</div>
 			{/if}
 		</footer>
 	</main>
@@ -1041,6 +1110,24 @@
 	.controls,
 	footer {
 		justify-content: space-between;
+	}
+
+	.backup-actions {
+		display: flex;
+		gap: 8px;
+	}
+
+	.backup-input {
+		display: none;
+	}
+
+	.backup-message {
+		padding: 10px 14px;
+		border: 1px solid #315142;
+		border-radius: 12px;
+		background: #122019;
+		color: #a8d8c1;
+		font-size: 13px;
 	}
 
 	.brand {
