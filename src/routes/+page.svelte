@@ -120,6 +120,10 @@
 	};
 	const RESTORE_TIMEOUT_MS = 5_000;
 	const DIAGNOSTIC_EVENT_LIMIT = 500;
+	const CAPTION_FONT_SIZE_STORAGE_KEY = 'voxbraid-caption-font-size';
+	const DEFAULT_CAPTION_FONT_SIZE_PX = 22;
+	const MIN_CAPTION_FONT_SIZE_PX = 16;
+	const MAX_CAPTION_FONT_SIZE_PX = 30;
 	const RUN_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
 		hour: '2-digit',
 		minute: '2-digit'
@@ -146,6 +150,7 @@
 	let officialUsage = $state<OfficialUsageSummary | null>(null);
 	let officialUsagePhase = $state<OfficialUsagePhase>('loading');
 	let officialUsageRequest = 0;
+	let captionFontSizePx = $state(DEFAULT_CAPTION_FONT_SIZE_PX);
 	let client: TranslationClient | null = null;
 	let clientReady = $state(false);
 	let repository: LocalSessionRepository | null = null;
@@ -218,6 +223,21 @@
 
 	function nowIso(): string {
 		return new Date().toISOString();
+	}
+
+	function normalizedCaptionFontSize(value: number): number {
+		if (!Number.isFinite(value)) return DEFAULT_CAPTION_FONT_SIZE_PX;
+		return Math.min(MAX_CAPTION_FONT_SIZE_PX, Math.max(MIN_CAPTION_FONT_SIZE_PX, value));
+	}
+
+	function updateCaptionFontSize(event: Event): void {
+		const input = event.currentTarget as HTMLInputElement;
+		captionFontSizePx = normalizedCaptionFontSize(Number(input.value));
+		try {
+			localStorage.setItem(CAPTION_FONT_SIZE_STORAGE_KEY, String(captionFontSizePx));
+		} catch (storageError) {
+			console.warn('[caption-font-size] preference could not be saved', storageError);
+		}
 	}
 
 	function resetRealtimeDiagnostics(): void {
@@ -686,6 +706,14 @@
 		let restoreAllowed = true;
 		let restoreTimer: number | null = null;
 		let checkpointTimer: number | null = null;
+		try {
+			const storedCaptionFontSize = localStorage.getItem(CAPTION_FONT_SIZE_STORAGE_KEY);
+			if (storedCaptionFontSize !== null) {
+				captionFontSizePx = normalizedCaptionFontSize(Number(storedCaptionFontSize));
+			}
+		} catch (storageError) {
+			console.warn('[caption-font-size] preference could not be loaded', storageError);
+		}
 		const usageTimer = window.setInterval(() => {
 			const activeRun = session ? activeCaptureRun(session) : null;
 			if (activeRun?.mediaStartedAt) {
@@ -1183,9 +1211,31 @@
 			<div class="backup-message" role="status">{backupMessage}</div>
 		{/if}
 
-		<section class="captions" aria-live="polite">
+		<section
+			class="captions"
+			aria-live="polite"
+			style={`--caption-font-size: ${captionFontSizePx}px;`}
+		>
 			<article>
-				<div class="caption-label"><span>原文</span><small>自动识别语言</small></div>
+				<div class="caption-label">
+					<div class="caption-label-copy"><span>原文</span><small>自动识别语言</small></div>
+					<details class="caption-font-control">
+						<summary>字号 {captionFontSizePx}</summary>
+						<div class="caption-font-popover">
+							<span aria-hidden="true">小</span>
+							<input
+								type="range"
+								aria-label="字幕字号"
+								min={MIN_CAPTION_FONT_SIZE_PX}
+								max={MAX_CAPTION_FONT_SIZE_PX}
+								step="1"
+								value={captionFontSizePx}
+								oninput={updateCaptionFontSize}
+							/>
+							<span aria-hidden="true">大</span>
+						</div>
+					</details>
+				</div>
 				<div class="caption-scroll" bind:this={sourceScroller} onscroll={updateSourceFollow}>
 					{#if sourceTranscriptRuns.length > 0}
 						{#each sourceTranscriptRuns as run (run.runId)}
@@ -1206,8 +1256,10 @@
 
 			<article class="translated">
 				<div class="caption-label">
-					<span>译文</span>
-					<small>{TARGET_LANGUAGES.find((item) => item.code === targetLanguage)?.label}</small>
+					<div class="caption-label-copy">
+						<span>译文</span>
+						<small>{TARGET_LANGUAGES.find((item) => item.code === targetLanguage)?.label}</small>
+					</div>
 				</div>
 				<div
 					class="caption-scroll"
@@ -1767,8 +1819,8 @@
 	}
 
 	.captions {
-		height: clamp(500px, calc(100dvh - 224px), 760px);
-		min-height: 500px;
+		height: clamp(620px, calc(100dvh - 150px), 900px);
+		min-height: 620px;
 		border: 1px solid #202724;
 		border-radius: 16px;
 		display: grid;
@@ -1785,8 +1837,15 @@
 		flex-direction: column;
 	}
 	.caption-label {
+		position: relative;
+		justify-content: space-between;
 		gap: 10px;
 		margin-bottom: 12px;
+	}
+	.caption-label-copy {
+		display: flex;
+		align-items: center;
+		gap: 10px;
 	}
 	.caption-label span {
 		color: #87c5b0;
@@ -1798,6 +1857,52 @@
 		color: #68726d;
 		font-size: 12px;
 	}
+	.caption-font-control {
+		position: relative;
+		flex: none;
+	}
+	.caption-font-control summary {
+		min-width: 68px;
+		padding: 5px 9px;
+		border: 1px solid #303a35;
+		border-radius: 9px;
+		background: #111613;
+		color: #9ba8a2;
+		font-size: 12px;
+		line-height: 1;
+		text-align: center;
+		cursor: pointer;
+		list-style: none;
+	}
+	.caption-font-control summary::-webkit-details-marker {
+		display: none;
+	}
+	.caption-font-control[open] summary {
+		border-color: #6aa995;
+		color: #bce6d7;
+	}
+	.caption-font-popover {
+		position: absolute;
+		top: calc(100% + 8px);
+		right: 0;
+		z-index: 4;
+		width: min(240px, calc(100vw - 64px));
+		padding: 12px;
+		border: 1px solid #303a35;
+		border-radius: 12px;
+		display: grid;
+		grid-template-columns: auto minmax(120px, 1fr) auto;
+		align-items: center;
+		gap: 9px;
+		background: #111613;
+		box-shadow: 0 12px 34px rgba(0, 0, 0, 0.42);
+		color: #7d8983;
+		font-size: 11px;
+	}
+	.caption-font-popover input {
+		width: 100%;
+		accent-color: #83d4ba;
+	}
 	.caption-scroll {
 		min-height: 0;
 		overflow-y: auto;
@@ -1806,7 +1911,7 @@
 	}
 	article p {
 		margin: 0;
-		font-size: clamp(22px, 2.15vw, 30px);
+		font-size: var(--caption-font-size, 22px);
 		font-weight: 530;
 		line-height: 1.45;
 		letter-spacing: -0.016em;
@@ -1905,8 +2010,8 @@
 			width: 100%;
 		}
 		.captions {
-			height: clamp(520px, calc(100dvh - 238px), 760px);
-			min-height: 520px;
+			height: clamp(560px, calc(100dvh - 180px), 780px);
+			min-height: 560px;
 		}
 		footer {
 			align-items: flex-start;

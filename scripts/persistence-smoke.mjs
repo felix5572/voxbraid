@@ -183,6 +183,21 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 	const { browserErrors, context, page } = await createPage(browser, baseUrl);
 	try {
 		await waitForReady(page);
+		await page.getByText('字号 22', { exact: true }).click();
+		const captionFontSize = page.getByLabel('字幕字号', { exact: true });
+		await captionFontSize.fill('18');
+		assert.equal(
+			await page
+				.locator('.captions article p')
+				.first()
+				.evaluate((element) => {
+					return getComputedStyle(element).fontSize;
+				}),
+			'18px'
+		);
+		await page.reload({ waitUntil: 'networkidle' });
+		await waitForReady(page);
+		assert.equal(await page.getByLabel('字幕字号', { exact: true }).inputValue(), '18');
 		const targetLanguageSelect = page.getByLabel('目标语言', { exact: true });
 		const transcriptionModelSelect = page.getByLabel('原文模型', { exact: true });
 		const noiseReductionSelect = page.getByLabel('输入降噪', { exact: true });
