@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { CheckpointWriter } from '$lib/persistence/checkpoint-writer';
+	import type { LocalSessionRepository } from '$lib/persistence/local-session-repository';
 	import { RealtimeTranslationClient, realtimeErrorMessage } from '$lib/realtime/client';
 	import { ScreenWakeLock } from '$lib/screen-wake-lock';
 	import {
@@ -7,6 +9,7 @@
 		appendRealtimeTranscriptEvent,
 		beginCaptureRun,
 		createTranslationSession,
+		currentCaptureRun,
 		endActiveCaptureRun,
 		markActiveRunConnected,
 		markActiveRunHidden,
@@ -15,6 +18,7 @@
 		type TranslationSessionState
 	} from '$lib/session/translation-session';
 	import { visibleTranscriptRuns, type VisibleTranscriptRun } from '$lib/session/transcript-view';
+	import type { CaptureRun, TranslationThread } from '$lib/session/types';
 	import type { AudioFileStreamSource } from '$lib/testing/audio-file-source';
 	import type {
 		AudioTestOutcome,
@@ -23,6 +27,7 @@
 	} from '$lib/testing/audio-test-report';
 	import {
 		TARGET_LANGUAGES,
+		isTargetLanguage,
 		type ConnectionStatus,
 		type TargetLanguage,
 		type TranslationServerEvent
@@ -46,6 +51,11 @@
 		hiddenDurationsMs: number[];
 		errors: string[];
 	};
+	type CheckpointSnapshot = {
+		thread: TranslationThread;
+		run: CaptureRun;
+	};
+	type PersistencePhase = 'restoring' | 'ready' | 'unavailable';
 
 	const STATUS_LABELS: Record<ConnectionStatus, string> = {
 		idle: '待机',
@@ -58,6 +68,7 @@
 		failed: '连接异常'
 	};
 	const VISIBLE_TAIL_CHARACTERS = 2_000;
+	const RESTORE_TIMEOUT_MS = 5_000;
 	const RUN_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
 		hour: '2-digit',
 		minute: '2-digit'
@@ -67,7 +78,11 @@
 	let targetLanguage = $state<TargetLanguage>('zh');
 	let session = $state<TranslationSessionState | null>(null);
 	let error = $state('');
+	let persistencePhase = $state<PersistencePhase>('restoring');
+	let persistenceError = $state('');
 	let client: RealtimeTranslationClient | null = null;
+	let repository: LocalSessionRepository | null = null;
+	let checkpointWriter: CheckpointWriter<CheckpointSnapshot> | null = null;
 	let AudioTestPanel = $state<typeof import('$lib/testing/AudioTestPanel.svelte').default | null>(
 		null
 	);
@@ -91,9 +106,11 @@
 
 	const active = $derived(status !== 'idle' && status !== 'failed' && status !== 'stopping');
 	const statusLabel = $derived(
-		import.meta.env.DEV && audioTestEnabled && status === 'requesting-microphone'
-			? '准备录音'
-			: STATUS_LABELS[status]
+		persistencePhase === 'restoring' && status === 'idle'
+			? '恢复记录'
+			: import.meta.env.DEV && audioTestEnabled && status === 'requesting-microphone'
+				? '准备录音'
+				: STATUS_LABELS[status]
 	);
 	const sourceTranscriptRuns = $derived(
 		session ? visibleTranscriptRuns(session.runs, 'source', VISIBLE_TAIL_CHARACTERS) : []
@@ -112,6 +129,58 @@
 
 	function languageLabel(code: string): string {
 		return TARGET_LANGUAGES.find((language) => language.code === code)?.label ?? code;
+	}
+
+	function markCheckpointDirty(): void {
+		if (!session || !checkpointWriter) return;
+		const run = currentCaptureRun(session);
+		if (!run) return;
+		checkpointWriter.markDirty({ thread: session.thread, run });
+	}
+
+	async function flushCheckpoint(): Promise<boolean> {
+		if (!checkpointWriter) return false;
+		try {
+			await checkpointWriter.flush();
+			persistenceError = '';
+			return true;
+		} catch (saveError) {
+			console.error('[persistence] checkpoint failed', saveError);
+			persistenceError = '字幕仍保留在当前页面中，系统会继续尝试保存。';
+			return false;
+		}
+	}
+
+	async function downloadSessionArchive(): Promise<void> {
+		if (!repository || !session) return;
+		markCheckpointDirty();
+		if (!(await flushCheckpoint())) return;
+
+		try {
+			const exportedAt = nowIso();
+			const json = await repository.exportThread(session.thread.id, exportedAt);
+			const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = `voxbraid-session-${exportedAt.replaceAll(':', '-')}.json`;
+			document.body.append(link);
+			link.click();
+			link.remove();
+			setTimeout(() => URL.revokeObjectURL(url), 0);
+		} catch (exportError) {
+			console.error('[persistence] export failed', exportError);
+			persistenceError = '会话导出失败，请稍后重试。';
+		}
+	}
+
+	async function startNewThread(): Promise<void> {
+		if (active || persistencePhase === 'restoring') return;
+		if (checkpointWriter && session) {
+			markCheckpointDirty();
+			if (!(await flushCheckpoint())) return;
+		}
+		session = null;
+		error = '';
 	}
 
 	function isNearTail(element: HTMLDivElement): boolean {
@@ -190,6 +259,8 @@
 			},
 			at: nowIso()
 		});
+		markCheckpointDirty();
+		void flushCheckpoint();
 	}
 
 	function recordTranscriptTiming(event: TranslationServerEvent): void {
@@ -225,6 +296,10 @@
 	}
 
 	onMount(() => {
+		let disposed = false;
+		let restoreAllowed = true;
+		let restoreTimer: number | null = null;
+		let checkpointTimer: number | null = null;
 		const search = new URLSearchParams(location.search);
 		timingProbeEnabled = import.meta.env.DEV && search.get('timing-probe') === '1';
 		if (import.meta.env.DEV && search.get('audio-test') === '1') {
@@ -254,9 +329,12 @@
 					status = nextStatus;
 					if (session && nextStatus === 'connected') {
 						session = markActiveRunConnected(session, at);
+						markCheckpointDirty();
+						void flushCheckpoint();
 					}
 					if (session && nextStatus === 'stopping') {
 						session = markActiveRunStopping(session);
+						markCheckpointDirty();
 					}
 					if (nextStatus === 'connected') {
 						if (import.meta.env.DEV) {
@@ -275,6 +353,7 @@
 
 					const previousDeltasAfterClose = session.diagnostics.deltasAfterClose;
 					session = appendRealtimeTranscriptEvent(session, event, nowIso());
+					markCheckpointDirty();
 					followTranscriptTails();
 					if (
 						import.meta.env.DEV &&
@@ -316,9 +395,82 @@
 			}
 		);
 
+		const restorePromise = Promise.all([
+			import('$lib/persistence/local-session-repository'),
+			import('$lib/persistence/local-session-database')
+		]).then(async ([{ LocalSessionRepository }, { LOCAL_CHECKPOINT_INTERVAL_MS }]) => {
+			const localRepository = new LocalSessionRepository();
+			if (disposed || !restoreAllowed) {
+				localRepository.close();
+				return;
+			}
+
+			repository = localRepository;
+			checkpointWriter = new CheckpointWriter(async (snapshot) => {
+				await localRepository.saveCheckpoint({ ...snapshot, checkpointedAt: nowIso() });
+			});
+
+			const [latestThread] = await localRepository.listThreads();
+			if (disposed || !restoreAllowed) {
+				localRepository.close();
+				return;
+			}
+			if (latestThread) {
+				await localRepository.repairAbandonedRuns(latestThread.id, nowIso());
+				if (disposed || !restoreAllowed) {
+					localRepository.close();
+					return;
+				}
+				const stored = await localRepository.loadThread(latestThread.id);
+				if (stored && !disposed && restoreAllowed) {
+					session = {
+						thread: stored.thread,
+						runs: stored.runs,
+						activeRunId: null,
+						diagnostics: { deltasAfterClose: 0 }
+					};
+					const restoredLanguage =
+						stored.runs.at(-1)?.targetLanguage ?? stored.thread.defaultTargetLanguage;
+					if (isTargetLanguage(restoredLanguage)) targetLanguage = restoredLanguage;
+				}
+			}
+
+			if (disposed || !restoreAllowed) {
+				localRepository.close();
+				return;
+			}
+			persistencePhase = 'ready';
+			checkpointTimer = window.setInterval(
+				() => void flushCheckpoint(),
+				LOCAL_CHECKPOINT_INTERVAL_MS
+			);
+		});
+		const restoreDeadline = new Promise<never>((_, reject) => {
+			restoreTimer = window.setTimeout(() => {
+				restoreAllowed = false;
+				reject(new Error(`Local session restore timed out after ${RESTORE_TIMEOUT_MS} ms.`));
+			}, RESTORE_TIMEOUT_MS);
+		});
+		void Promise.race([restorePromise, restoreDeadline])
+			.catch((restoreError: unknown) => {
+				if (disposed) return;
+				restoreAllowed = false;
+				console.error('[persistence] restore failed', restoreError);
+				repository?.close();
+				repository = null;
+				checkpointWriter = null;
+				persistencePhase = 'unavailable';
+				persistenceError = '本地历史记录不可用；实时翻译仍可继续。';
+			})
+			.finally(() => {
+				if (restoreTimer !== null) clearTimeout(restoreTimer);
+			});
+
 		const handleVisibility = () => {
 			if (document.visibilityState === 'hidden' && session) {
 				session = markActiveRunHidden(session, nowIso());
+				markCheckpointDirty();
+				void flushCheckpoint();
 			}
 			if (document.visibilityState === 'visible') {
 				const hiddenAt = session ? activeCaptureRun(session)?.hiddenAt : null;
@@ -330,17 +482,30 @@
 					console.info(`[visibility] page was hidden for ${hiddenDurationMs} ms`);
 				}
 				if (session) session = markActiveRunVisible(session);
+				markCheckpointDirty();
 				if (status === 'connected') void wakeLock.acquire();
 			}
 		};
+		const handlePageHide = () => {
+			markCheckpointDirty();
+			void flushCheckpoint();
+		};
 		document.addEventListener('visibilitychange', handleVisibility);
+		window.addEventListener('pagehide', handlePageHide);
 
 		return () => {
+			disposed = true;
+			restoreAllowed = false;
 			document.removeEventListener('visibilitychange', handleVisibility);
+			window.removeEventListener('pagehide', handlePageHide);
+			if (checkpointTimer !== null) clearInterval(checkpointTimer);
 			if (followFrame !== null) cancelAnimationFrame(followFrame);
 			if (import.meta.env.DEV) audioFileSource?.stop();
 			void client?.stop();
 			void wakeLock.release();
+			markCheckpointDirty();
+			const finalCheckpoint = flushCheckpoint();
+			void finalCheckpoint.finally(() => repository?.close());
 		};
 	});
 
@@ -365,6 +530,8 @@
 			clientPlatform: navigator.userAgent,
 			at
 		});
+		markCheckpointDirty();
+		await flushCheckpoint();
 		if (import.meta.env.DEV && audioTestEnabled && audioTestFile) {
 			const run = activeCaptureRun(session);
 			if (!run) throw new Error('Audio test run was not created.');
@@ -420,6 +587,8 @@
 				reason: 'user-paused',
 				at: nowIso()
 			});
+			markCheckpointDirty();
+			await flushCheckpoint();
 		}
 		publishTranscriptTiming();
 		timingProbeStartedAt = null;
@@ -449,7 +618,7 @@
 	<section class="controls" aria-label="翻译控制">
 		<label>
 			<span>目标语言</span>
-			<select bind:value={targetLanguage} disabled={active}>
+			<select bind:value={targetLanguage} disabled={active || persistencePhase === 'restoring'}>
 				{#each TARGET_LANGUAGES as language (language.code)}
 					<option value={language.code}>{language.label}</option>
 				{/each}
@@ -461,15 +630,27 @@
 				<span class="stop-icon"></span>停止翻译
 			</button>
 		{:else}
-			<button
-				class="start"
-				onclick={start}
-				disabled={status === 'stopping' ||
-					(import.meta.env.DEV && audioTestEnabled && !audioTestFile)}
-			>
-				<span class="mic" aria-hidden="true"></span>
-				{import.meta.env.DEV && audioTestEnabled ? '开始录音回放' : '开始翻译'}
-			</button>
+			<div class="control-actions">
+				{#if session && session.runs.length > 0}
+					<button
+						class="new-thread"
+						onclick={() => void startNewThread()}
+						disabled={persistencePhase === 'restoring' || status === 'stopping'}
+					>
+						新建会话
+					</button>
+				{/if}
+				<button
+					class="start"
+					onclick={start}
+					disabled={persistencePhase === 'restoring' ||
+						status === 'stopping' ||
+						(import.meta.env.DEV && audioTestEnabled && !audioTestFile)}
+				>
+					<span class="mic" aria-hidden="true"></span>
+					{import.meta.env.DEV && audioTestEnabled ? '开始录音回放' : '开始翻译'}
+				</button>
+			</div>
 		{/if}
 	</section>
 
@@ -482,10 +663,23 @@
 		/>
 	{/if}
 
+	{#if import.meta.env.DEV && session && persistencePhase === 'ready'}
+		<div class="developer-tools">
+			<button class="export" onclick={() => void downloadSessionArchive()}>导出会话 JSON</button>
+		</div>
+	{/if}
+
 	{#if error}
 		<div class="error" role="alert">
 			<strong>连接没有建立</strong>
 			<span>{error}</span>
+		</div>
+	{/if}
+
+	{#if persistenceError}
+		<div class="warning" role="status">
+			<strong>本地记录未保存</strong>
+			<span>{persistenceError}</span>
 		</div>
 	{/if}
 
@@ -714,6 +908,16 @@
 		background: #e7dad6;
 		color: #281411;
 	}
+	.control-actions {
+		display: flex;
+		gap: 10px;
+	}
+	.new-thread {
+		min-width: 0;
+		border: 1px solid #343d39;
+		background: #111613;
+		color: #b9c1bd;
+	}
 	.mic {
 		width: 10px;
 		height: 15px;
@@ -740,6 +944,31 @@
 
 	.error strong {
 		color: #f6ddd8;
+	}
+	.warning {
+		padding: 14px 16px;
+		border: 1px solid #655c38;
+		border-radius: 13px;
+		display: grid;
+		gap: 4px;
+		background: rgba(86, 72, 28, 0.24);
+		color: #d8ce98;
+		font-size: 14px;
+	}
+	.warning strong {
+		color: #f0e8bc;
+	}
+	.developer-tools {
+		display: flex;
+		justify-content: flex-end;
+	}
+	.export {
+		min-width: 0;
+		padding: 8px 12px;
+		border: 1px solid #343d39;
+		background: #111613;
+		color: #aeb8b3;
+		font-size: 12px;
 	}
 
 	.captions {
@@ -836,6 +1065,10 @@
 		}
 		.controls {
 			align-items: stretch;
+			flex-direction: column;
+		}
+		.control-actions {
+			width: 100%;
 			flex-direction: column;
 		}
 		label {

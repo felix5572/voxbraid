@@ -62,7 +62,7 @@ const LOCAL_DB_NAME = import.meta.env.DEV ? `voxbraid-dev-${LOCAL_DB_EPOCH}` : '
 
 较大的 schema 改动可以递增开发 epoch，直接让新代码打开一套干净结构，而不为每次试验写升级脚本；epoch 变化不能影响生产库。若重要内容是在开发服务器中录制，它仍属于开发 epoch 数据，不能因为生产库名稳定就跳过以下纪律：
 
-1. 第一次递增 epoch 之前先实现 thread 级 JSON 导出和导入。
+1. 第一次递增 epoch 之前先实现覆盖当前开发库中全部 thread 的 JSON 导出；只导出页面当前 thread 不满足备份条件。恢复可以采用多 thread 归档整体导入，或先提供 thread 列表再逐个导入，但必须有经过验证的路径能够找回全部记录。
 2. 递增 epoch 时不自动删除旧 IndexedDB；旧库作为人工恢复来源保留。
 3. 一旦保存了任何不愿丢失的真实会议、课堂或讲座，epoch 阶段立即结束。
 4. epoch 阶段结束后，所有本地 schema 变化使用 Dexie `version().upgrade()`，并测试从仍可能存在的旧版本升级。
@@ -98,6 +98,9 @@ interface SessionRepository {
 - `repairAbandonedRuns` 在页面恢复时一次性修复遗留 run。
 - `exportThread` 和 `importThread` 使用带 `schemaVersion` 的 thread 级 JSON；导入前验证对象结构、跨 thread 引用和稳定顺序号，再在一个事务内替换该 thread 的本地记录。
 - 完整流变脏后以 10 秒为最大合并间隔保存。这里使用持续写入也会周期触发的 throttle/coalescing 语义，不能把普通 trailing debounce 重置到连续讲话结束才第一次落盘。暂停、连接失败、页面隐藏和 `pagehide` 时立即 flush `saveCheckpoint`；组件卸载不能直接丢弃最后的内存状态。浏览器可能随时终止异步卸载工作，因此恢复能力不能只依赖最后一次 unload 写入。
+- 页面侧 checkpoint 协调器使用 `clean / dirty / saving / saving-dirty` 四态，而不是单个 dirty 布尔值。保存期间出现的新 delta 必须进入 `saving-dirty`，旧快照完成后仍保持待保存；写入失败回到 `dirty` 并保留原始错误供日志和重试，不另设会阻断实时翻译的失败终态。
+- 页面启动时先修复最近 thread 中遗留的活动 run，再恢复完整双流；恢复完成前暂不允许选择语言或开始新 run，避免新状态被异步恢复覆盖。恢复设有有限等待时间，IndexedDB 拒绝或持续阻塞时都明确降级，但实时翻译可继续以内存模式运行。
+- 已有 thread 停止收音后可以显式新建会话；旧 thread 保留在本地库中，后续 run 不再永久追加到同一个产品会话。完整历史列表和切换界面留到历史阅读阶段实现。
 - 当前 checkpoint 会重写 run 内两条完整流，累计写入量随长会话呈二次增长。如果 10 秒的崩溃丢失窗口以后不可接受，正式解法是增加追加式 `stream_chunks`，让每次只保存新增文本；不能单纯缩短完整快照间隔来换取更高写入放大。MVP 暂不增加该 store。
 
 不要先设计 `saveThread`、`saveRun`、`saveSegment` 一类通用接口再由页面拼事务；这会让关键原子性依赖每个调用方都正确组合。
