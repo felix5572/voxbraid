@@ -1000,8 +1000,10 @@
 				</span>
 				<span>当前不播放译音 · 不保存录音</span>
 			</div>
-			{#if import.meta.env.DEV && session && persistencePhase === 'ready'}
-				<button class="export" onclick={() => void downloadSessionArchive()}>导出会话 JSON</button>
+			{#if session && persistencePhase === 'ready'}
+				<button class="export" onclick={() => void downloadSessionArchive()}
+					>导出当前会话 JSON</button
+				>
 			{/if}
 		</footer>
 	</main>
