@@ -316,6 +316,7 @@
 				generatedAt: nowIso(),
 				requestedTranscriptionModel: diagnosticRequestedTranscriptionModel,
 				requestedNoiseReduction: diagnosticRequestedNoiseReduction,
+				build: __VOXBRAID_BUILD_INFO__,
 				userAgent: navigator.userAgent,
 				mediaTrack: diagnosticMediaTrack,
 				mediaEvents: diagnosticMediaEvents,
@@ -1265,9 +1266,18 @@
 
 		<section class="debug-diagnostics" aria-labelledby="debug-diagnostics-title">
 			<div class="debug-heading">
-				<div>
+				<div class="debug-title">
 					<p class="eyebrow">DEBUG</p>
 					<h2 id="debug-diagnostics-title">Realtime 诊断</h2>
+					<p
+						class="build-info"
+						title={`${__VOXBRAID_BUILD_INFO__.commitSha}${__VOXBRAID_BUILD_INFO__.dirty ? ' dirty' : ''} · ${__VOXBRAID_BUILD_INFO__.commitMessage}`}
+					>
+						<code>
+							{__VOXBRAID_BUILD_INFO__.commitSha}{__VOXBRAID_BUILD_INFO__.dirty ? ' dirty' : ''}
+						</code>
+						<span>{__VOXBRAID_BUILD_INFO__.commitMessage}</span>
+					</p>
 				</div>
 				<div class="debug-actions">
 					<label class="debug-model">
@@ -1399,6 +1409,25 @@
 		margin: 2px 0 0;
 		color: #d2d9d5;
 		font-size: 15px;
+	}
+	.debug-title {
+		min-width: 0;
+	}
+	.build-info {
+		max-width: 440px;
+		margin: 5px 0 0;
+		display: flex;
+		gap: 7px;
+		color: #727c77;
+		white-space: nowrap;
+	}
+	.build-info code {
+		color: #9da8a2;
+		font-size: 11px;
+	}
+	.build-info span {
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.debug-actions,
 	.debug-metrics {
