@@ -56,7 +56,9 @@ async function waitForReady(page) {
 	});
 	assert.equal(await start.isEnabled(), true);
 	await page.waitForFunction(() => window.__voxbraidBrowserTest !== undefined);
-	await page.locator('[data-official-cost-usd="0.10285"]').waitFor();
+	await page
+		.locator('[data-official-window-days="30"] [data-official-cost-usd="0.10285"]')
+		.waitFor();
 }
 
 async function createPage(browser, baseUrl, query = '?browser-test=1') {
@@ -90,8 +92,11 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 			body: JSON.stringify({
 				periodStart: '2026-09-01T00:00:00.000Z',
 				periodEnd: '2026-09-01T12:00:00.000Z',
-				durationSeconds: 121,
-				costUsd: 0.10285,
+				windows: [
+					{ days: 1, durationSeconds: 93, costUsd: 0.07905 },
+					{ days: 7, durationSeconds: 121, costUsd: 0.10285 },
+					{ days: 30, durationSeconds: 121, costUsd: 0.10285 }
+				],
 				updatedAt: '2026-09-01T12:00:00.000Z'
 			})
 		});

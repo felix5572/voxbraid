@@ -7,19 +7,31 @@ import {
 
 const NOW = new Date('2026-09-15T12:34:56.000Z');
 const API_KEY = 'admin-test-key';
+const DAY_SECONDS = 24 * 60 * 60;
+const NOW_SECONDS = NOW.getTime() / 1_000;
 
 function costsResponse(
-	results: unknown[],
+	buckets: unknown[],
 	options: { hasMore?: boolean; nextPage?: string } = {}
 ): Response {
 	return new Response(
 		JSON.stringify({
-			data: [{ object: 'bucket', results }],
+			data: buckets,
 			has_more: options.hasMore ?? false,
 			next_page: options.nextPage ?? null
 		}),
 		{ headers: { 'Content-Type': 'application/json' } }
 	);
+}
+
+function bucket(daysAgo: number, results: unknown[]): object {
+	const startTime = NOW_SECONDS - daysAgo * DAY_SECONDS;
+	return {
+		object: 'bucket',
+		start_time: startTime,
+		end_time: startTime + DAY_SECONDS,
+		results
+	};
 }
 
 function cost(lineItem: string, seconds: number, usd: number): object {
@@ -32,31 +44,44 @@ function cost(lineItem: string, seconds: number, usd: number): object {
 }
 
 describe('fetchOpenAIUsageSummary', () => {
-	it('sums realtime costs while counting shared audio duration once', async () => {
+	it('derives one, seven, and thirty-day windows from one daily-bucket query', async () => {
 		let requestedUrl: RequestInfo | URL | undefined;
 		let requestInit: RequestInit | undefined;
 		const fetcher = vi.fn(async (...args: [RequestInfo | URL, RequestInit?]) => {
 			requestedUrl = args[0];
 			requestInit = args[1];
 			return costsResponse([
-				cost('gpt-realtime-translate', 121, 0.06897),
-				cost('gpt-realtime-whisper', 120, 0.03388),
-				cost('gpt-5', 999, 9.99)
+				bucket(30, [
+					cost('gpt-realtime-translate', 10, 0.00567),
+					cost('gpt-realtime-whisper', 10, 0.00283)
+				]),
+				bucket(7, [
+					cost('gpt-realtime-translate', 20, 0.01133),
+					cost('gpt-realtime-whisper', 20, 0.00567)
+				]),
+				bucket(1, [
+					cost('gpt-realtime-translate', 30, 0.017),
+					cost('gpt-realtime-whisper', 29, 0.0085),
+					cost('gpt-5', 999, 9.99)
+				])
 			]);
 		});
 
 		const summary = await fetchOpenAIUsageSummary({ apiKey: API_KEY, fetcher, now: NOW });
 
 		expect(summary).toEqual({
-			periodStart: '2026-09-01T00:00:00.000Z',
+			periodStart: '2026-08-16T12:34:56.000Z',
 			periodEnd: NOW.toISOString(),
-			durationSeconds: 121,
-			costUsd: 0.10285,
+			windows: [
+				{ days: 1, durationSeconds: 30, costUsd: 0.0255 },
+				{ days: 7, durationSeconds: 50, costUsd: 0.0425 },
+				{ days: 30, durationSeconds: 60, costUsd: 0.051 }
+			],
 			updatedAt: NOW.toISOString()
 		});
 		const request = new URL(String(requestedUrl));
 		expect(request.pathname).toBe('/v1/organization/costs');
-		expect(request.searchParams.get('start_time')).toBe('1788220800');
+		expect(request.searchParams.get('start_time')).toBe(String(NOW_SECONDS - 30 * DAY_SECONDS));
 		expect(request.searchParams.getAll('group_by')).toEqual(['project_id', 'line_item']);
 		expect(requestInit?.headers).toEqual({
 			Authorization: `Bearer ${API_KEY}`
@@ -67,18 +92,22 @@ describe('fetchOpenAIUsageSummary', () => {
 		const fetcher = vi
 			.fn()
 			.mockResolvedValueOnce(
-				costsResponse([cost('gpt-realtime-translate', 10, 0.01)], {
+				costsResponse([bucket(1, [cost('gpt-realtime-translate', 10, 0.01)])], {
 					hasMore: true,
 					nextPage: 'next-token'
 				})
 			)
-			.mockResolvedValueOnce(costsResponse([cost('gpt-realtime-whisper', 10, 0.005)]));
+			.mockResolvedValueOnce(costsResponse([bucket(1, [cost('gpt-realtime-whisper', 10, 0.005)])]));
 
 		const summary = await fetchOpenAIUsageSummary({ apiKey: API_KEY, fetcher, now: NOW });
 
 		expect(fetcher).toHaveBeenCalledTimes(2);
 		expect(new URL(String(fetcher.mock.calls[1]?.[0])).searchParams.get('page')).toBe('next-token');
-		expect(summary).toMatchObject({ durationSeconds: 10, costUsd: 0.015 });
+		expect(summary.windows).toEqual([
+			{ days: 1, durationSeconds: 10, costUsd: 0.015 },
+			{ days: 7, durationSeconds: 10, costUsd: 0.015 },
+			{ days: 30, durationSeconds: 10, costUsd: 0.015 }
+		]);
 	});
 
 	it('preserves upstream diagnostics without exposing the admin key', async () => {

@@ -71,11 +71,15 @@
 	};
 	type PersistencePhase = 'restoring' | 'ready' | 'unavailable';
 	type OfficialUsagePhase = 'loading' | 'ready' | 'unavailable';
+	type OfficialUsageWindow = {
+		days: 1 | 7 | 30;
+		durationSeconds: number;
+		costUsd: number;
+	};
 	type OfficialUsageSummary = {
 		periodStart: string;
 		periodEnd: string;
-		durationSeconds: number;
-		costUsd: number;
+		windows: OfficialUsageWindow[];
 		updatedAt: string;
 	};
 
@@ -158,9 +162,6 @@
 	);
 	const usageEstimate = $derived(estimateRealtimeUsage(session?.runs ?? [], usageNowMs));
 	const estimatedCostLabel = $derived(formatEstimatedCostUsd(usageEstimate.estimatedCostUsd));
-	const officialCostLabel = $derived(
-		officialUsage ? formatEstimatedCostUsd(officialUsage.costUsd) : ''
-	);
 	const officialUpdatedLabel = $derived(
 		officialUsage ? OFFICIAL_USAGE_TIME_FORMATTER.format(new Date(officialUsage.updatedAt)) : ''
 	);
@@ -178,6 +179,25 @@
 	}
 
 	function isOfficialUsageSummary(value: unknown): value is OfficialUsageSummary {
+		const validWindows =
+			typeof value === 'object' &&
+			value !== null &&
+			'windows' in value &&
+			Array.isArray(value.windows)
+				? value.windows.filter(
+						(window): window is OfficialUsageWindow =>
+							typeof window === 'object' &&
+							window !== null &&
+							'days' in window &&
+							(window.days === 1 || window.days === 7 || window.days === 30) &&
+							'durationSeconds' in window &&
+							typeof window.durationSeconds === 'number' &&
+							Number.isFinite(window.durationSeconds) &&
+							'costUsd' in window &&
+							typeof window.costUsd === 'number' &&
+							Number.isFinite(window.costUsd)
+					)
+				: [];
 		return (
 			typeof value === 'object' &&
 			value !== null &&
@@ -185,12 +205,8 @@
 			typeof value.periodStart === 'string' &&
 			'periodEnd' in value &&
 			typeof value.periodEnd === 'string' &&
-			'durationSeconds' in value &&
-			typeof value.durationSeconds === 'number' &&
-			Number.isFinite(value.durationSeconds) &&
-			'costUsd' in value &&
-			typeof value.costUsd === 'number' &&
-			Number.isFinite(value.costUsd) &&
+			validWindows.length === 3 &&
+			new Set(validWindows.map((window) => window.days)).size === 3 &&
 			'updatedAt' in value &&
 			typeof value.updatedAt === 'string'
 		);
@@ -844,30 +860,41 @@
 				<div
 					class="official-usage"
 					title={officialUsagePhase === 'ready'
-						? `OpenAI 组织本月累计消费；更新于 ${officialUpdatedLabel}，账单数据可能有延迟。`
-						: 'OpenAI 组织本月累计消费；不影响实时翻译。'}
+						? `OpenAI 组织近期 Realtime 累计消费；更新于 ${officialUpdatedLabel}，账单数据可能有延迟。`
+						: 'OpenAI 组织近期 Realtime 累计消费；不影响实时翻译。'}
 				>
-					<span>本月官方消费</span>
+					<div class="official-usage-heading">
+						<span>近期官方消费</span>
+						<button
+							class="usage-refresh"
+							type="button"
+							disabled={officialUsagePhase === 'loading'}
+							onclick={() => void refreshOfficialUsage()}
+							aria-label="刷新近期官方消费">刷新</button
+						>
+					</div>
 					{#if officialUsagePhase === 'ready' && officialUsage}
-						<strong>
-							<span data-official-duration-seconds={officialUsage.durationSeconds}
-								>{officialUsage.durationSeconds} 秒</span
-							>
-							<i aria-hidden="true">·</i>
-							<span data-official-cost-usd={officialUsage.costUsd}>${officialCostLabel}</span>
-						</strong>
+						<div class="official-usage-windows">
+							{#each officialUsage.windows as window (window.days)}
+								<div class="official-usage-window" data-official-window-days={window.days}>
+									<em>近 {window.days} 天</em>
+									<strong>
+										<span data-official-duration-seconds={window.durationSeconds}
+											>{window.durationSeconds} 秒</span
+										>
+										<i aria-hidden="true">·</i>
+										<span data-official-cost-usd={window.costUsd}
+											>${formatEstimatedCostUsd(window.costUsd)}</span
+										>
+									</strong>
+								</div>
+							{/each}
+						</div>
 					{:else if officialUsagePhase === 'loading'}
 						<strong class="muted">正在更新</strong>
 					{:else}
 						<strong class="muted">暂不可用</strong>
 					{/if}
-					<button
-						class="usage-refresh"
-						type="button"
-						disabled={officialUsagePhase === 'loading'}
-						onclick={() => void refreshOfficialUsage()}
-						aria-label="刷新本月官方消费">刷新</button
-					>
 				</div>
 			</div>
 
@@ -1189,7 +1216,6 @@
 	}
 	.usage-estimate,
 	.official-usage {
-		position: relative;
 		display: grid;
 		gap: 2px;
 		color: #727c77;
@@ -1213,10 +1239,29 @@
 		color: #78827d;
 		font-weight: 520;
 	}
+	.official-usage-heading {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 6px;
+	}
+	.official-usage-windows {
+		display: grid;
+		gap: 1px;
+	}
+	.official-usage-window {
+		display: grid;
+		grid-template-columns: 40px 1fr;
+		align-items: baseline;
+		gap: 5px;
+		white-space: nowrap;
+	}
+	.official-usage-window em {
+		color: #727c77;
+		font-style: normal;
+		text-align: right;
+	}
 	.usage-refresh {
-		position: absolute;
-		right: -1px;
-		top: -2px;
 		min-width: 0;
 		padding: 2px 3px;
 		border: 0;
@@ -1386,20 +1431,20 @@
 			gap: 6px;
 		}
 		.usage-estimate,
-		.official-usage {
+		.official-usage-heading {
 			grid-template-columns: auto auto;
 			align-items: baseline;
 			justify-content: space-between;
 			text-align: left;
 		}
 		.official-usage {
-			padding-right: 40px;
+			text-align: left;
 		}
 		.usage-refresh {
-			right: 0;
-			top: 50%;
 			width: auto;
-			transform: translateY(-50%);
+		}
+		.official-usage-window {
+			grid-template-columns: 44px 1fr;
 		}
 		.control-actions {
 			width: 100%;

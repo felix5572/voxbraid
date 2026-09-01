@@ -5,15 +5,22 @@ import {
 
 const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organization/costs';
 const REALTIME_LINE_ITEMS = new Set([REALTIME_TRANSLATION_MODEL, REALTIME_TRANSCRIPTION_MODEL]);
+const DAY_SECONDS = 24 * 60 * 60;
+const WINDOW_DAYS = [1, 7, 30] as const;
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export interface OpenAIUsageSummary {
 	periodStart: string;
 	periodEnd: string;
+	windows: OpenAIUsageWindow[];
+	updatedAt: string;
+}
+
+export interface OpenAIUsageWindow {
+	days: (typeof WINDOW_DAYS)[number];
 	durationSeconds: number;
 	costUsd: number;
-	updatedAt: string;
 }
 
 export interface FetchOpenAIUsageSummaryOptions {
@@ -39,6 +46,12 @@ interface CostTotals {
 	usd: number;
 }
 
+interface DailyCostBucket {
+	startTime: number;
+	endTime: number;
+	totals: Map<string, CostTotals>;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null;
 }
@@ -55,17 +68,33 @@ function readErrorField(body: unknown, field: 'code' | 'message'): string | null
 	return typeof value === 'string' ? value : null;
 }
 
-function monthStart(now: Date): Date {
-	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+function emptyTotals(): Map<string, CostTotals> {
+	return new Map([...REALTIME_LINE_ITEMS].map((lineItem) => [lineItem, { seconds: 0, usd: 0 }]));
 }
 
-function addResults(body: unknown, totals: Map<string, CostTotals>): void {
+function addBuckets(body: unknown, buckets: DailyCostBucket[]): void {
 	if (!isRecord(body) || !Array.isArray(body.data)) {
 		throw new OpenAIUsageRequestError('OpenAI Costs API 返回了无法识别的响应。', null, null, null);
 	}
 
 	for (const bucket of body.data) {
-		if (!isRecord(bucket) || !Array.isArray(bucket.results)) continue;
+		const startTime = isRecord(bucket) ? finiteNumber(bucket.start_time) : null;
+		const endTime = isRecord(bucket) ? finiteNumber(bucket.end_time) : null;
+		if (
+			!isRecord(bucket) ||
+			!Array.isArray(bucket.results) ||
+			startTime === null ||
+			endTime === null
+		) {
+			throw new OpenAIUsageRequestError(
+				'OpenAI Costs API 返回了无法识别的时间桶。',
+				null,
+				null,
+				null
+			);
+		}
+
+		const totals = emptyTotals();
 		for (const result of bucket.results) {
 			if (!isRecord(result) || typeof result.line_item !== 'string') continue;
 			const total = totals.get(result.line_item);
@@ -86,7 +115,35 @@ function addResults(body: unknown, totals: Map<string, CostTotals>): void {
 			if (result.quantity_unit === 'duration_seconds') total.seconds += quantity;
 			total.usd += amount;
 		}
+		buckets.push({ startTime, endTime, totals });
 	}
+}
+
+function summarizeWindow(
+	buckets: readonly DailyCostBucket[],
+	endTimeSeconds: number,
+	days: OpenAIUsageWindow['days']
+): OpenAIUsageWindow {
+	const cutoff = endTimeSeconds - days * DAY_SECONDS;
+	const totals = emptyTotals();
+	for (const bucket of buckets) {
+		if (bucket.endTime <= cutoff) continue;
+		for (const [lineItem, bucketTotal] of bucket.totals) {
+			const total = totals.get(lineItem);
+			if (!total) continue;
+			total.seconds += bucketTotal.seconds;
+			total.usd += bucketTotal.usd;
+		}
+	}
+
+	const translation = totals.get(REALTIME_TRANSLATION_MODEL);
+	const transcription = totals.get(REALTIME_TRANSCRIPTION_MODEL);
+	if (!translation || !transcription) throw new Error('Realtime cost totals were not initialized.');
+	return {
+		days,
+		durationSeconds: Math.round(Math.max(translation.seconds, transcription.seconds)),
+		costUsd: Number((translation.usd + transcription.usd).toFixed(10))
+	};
 }
 
 function pagination(body: unknown): { hasMore: boolean; nextPage: string | null } {
@@ -105,16 +162,14 @@ export async function fetchOpenAIUsageSummary({
 	const normalizedKey = apiKey.trim();
 	if (!normalizedKey) throw new Error('OPENAI_ADMIN_KEY must not be empty.');
 
-	const start = monthStart(now);
-	const endTimeSeconds = Math.ceil(now.getTime() / 1_000);
-	const totals = new Map<string, CostTotals>(
-		[...REALTIME_LINE_ITEMS].map((lineItem) => [lineItem, { seconds: 0, usd: 0 }])
-	);
+	const endTimeSeconds = Math.floor(now.getTime() / 1_000);
+	const startTimeSeconds = endTimeSeconds - 30 * DAY_SECONDS;
+	const buckets: DailyCostBucket[] = [];
 	let page: string | null = null;
 
 	do {
 		const url = new URL(OPENAI_COSTS_URL);
-		url.searchParams.set('start_time', String(start.getTime() / 1_000));
+		url.searchParams.set('start_time', String(startTimeSeconds));
 		url.searchParams.set('end_time', String(endTimeSeconds));
 		url.searchParams.set('bucket_width', '1d');
 		url.searchParams.set('limit', '31');
@@ -146,7 +201,7 @@ export async function fetchOpenAIUsageSummary({
 			);
 		}
 
-		addResults(body, totals);
+		addBuckets(body, buckets);
 		const next = pagination(body);
 		if (next.hasMore && !next.nextPage) {
 			throw new OpenAIUsageRequestError(
@@ -159,15 +214,10 @@ export async function fetchOpenAIUsageSummary({
 		page = next.hasMore ? next.nextPage : null;
 	} while (page);
 
-	const translation = totals.get(REALTIME_TRANSLATION_MODEL);
-	const transcription = totals.get(REALTIME_TRANSCRIPTION_MODEL);
-	if (!translation || !transcription) throw new Error('Realtime cost totals were not initialized.');
-
 	return {
-		periodStart: start.toISOString(),
+		periodStart: new Date(startTimeSeconds * 1_000).toISOString(),
 		periodEnd: now.toISOString(),
-		durationSeconds: Math.round(Math.max(translation.seconds, transcription.seconds)),
-		costUsd: translation.usd + transcription.usd,
+		windows: WINDOW_DAYS.map((days) => summarizeWindow(buckets, endTimeSeconds, days)),
 		updatedAt: now.toISOString()
 	};
 }

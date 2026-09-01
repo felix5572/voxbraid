@@ -126,8 +126,11 @@ try {
 			body: JSON.stringify({
 				periodStart: '2026-09-01T00:00:00.000Z',
 				periodEnd: '2026-09-01T12:00:00.000Z',
-				durationSeconds: 0,
-				costUsd: 0,
+				windows: [
+					{ days: 1, durationSeconds: 0, costUsd: 0 },
+					{ days: 7, durationSeconds: 0, costUsd: 0 },
+					{ days: 30, durationSeconds: 0, costUsd: 0 }
+				],
 				updatedAt: '2026-09-01T12:00:00.000Z'
 			})
 		});
