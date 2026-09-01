@@ -32,6 +32,7 @@ export interface SidecarContextPayload {
 	threadId: string;
 	scope: SidecarContextScope;
 	capturedAt: string;
+	continuityText?: string;
 	runs: SidecarTranscriptRunInput[];
 }
 

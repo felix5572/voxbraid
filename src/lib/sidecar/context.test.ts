@@ -65,6 +65,7 @@ describe('sidecar request size', () => {
 				threadId: 'thread-1',
 				scope: 'latest-run',
 				capturedAt: '2026-09-01T10:03:00.000Z',
+				continuityText: '',
 				runs: [
 					{
 						runId: 'run-1',

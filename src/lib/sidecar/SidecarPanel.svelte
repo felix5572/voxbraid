@@ -22,7 +22,7 @@
 			<p class="eyebrow">SIDECAR</p>
 			<h2 id="sidecar-title">字幕旁路</h2>
 		</div>
-		<p>总结持续重算当前会话；对话每轮读取当时的完整字幕。</p>
+		<p>清稿持续整理当前会话；对话每轮读取当时的完整字幕。</p>
 	</header>
 
 	<div class="workspace-stack">

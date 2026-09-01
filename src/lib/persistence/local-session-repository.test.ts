@@ -3,6 +3,7 @@ import Dexie from 'dexie';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
+import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
 import { VoxBraidLocalDatabase } from './local-session-database';
 import { LocalSessionRepository } from './local-session-repository';
 
@@ -26,6 +27,35 @@ function createAutoSummary(overrides: Partial<StoredAutoSummary> = {}): StoredAu
 			reasoningTokens: 0,
 			totalTokens: 120
 		},
+		updatedAt: CHECKPOINT,
+		...overrides
+	};
+}
+
+function createCleanBlock(
+	overrides: Partial<StoredCleanTranscriptBlock> = {}
+): StoredCleanTranscriptBlock {
+	return {
+		id: 'clean-block-1',
+		threadId: 'thread-1',
+		runId: 'run-1',
+		sequence: 1,
+		runSequence: 1,
+		targetLanguage: 'zh',
+		sourceStart: 0,
+		sourceEnd: 20,
+		translationStart: 0,
+		translationEnd: 10,
+		sourceElapsedEndMs: 4_000,
+		translationElapsedEndMs: 4_000,
+		status: 'completed',
+		text: '整理后的课堂内容。',
+		capturedAt: '2026-09-01T00:00:09.000Z',
+		model: 'gpt-5.6-terra',
+		taskVersion: 5,
+		usageStatus: 'unavailable',
+		usage: null,
+		error: null,
 		updatedAt: CHECKPOINT,
 		...overrides
 	};
@@ -127,6 +157,31 @@ describe('LocalSessionRepository', () => {
 			await upgraded.open();
 			expect(await upgraded.threads.get(thread.id)).toMatchObject(thread);
 			expect(await upgraded.autoSummaries.toArray()).toEqual([]);
+			expect(await upgraded.cleanTranscriptBlocks.toArray()).toEqual([]);
+		} finally {
+			await upgraded.delete();
+		}
+	});
+
+	it('upgrades a version 2 summary database while preserving its existing cleanup', async () => {
+		const name = `voxbraid-v2-upgrade-test-${crypto.randomUUID()}`;
+		const legacy = new Dexie(name);
+		legacy.version(1).stores({
+			threads: '&id,status,updatedAt',
+			runs: '&id,threadId,status,&[threadId+sequence],[threadId+status]',
+			segments: '&id,runId,[runId+revision],&[runId+revision+sequence]'
+		});
+		legacy.version(2).stores({ autoSummaries: '&threadId,updatedAt' });
+		await legacy.open();
+		await legacy.table('threads').put({ ...createThread(), checkpointedAt: CHECKPOINT });
+		await legacy.table('autoSummaries').put(createAutoSummary());
+		legacy.close();
+
+		const upgraded = new VoxBraidLocalDatabase(name);
+		try {
+			await upgraded.open();
+			expect(await upgraded.autoSummaries.get('thread-1')).toEqual(createAutoSummary());
+			expect(await upgraded.cleanTranscriptBlocks.toArray()).toEqual([]);
 		} finally {
 			await upgraded.delete();
 		}
@@ -209,6 +264,29 @@ describe('LocalSessionRepository', () => {
 		await expect(
 			repository.saveAutoSummary(createAutoSummary({ threadId: 'missing-thread' }))
 		).rejects.toThrow('Thread not found');
+	});
+
+	it('stores ordered clean transcript blocks and allows an explicit retry replacement', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({ thread, run: createRun(), checkpointedAt: CHECKPOINT });
+		const failed = createCleanBlock({
+			status: 'failed',
+			text: '',
+			error: 'upstream-failed：temporary failure'
+		});
+		await repository.saveCleanTranscriptBlock(failed);
+		await expect(repository.loadCleanTranscriptBlocks(thread.id)).resolves.toEqual([failed]);
+
+		const completed = createCleanBlock({ status: 'completed', error: null });
+		await repository.saveCleanTranscriptBlock(completed);
+		await expect(repository.loadCleanTranscriptBlocks(thread.id)).resolves.toEqual([completed]);
+	});
+
+	it('rejects a clean transcript block without its persisted run', async () => {
+		await database.threads.put({ ...createThread(), checkpointedAt: CHECKPOINT });
+		await expect(repository.saveCleanTranscriptBlock(createCleanBlock())).rejects.toThrow(
+			'Run not found'
+		);
 	});
 
 	it('atomically switches revisions while preserving older projections', async () => {

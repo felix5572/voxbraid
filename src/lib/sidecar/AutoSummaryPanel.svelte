@@ -1,14 +1,23 @@
 <script lang="ts">
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
+	import type { CaptureRun } from '../session/types';
 	import { activeCaptureRun, type TranslationSessionState } from '../session/translation-session';
+	import type { StoredAutoSummary } from './auto-summary';
 	import {
-		shouldAutomaticallySummarize,
-		stopsAutomaticSummaries,
-		transcriptExtent,
-		type StoredAutoSummary
-	} from './auto-summary';
+		EMPTY_CLEAN_TRANSCRIPT_CURSOR,
+		cleanTranscriptCandidateFromBlock,
+		cleanTranscriptContinuity,
+		cleanTranscriptCursorForRun,
+		CLEAN_TRANSCRIPT_TASK_VERSION,
+		nextCleanTranscriptCandidate,
+		nextCleanTranscriptSequence,
+		type CleanTranscriptCandidate,
+		type CleanTranscriptCursor,
+		type StoredCleanTranscriptBlock
+	} from './clean-transcript';
 	import { sendSidecarRequest, sidecarLocalFailure } from './client';
-	import { captureSidecarContext, sidecarRequestFits } from './context';
+	import { captureSidecarBlockContext, sidecarRequestFits } from './context';
 	import type { SidecarInvokeRequest, SidecarInvokeResult, SidecarTrigger } from './types';
 
 	interface Props {
@@ -26,68 +35,105 @@
 		disabled = false,
 		onRequestingChange = () => undefined
 	}: Props = $props();
-	let summary = $state<StoredAutoSummary | null>(null);
+	let legacySummary = $state<StoredAutoSummary | null>(null);
+	let blocks = $state<StoredCleanTranscriptBlock[]>([]);
 	let phase = $state<'loading' | 'idle' | 'requesting' | 'failed'>('loading');
 	let errorMessage = $state('');
 	let persistenceMessage = $state('');
 	let copyStatus = $state('');
 	let loadedThreadId = $state<string | null>(null);
-	let baselineSourceCharacters = $state(0);
-	let lastRequestedAtMs = $state<number | null>(null);
 	let currentRequestId: string | null = null;
 	let loadGeneration = 0;
 	let observedThreadId: string | null = null;
 	let observedRunId: string | null = null;
 	let observedRunWasActive = false;
-	let pendingRunEndSummary = false;
-	let automaticSummariesStopped = $state(false);
+	const automaticBaselines = new SvelteMap<string, CleanTranscriptCursor>();
+	const pendingRunEnds = new SvelteSet<string>();
 
 	const threadId = $derived(session?.thread.id ?? null);
-	const extent = $derived(transcriptExtent(session));
-	const hasTranscript = $derived(extent.sourceCharacters > 0 || extent.translationCharacters > 0);
-	const summaryAgeLabel = $derived(
-		summary
-			? new Intl.DateTimeFormat(undefined, {
-					hour: '2-digit',
-					minute: '2-digit',
-					second: '2-digit'
-				}).format(new Date(summary.capturedAt))
-			: ''
+	const hasTranscript = $derived(
+		Boolean(
+			session?.runs.some(
+				(run) => run.sourceStream.text.length > 0 || run.translationStream.text.length > 0
+			)
+		)
+	);
+	const failedBlocks = $derived(blocks.filter((block) => block.status === 'failed'));
+	const completedBlocks = $derived(blocks.filter((block) => block.status === 'completed'));
+	const cleanText = $derived(
+		[legacySummary?.text, ...completedBlocks.map((block) => block.text)]
+			.filter((text): text is string => Boolean(text?.trim()))
+			.join('\n\n')
+	);
+	const totalTokens = $derived(
+		(legacySummary?.usage?.totalTokens ?? 0) +
+			completedBlocks.reduce((total, block) => total + (block.usage?.totalTokens ?? 0), 0)
+	);
+	const latestModel = $derived(
+		completedBlocks.at(-1)?.model ?? legacySummary?.model ?? 'gpt-5.6-terra'
 	);
 
-	async function loadSummary(
+	function runCursor(run: CaptureRun, manual: boolean): CleanTranscriptCursor {
+		if (blocks.some((block) => block.runId === run.id)) {
+			return cleanTranscriptCursorForRun(blocks, run.id);
+		}
+		if (manual && !legacySummary) return { ...EMPTY_CLEAN_TRANSCRIPT_CURSOR };
+		return automaticBaselines.get(run.id) ?? { ...EMPTY_CLEAN_TRANSCRIPT_CURSOR };
+	}
+
+	function candidateForRun(
+		run: CaptureRun,
+		manual: boolean,
+		force: boolean,
+		allowShort: boolean
+	): CleanTranscriptCandidate | null {
+		return nextCleanTranscriptCandidate(run, runCursor(run, manual), { force, allowShort });
+	}
+
+	async function loadTranscript(
 		nextThreadId: string | null,
 		nextRepository: LocalSessionRepository | null
-	) {
+	): Promise<void> {
 		const generation = ++loadGeneration;
 		currentRequestId = null;
 		onRequestingChange(false);
-		summary = null;
+		legacySummary = null;
+		blocks = [];
+		automaticBaselines.clear();
+		pendingRunEnds.clear();
 		errorMessage = '';
 		persistenceMessage = '';
 		copyStatus = '';
-		automaticSummariesStopped = false;
 		loadedThreadId = null;
 		phase = nextThreadId ? 'loading' : 'idle';
-		if (!nextThreadId) {
-			baselineSourceCharacters = 0;
-			return;
-		}
+		if (!nextThreadId) return;
 
-		let stored: StoredAutoSummary | null = null;
+		let storedLegacy: StoredAutoSummary | null = null;
+		let storedBlocks: StoredCleanTranscriptBlock[] = [];
 		if (nextRepository) {
 			try {
-				stored = await nextRepository.loadAutoSummary(nextThreadId);
+				[storedLegacy, storedBlocks] = await Promise.all([
+					nextRepository.loadAutoSummary(nextThreadId),
+					nextRepository.loadCleanTranscriptBlocks(nextThreadId)
+				]);
 			} catch (error) {
-				console.error('[auto-summary] restore failed', error);
-				persistenceMessage = '自动总结记录读取失败；本页仍可继续生成。';
+				console.error('[clean-transcript] restore failed', error);
+				persistenceMessage = '课堂清稿记录读取失败；本页仍可继续生成。';
 			}
 		}
 		if (generation !== loadGeneration || session?.thread.id !== nextThreadId) return;
-		summary = stored;
-		const currentExtent = transcriptExtent(session);
-		baselineSourceCharacters = stored?.sourceCharacters ?? currentExtent.sourceCharacters;
-		lastRequestedAtMs = stored ? Date.parse(stored.updatedAt) : null;
+
+		legacySummary = storedLegacy;
+		blocks = storedBlocks;
+		for (const run of session?.runs ?? []) {
+			if (storedBlocks.some((block) => block.runId === run.id)) continue;
+			automaticBaselines.set(run.id, {
+				sourceEnd: run.sourceStream.text.length,
+				translationEnd: run.translationStream.text.length,
+				sourceElapsedEndMs: run.sourceStream.lastElapsedMs,
+				translationElapsedEndMs: run.translationStream.lastElapsedMs
+			});
+		}
 		loadedThreadId = nextThreadId;
 		phase = 'idle';
 	}
@@ -96,45 +142,61 @@
 		return sidecarLocalFailure(clientRequestId, 'upstream-failed', message);
 	}
 
-	async function requestSummary(trigger: SidecarTrigger): Promise<void> {
-		const capturedSession = session;
-		if (
-			disabled ||
-			phase === 'requesting' ||
-			!capturedSession ||
-			loadedThreadId !== capturedSession.thread.id
-		) {
+	function replaceBlock(block: StoredCleanTranscriptBlock): void {
+		blocks = [...blocks.filter((candidate) => candidate.id !== block.id), block].sort(
+			(left, right) => left.sequence - right.sequence
+		);
+	}
+
+	async function persistBlock(block: StoredCleanTranscriptBlock): Promise<void> {
+		if (!repository) {
+			persistenceMessage = '本地存储不可用；这份清稿只保留到页面关闭。';
 			return;
 		}
+		try {
+			await repository.saveCleanTranscriptBlock(block);
+		} catch (error) {
+			console.error('[clean-transcript] save failed', error);
+			persistenceMessage = '清稿已生成，但保存到本设备失败。';
+		}
+	}
+
+	async function requestBlock(
+		candidate: CleanTranscriptCandidate,
+		trigger: SidecarTrigger,
+		retry: StoredCleanTranscriptBlock | null = null
+	): Promise<boolean> {
+		const capturedSession = session;
+		if (!capturedSession || loadedThreadId !== capturedSession.thread.id) return false;
 
 		const capturedAt = new Date().toISOString();
-		const context = captureSidecarContext(capturedSession, 'current-thread', capturedAt);
-		const capturedExtent = transcriptExtent(capturedSession);
 		const clientRequestId = crypto.randomUUID();
+		const blockSequence = retry?.sequence ?? nextCleanTranscriptSequence(blocks);
 		const request: SidecarInvokeRequest = {
 			clientRequestId,
 			intent: { kind: 'summarize', trigger, outputLanguage },
-			context
+			context: captureSidecarBlockContext({
+				threadId: capturedSession.thread.id,
+				capturedAt,
+				continuityText: cleanTranscriptContinuity(blocks, blockSequence),
+				run: {
+					runId: candidate.runId,
+					sequence: candidate.runSequence,
+					targetLanguage: candidate.targetLanguage,
+					sourceText: candidate.sourceText,
+					translationText: candidate.translationText
+				}
+			})
 		};
 		copyStatus = '';
 		persistenceMessage = '';
-		if (context.runs.length === 0) {
-			errorMessage = '当前会话还没有可总结的字幕。';
-			phase = 'failed';
-			return;
-		}
 		if (!sidecarRequestFits(request)) {
-			automaticSummariesStopped = true;
-			errorMessage =
-				trigger === 'periodic'
-					? '当前字幕超过完整总结请求上限；已停止本会话的自动总结。'
-					: '当前会话超过完整总结的 1.5 MB 请求上限。';
+			errorMessage = '当前清稿块超过 1.5 MB 请求上限。';
 			phase = 'failed';
-			return;
+			return false;
 		}
 
 		currentRequestId = clientRequestId;
-		lastRequestedAtMs = Date.now();
 		phase = 'requesting';
 		errorMessage = '';
 		onRequestingChange(true);
@@ -142,73 +204,104 @@
 		try {
 			result = await sendSidecarRequest(request);
 		} catch (error) {
-			console.error('[auto-summary] browser request failed', error);
+			console.error('[clean-transcript] browser request failed', error);
 			result = localFailure(
 				clientRequestId,
-				error instanceof Error ? error.message : '自动总结请求失败。'
+				error instanceof Error ? error.message : '课堂清稿请求失败。'
 			);
 		}
 		if (currentRequestId !== clientRequestId || session?.thread.id !== capturedSession.thread.id) {
-			return;
+			return false;
 		}
 		currentRequestId = null;
 		onRequestingChange(false);
-		if (result.status === 'failed' || !result.outputText.trim()) {
-			pendingRunEndSummary = false;
-			if (stopsAutomaticSummaries(result)) {
-				automaticSummariesStopped = true;
-			}
-			phase = 'failed';
-			errorMessage =
-				result.status === 'failed'
-					? `${result.error.code}：${result.error.message}`
-					: '模型未返回总结。';
-			return;
-		}
 
-		const completed: StoredAutoSummary = {
+		const updatedAt = new Date().toISOString();
+		const completed = result.status === 'completed' && result.outputText.trim().length > 0;
+		const block: StoredCleanTranscriptBlock = {
+			id: retry?.id ?? crypto.randomUUID(),
 			threadId: capturedSession.thread.id,
-			revision: (summary?.revision ?? 0) + 1,
-			text: result.outputText,
+			runId: candidate.runId,
+			sequence: blockSequence,
+			runSequence: candidate.runSequence,
+			targetLanguage: candidate.targetLanguage,
+			sourceStart: candidate.sourceStart,
+			sourceEnd: candidate.sourceEnd,
+			translationStart: candidate.translationStart,
+			translationEnd: candidate.translationEnd,
+			sourceElapsedEndMs: candidate.sourceElapsedEndMs,
+			translationElapsedEndMs: candidate.translationElapsedEndMs,
+			status: completed ? 'completed' : 'failed',
+			text: result.outputText ?? '',
 			capturedAt,
-			sourceCharacters: capturedExtent.sourceCharacters,
-			translationCharacters: capturedExtent.translationCharacters,
 			model: result.model,
+			taskVersion: CLEAN_TRANSCRIPT_TASK_VERSION,
 			usageStatus: result.usageStatus,
 			usage: result.usage,
-			updatedAt: new Date().toISOString()
+			error: completed
+				? null
+				: result.status === 'failed'
+					? `${result.error.code}：${result.error.message}`
+					: '模型未返回清稿。',
+			updatedAt
 		};
-		summary = completed;
-		automaticSummariesStopped = false;
-		baselineSourceCharacters = capturedExtent.sourceCharacters;
-		phase = 'idle';
-		if (!repository) {
-			persistenceMessage = '本地存储不可用；这份总结只保留到页面关闭。';
-			return;
+		replaceBlock(block);
+		await persistBlock(block);
+		if (!completed) {
+			phase = 'idle';
+			errorMessage = block.error ?? '当前清稿块生成失败。';
+			return false;
 		}
-		try {
-			await repository.saveAutoSummary(completed);
-		} catch (error) {
-			console.error('[auto-summary] save failed', error);
-			persistenceMessage = '总结已生成，但保存到本设备失败。';
+		phase = 'idle';
+		return true;
+	}
+
+	function firstManualCandidate(): {
+		candidate: CleanTranscriptCandidate;
+		retry: StoredCleanTranscriptBlock | null;
+	} | null {
+		const capturedSession = session;
+		if (!capturedSession) return null;
+		const failed = [...failedBlocks].sort((left, right) => left.sequence - right.sequence)[0];
+		if (failed) {
+			const run = capturedSession.runs.find((candidate) => candidate.id === failed.runId);
+			if (!run)
+				throw new Error(`Run not found for failed clean transcript block: ${failed.runId}.`);
+			return { candidate: cleanTranscriptCandidateFromBlock(run, failed), retry: failed };
+		}
+		for (const run of capturedSession.runs) {
+			const candidate = candidateForRun(run, true, true, true);
+			if (candidate) return { candidate, retry: null };
+		}
+		return null;
+	}
+
+	async function processManual(): Promise<void> {
+		if (disabled || phase === 'loading' || phase === 'requesting' || !session) return;
+		errorMessage = '';
+		while (true) {
+			const next = firstManualCandidate();
+			if (!next) {
+				phase = 'idle';
+				return;
+			}
+			if (!(await requestBlock(next.candidate, 'manual', next.retry))) return;
 		}
 	}
 
-	async function copySummary(): Promise<void> {
-		if (!summary?.text) return;
+	async function copyTranscript(): Promise<void> {
+		if (!cleanText) return;
 		try {
-			await navigator.clipboard.writeText(summary.text);
+			await navigator.clipboard.writeText(cleanText);
 			copyStatus = '已复制';
 		} catch (error) {
-			console.error('[auto-summary] copy failed', error);
+			console.error('[clean-transcript] copy failed', error);
 			copyStatus = '复制失败，请手动选择文本';
 		}
 	}
 
 	$effect(() => {
-		const nextThreadId = threadId;
-		const nextRepository = repository;
-		void loadSummary(nextThreadId, nextRepository);
+		void loadTranscript(threadId, repository);
 	});
 
 	$effect(() => {
@@ -221,75 +314,80 @@
 				latestRun.status === 'live' ||
 				latestRun.status === 'stopping')
 		);
-		let runJustEnded = false;
-		if (observedThreadId === currentThreadId && observedRunId === latestRun?.id) {
-			runJustEnded = observedRunWasActive && !latestRunIsActive;
+		if (
+			latestRun &&
+			observedThreadId === currentThreadId &&
+			observedRunId === latestRun?.id &&
+			observedRunWasActive &&
+			!latestRunIsActive
+		) {
+			pendingRunEnds.add(latestRun.id);
 		}
-		if (runJustEnded) pendingRunEndSummary = true;
 		observedThreadId = currentThreadId;
 		observedRunId = latestRun?.id ?? null;
 		observedRunWasActive = latestRunIsActive;
 
-		if (
-			!currentThreadId ||
-			loadedThreadId !== currentThreadId ||
-			disabled ||
-			automaticSummariesStopped ||
-			(!activeRun && !pendingRunEndSummary)
-		) {
+		if (!currentThreadId || loadedThreadId !== currentThreadId || disabled || phase !== 'idle') {
 			return;
 		}
-		const finalizing = pendingRunEndSummary;
-		if (
-			shouldAutomaticallySummarize({
-				extent,
-				baselineSourceCharacters,
-				requesting: phase === 'requesting',
-				nowMs: Date.now(),
-				lastRequestedAtMs,
-				runJustEnded: finalizing
-			})
-		) {
-			pendingRunEndSummary = false;
-			void requestSummary('periodic');
-		} else if (finalizing && phase !== 'requesting') {
-			pendingRunEndSummary = false;
-		}
+		const finalizingRun = session?.runs.find(
+			(candidate) => pendingRunEnds.has(candidate.id) && candidate.id !== activeRun?.id
+		);
+		const run = finalizingRun ?? activeRun;
+		if (!run) return;
+		const finalizing = Boolean(finalizingRun);
+		const candidate = candidateForRun(run, false, finalizing, false);
+		if (finalizing && !candidate) pendingRunEnds.delete(run.id);
+		if (candidate) void requestBlock(candidate, 'periodic');
 	});
 </script>
 
 <section class="panel" aria-labelledby="auto-summary-title">
 	<header>
 		<div>
-			<p class="eyebrow">AUTO SUMMARY</p>
-			<h3 id="auto-summary-title">自动总结</h3>
+			<p class="eyebrow">CLEAN TRANSCRIPT</p>
+			<h3 id="auto-summary-title">课堂清稿</h3>
 		</div>
 		<button
 			type="button"
 			disabled={disabled || phase === 'loading' || phase === 'requesting' || !hasTranscript}
-			onclick={() => void requestSummary('manual')}>立即更新</button
+			onclick={() => void processManual()}
 		>
+			{failedBlocks.length > 0 ? '重试失败块' : '整理未处理内容'}
+		</button>
 	</header>
 
 	<div class="status" aria-live="polite">
 		{#if phase === 'loading'}
-			正在读取本地总结…
+			正在读取本地清稿…
 		{:else if phase === 'requesting'}
-			正在基于当前完整字幕生成新总结；旧内容仍可阅读。
-		{:else if automaticSummariesStopped}
-			当前字幕已超过完整总结预算；本会话不再自动请求。
-		{:else if summary}
-			总结截至 {summaryAgeLabel} · 第 {summary.revision} 版 · {summary.model}
+			正在整理下一块；已有内容仍可阅读。
+		{:else if failedBlocks.length > 0}
+			有 {failedBlocks.length} 个块失败；后续内容不会覆盖它，可手动重试。
+		{:else if cleanText}
+			已整理 {completedBlocks.length} 个新块 · {latestModel}
 		{:else}
-			累计新增约 3,000 个原文字符后自动生成；暂停时会尝试收尾。
+			每约 5,000 个原文字符自动追加一块；暂停时会尝试收尾。
 		{/if}
 	</div>
 
 	<div class="summary-scroll">
-		{#if summary}
-			<div class="summary-text">{summary.text}</div>
-		{:else}
-			<p class="placeholder">总结会在这里稳定替换，不会随着模型生成逐字跳动。</p>
+		{#if legacySummary}
+			<div class="summary-text legacy">{legacySummary.text}</div>
+		{/if}
+		{#each blocks as block (block.id)}
+			{#if block.status === 'completed'}
+				<div class="summary-text block">{block.text}</div>
+			{:else}
+				<div class="failed-block" role="alert">
+					<strong>第 {block.sequence} 块未整理成功</strong>
+					<span>{block.error}</span>
+					{#if block.text.trim()}<div class="partial">{block.text}</div>{/if}
+				</div>
+			{/if}
+		{/each}
+		{#if !cleanText && failedBlocks.length === 0}
+			<p class="placeholder">清稿会按块稳定追加，不会随着模型生成逐字跳动。</p>
 		{/if}
 	</div>
 
@@ -297,12 +395,10 @@
 		<div class="messages">
 			{#if errorMessage}<span class="error" role="alert">{errorMessage}</span>{/if}
 			{#if persistenceMessage}<span class="warning">{persistenceMessage}</span>{/if}
-			{#if summary?.usage}
-				<span>本版 {summary.usage.totalTokens} tokens</span>
-			{/if}
+			{#if totalTokens > 0}<span>累计 {totalTokens} tokens</span>{/if}
 		</div>
-		{#if summary}
-			<button type="button" class="copy" onclick={() => void copySummary()}>
+		{#if cleanText}
+			<button type="button" class="copy" onclick={() => void copyTranscript()}>
 				{copyStatus || '复制'}
 			</button>
 		{/if}
@@ -374,7 +470,7 @@
 	}
 
 	.summary-scroll {
-		height: 260px;
+		height: 300px;
 		margin-top: 10px;
 		padding: 14px;
 		overflow: auto;
@@ -384,12 +480,32 @@
 		background: #0a0f0d;
 	}
 
-	.summary-text {
+	.summary-text,
+	.partial {
 		color: #e2ebe6;
 		font-size: 15px;
 		line-height: 1.68;
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+
+	.summary-text.block,
+	.failed-block {
+		margin-top: 16px;
+		padding-top: 16px;
+		border-top: 1px solid #223029;
+	}
+
+	.failed-block {
+		display: grid;
+		gap: 5px;
+		color: #efaaa0;
+		font-size: 12px;
+	}
+
+	.partial {
+		margin-top: 8px;
+		color: #c9d2cd;
 	}
 
 	.placeholder {
@@ -426,7 +542,7 @@
 
 	@media (max-width: 720px) {
 		.summary-scroll {
-			height: 220px;
+			height: 250px;
 		}
 	}
 </style>

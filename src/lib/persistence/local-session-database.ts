@@ -1,6 +1,7 @@
 import Dexie, { type Table } from 'dexie';
 import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
+import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
 
 export const LOCAL_DB_EPOCH = 1;
 export const LOCAL_DB_NAME = import.meta.env.DEV ? `voxbraid-dev-${LOCAL_DB_EPOCH}` : 'voxbraid';
@@ -21,6 +22,7 @@ export class VoxBraidLocalDatabase extends Dexie {
 	runs!: Table<LocalRunRecord, string>;
 	segments!: Table<LocalSegmentRecord, string>;
 	autoSummaries!: Table<StoredAutoSummary, string>;
+	cleanTranscriptBlocks!: Table<StoredCleanTranscriptBlock, string>;
 
 	constructor(name = LOCAL_DB_NAME) {
 		super(name);
@@ -31,6 +33,9 @@ export class VoxBraidLocalDatabase extends Dexie {
 		});
 		this.version(2).stores({
 			autoSummaries: '&threadId,updatedAt'
+		});
+		this.version(3).stores({
+			cleanTranscriptBlocks: '&id,threadId,runId,status,updatedAt,&[threadId+sequence]'
 		});
 	}
 }

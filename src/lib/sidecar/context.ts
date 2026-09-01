@@ -13,7 +13,8 @@ export function sidecarRequestFits(value: SidecarInvokeRequest): boolean {
 export function captureSidecarContext(
 	state: TranslationSessionState,
 	scope: SidecarContextScope,
-	capturedAt: string
+	capturedAt: string,
+	continuityText = ''
 ): SidecarContextPayload {
 	const runs = state.runs
 		.filter((run) => run.sourceStream.text.length > 0 || run.translationStream.text.length > 0)
@@ -29,6 +30,22 @@ export function captureSidecarContext(
 		threadId: state.thread.id,
 		scope,
 		capturedAt,
+		continuityText,
 		runs: scope === 'latest-run' ? runs.slice(-1) : runs
+	};
+}
+
+export function captureSidecarBlockContext(input: {
+	threadId: string;
+	capturedAt: string;
+	continuityText: string;
+	run: SidecarContextPayload['runs'][number];
+}): SidecarContextPayload {
+	return {
+		threadId: input.threadId,
+		scope: 'latest-run',
+		capturedAt: input.capturedAt,
+		continuityText: input.continuityText,
+		runs: [input.run]
 	};
 }

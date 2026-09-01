@@ -1,5 +1,6 @@
 import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
+import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
 import {
 	fromRunRecord,
 	fromThreadRecord,
@@ -141,6 +142,44 @@ export class LocalSessionRepository {
 		await this.database.autoSummaries.put(summary);
 	}
 
+	async loadCleanTranscriptBlocks(threadId: string): Promise<StoredCleanTranscriptBlock[]> {
+		const blocks = await this.database.cleanTranscriptBlocks
+			.where('threadId')
+			.equals(threadId)
+			.toArray();
+		return blocks.sort((left, right) => left.sequence - right.sequence);
+	}
+
+	async saveCleanTranscriptBlock(block: StoredCleanTranscriptBlock): Promise<void> {
+		if (
+			block.sequence <= 0 ||
+			block.sourceStart < 0 ||
+			block.sourceEnd < block.sourceStart ||
+			block.translationStart < 0 ||
+			block.translationEnd < block.translationStart
+		) {
+			throw new Error(`Clean transcript block ${block.id} has invalid ranges.`);
+		}
+		await this.database.transaction(
+			'rw',
+			this.database.threads,
+			this.database.runs,
+			this.database.cleanTranscriptBlocks,
+			async () => {
+				const [thread, run] = await Promise.all([
+					this.database.threads.get(block.threadId),
+					this.database.runs.get(block.runId)
+				]);
+				if (!thread) throw new Error(`Thread not found: ${block.threadId}.`);
+				if (!run) throw new Error(`Run not found: ${block.runId}.`);
+				if (run.threadId !== block.threadId || run.sequence !== block.runSequence) {
+					throw new Error(`Clean transcript block ${block.id} does not match its run.`);
+				}
+				await this.database.cleanTranscriptBlocks.put(block);
+			}
+		);
+	}
+
 	async replaceSegmentRevision(input: ReplaceSegmentRevisionInput): Promise<void> {
 		const revision = validateRevision(input);
 		await this.database.transaction('rw', this.database.runs, this.database.segments, async () => {
@@ -206,6 +245,8 @@ export class LocalSessionRepository {
 			this.database.threads,
 			this.database.runs,
 			this.database.segments,
+			this.database.autoSummaries,
+			this.database.cleanTranscriptBlocks,
 			async () => {
 				const existingRuns = await this.database.runs
 					.where('threadId')
@@ -237,6 +278,11 @@ export class LocalSessionRepository {
 				if (existingRunIds.length > 0) {
 					await this.database.segments.where('runId').anyOf(existingRunIds).delete();
 				}
+				await this.database.autoSummaries.delete(archive.thread.id);
+				await this.database.cleanTranscriptBlocks
+					.where('threadId')
+					.equals(archive.thread.id)
+					.delete();
 				await this.database.runs.where('threadId').equals(archive.thread.id).delete();
 				await this.database.threads.put(toThreadRecord(archive.thread, checkpointedAt));
 				await this.database.runs.bulkPut(

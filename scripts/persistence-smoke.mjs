@@ -152,8 +152,32 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		const body = route.request().postDataJSON();
 		sidecarRequests.push(body);
 		await new Promise((resolve) => setTimeout(resolve, 25));
+		if (
+			body.intent.kind === 'summarize' &&
+			body.context.runs[0]?.sourceText.includes('[FAIL_CLEAN_BLOCK]')
+		) {
+			await route.fulfill({
+				contentType: 'application/json',
+				body: JSON.stringify({
+					status: 'failed',
+					clientRequestId: body.clientRequestId,
+					responseId: null,
+					model: 'gpt-5.6-terra',
+					outputText: null,
+					upstreamStatus: 'failed',
+					usageStatus: 'unavailable',
+					usage: null,
+					error: { code: 'upstream-failed', message: 'Injected block failure.' },
+					failedAt: '2026-09-01T12:00:00.000Z'
+				})
+			});
+			return;
+		}
+		const cleanBlockNumber = sidecarRequests.filter(
+			(request) => request.intent.kind === 'summarize'
+		).length;
 		const outputs = {
-			summarize: '自动摘要结果',
+			summarize: `课堂清稿第${cleanBlockNumber}块`,
 			retranslate: '自动重译结果',
 			ask: '自动问答结果'
 		};
@@ -167,7 +191,7 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 					body.intent.kind === 'ask'
 						? 'gpt-5.6-sol'
 						: body.intent.kind === 'summarize'
-							? 'gpt-5.6-luna'
+							? 'gpt-5.6-terra'
 							: 'gpt-5.6-luna',
 				outputText: outputs[body.intent.kind],
 				usageStatus: 'recorded',
@@ -188,6 +212,35 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 	});
 	await page.goto(`${baseUrl}/${query}`, { waitUntil: 'networkidle' });
 	return { browserErrors, context, page, sidecarRequests };
+}
+
+async function testCleanTranscriptContinuesAfterFailure(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		const source = `[FAIL_CLEAN_BLOCK] ${'a'.repeat(8_000)} ${'b'.repeat(8_000)}.`;
+		await emitPair(page, source, '课堂译文。'.repeat(500));
+		const failed = await waitForRecord(
+			page,
+			'cleanTranscriptBlocks',
+			(record) => record.status === 'failed',
+			'清稿失败块占位'
+		);
+		const completed = await waitForRecord(
+			page,
+			'cleanTranscriptBlocks',
+			(record) => record.status === 'completed' && record.sequence > failed.sequence,
+			'失败后的后续清稿块继续'
+		);
+		assert.equal(failed.sequence, 1);
+		assert.equal(completed.sequence, 2);
+		assert.ok(sidecarRequests.filter((request) => request.intent.kind === 'summarize').length >= 2);
+		await stopCapture(page);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
 }
 
 async function emitPair(page, source, translation) {
@@ -304,32 +357,36 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await mainText(page, firstSource).waitFor();
 		await mainText(page, secondSource).waitFor();
 
-		const summarize = page.getByRole('button', { name: '立即更新', exact: true });
+		const summarize = page.getByRole('button', { name: '整理未处理内容', exact: true });
 		await summarize.click();
 		assert.equal(await summarize.isDisabled(), true);
-		await page.getByText('自动摘要结果', { exact: true }).waitFor();
-		assert.equal(sidecarRequests.length, 1);
+		await page.getByText('课堂清稿第2块', { exact: true }).waitFor();
+		assert.equal(sidecarRequests.length, 2);
 		assert.equal(sidecarRequests[0].intent.kind, 'summarize');
-		assert.equal(sidecarRequests[0].context.scope, 'current-thread');
-		assert.equal(sidecarRequests[0].context.runs.length, 2);
+		assert.equal(sidecarRequests[0].context.scope, 'latest-run');
+		assert.equal(sidecarRequests[0].context.runs.length, 1);
 		assert.equal(sidecarRequests[0].context.runs[0].sourceText, firstSource);
+		assert.equal(sidecarRequests[1].context.runs[0].sourceText, secondSource);
+		assert.equal(sidecarRequests[1].context.continuityText, '课堂清稿第1块');
 		await waitForRecord(
 			page,
-			'autoSummaries',
-			(record) => record.threadId === firstRun.threadId && record.text === '自动摘要结果',
-			'自动总结保存'
+			'cleanTranscriptBlocks',
+			(record) => record.threadId === firstRun.threadId && record.text === '课堂清稿第2块',
+			'分块课堂清稿保存'
 		);
 		await page.getByRole('button', { name: '复制', exact: true }).first().click();
 		await page.getByText('已复制', { exact: true }).waitFor();
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
-		await page.getByText('自动摘要结果', { exact: true }).waitFor();
+		await page.getByText('课堂清稿第1块', { exact: true }).waitFor();
+		await page.getByText('课堂清稿第2块', { exact: true }).waitFor();
 
 		await page.getByLabel('字幕问题', { exact: true }).fill('What was captured?');
 		await page.getByRole('button', { name: '提问', exact: true }).click();
 		await page.getByText('自动问答结果', { exact: true }).waitFor();
-		assert.equal(sidecarRequests.length, 2);
-		assert.equal(sidecarRequests[1].intent.question, 'What was captured?');
+		const askRequest = sidecarRequests.find((request) => request.intent.kind === 'ask');
+		assert.ok(askRequest);
+		assert.equal(askRequest.intent.question, 'What was captured?');
 
 		await startCapture(page);
 		await emitPair(page, 'x'.repeat(3_000), '自動要約'.repeat(300));
@@ -340,13 +397,13 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 			(request) => request.intent.kind === 'summarize' && request.intent.trigger === 'periodic',
 			'达到字符阈值后的自动总结'
 		);
-		assert.equal(automaticSummary.context.scope, 'current-thread');
-		assert.equal(automaticSummary.context.runs.length, 3);
+		assert.equal(automaticSummary.context.scope, 'latest-run');
+		assert.equal(automaticSummary.context.runs.length, 1);
 		await waitForRecord(
 			page,
-			'autoSummaries',
-			(record) => record.threadId === firstRun.threadId && record.revision === 2,
-			'自动重算总结替换'
+			'cleanTranscriptBlocks',
+			(record) => record.threadId === firstRun.threadId && record.sequence === 3,
+			'暂停后的尾块清稿追加'
 		);
 
 		const threadsBeforeNew = await readStore(page, 'threads');
@@ -639,13 +696,14 @@ try {
 	}
 
 	await testPauseResumeAndNewThread(browser, baseUrl);
+	await testCleanTranscriptContinuesAfterFailure(browser, baseUrl);
 	await testDegradeAndRecover(browser, baseUrl);
 	await testPeriodicAndPageHideCheckpoints(browser, baseUrl);
 	await testConnectionFailure(browser, baseUrl);
 	await testCaptureRunDurationLimit(browser, baseUrl);
 	await testStorageTimeoutFallback(browser, baseUrl);
 	console.log(
-		'[persistence-smoke] passed: pause/resume, session switching, sidecar tasks, degrade/recover, checkpoints, reload repair, failure, duration protection, and storage fallback'
+		'[persistence-smoke] passed: pause/resume, session switching, sidecar tasks and block failure continuation, degrade/recover, checkpoints, reload repair, failure, duration protection, and storage fallback'
 	);
 } finally {
 	await browser?.close();

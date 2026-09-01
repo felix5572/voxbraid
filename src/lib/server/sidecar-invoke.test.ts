@@ -13,6 +13,7 @@ function request(overrides: Partial<SidecarInvokeRequest> = {}): Request {
 			threadId: 'thread-1',
 			scope: 'latest-run',
 			capturedAt: '2026-09-01T11:59:00.000Z',
+			continuityText: '',
 			runs: [
 				{
 					runId: 'run-1',
@@ -130,7 +131,7 @@ describe('invokeSidecar', () => {
 				? jsonResponse({ input_tokens: 42 })
 				: jsonResponse({
 						id: 'resp-1',
-						model: 'gpt-5.6-luna',
+						model: 'gpt-5.6-terra',
 						status: 'completed',
 						output_text: '总结结果',
 						usage: {
@@ -151,7 +152,7 @@ describe('invokeSidecar', () => {
 
 		expect(response.status).toBe(200);
 		expect(requestBodies[0]).toMatchObject({
-			model: 'gpt-5.6-luna',
+			model: 'gpt-5.6-terra',
 			truncation: 'disabled'
 		});
 		expect(requestBodies[1]).toMatchObject({
@@ -165,7 +166,7 @@ describe('invokeSidecar', () => {
 			status: 'completed',
 			clientRequestId: 'request-1',
 			responseId: 'resp-1',
-			model: 'gpt-5.6-luna',
+			model: 'gpt-5.6-terra',
 			outputText: '总结结果',
 			usageStatus: 'recorded',
 			usage: {

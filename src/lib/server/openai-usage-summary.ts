@@ -1,6 +1,10 @@
 import { REALTIME_TRANSLATION_MODEL } from '../realtime/usage-estimate';
 import { REALTIME_TRANSCRIPTION_MODELS } from '../realtime/types';
-import { SIDECAR_FAST_MODEL, SIDECAR_INTERACTIVE_MODEL } from './sidecar-tasks';
+import {
+	SIDECAR_CLEAN_MODEL,
+	SIDECAR_FAST_MODEL,
+	SIDECAR_INTERACTIVE_MODEL
+} from './sidecar-tasks';
 
 const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organization/costs';
 const REALTIME_TRANSCRIPTION_LINE_ITEMS = REALTIME_TRANSCRIPTION_MODELS.map((model) => model.code);
@@ -11,7 +15,7 @@ const REALTIME_LINE_ITEMS = new Set([
 const SIDECAR_LINE_ITEM_MODELS = [
 	SIDECAR_FAST_MODEL,
 	SIDECAR_INTERACTIVE_MODEL,
-	'gpt-5.6-terra'
+	SIDECAR_CLEAN_MODEL
 ] as const;
 const DAY_SECONDS = 24 * 60 * 60;
 const WINDOW_DAYS = [1, 7, 30] as const;
