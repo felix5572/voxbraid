@@ -6,8 +6,8 @@ export const TARGET_LANGUAGES = [
 ] as const;
 
 export const REALTIME_TRANSCRIPTION_MODELS = [
-	{ code: 'gpt-live-transcribe', label: 'Live Transcribe' },
-	{ code: 'gpt-realtime-whisper', label: 'Realtime Whisper' }
+	{ code: 'gpt-live-transcribe', label: 'GPT-Live-Transcribe', releasedAt: '2026-07-28' },
+	{ code: 'gpt-realtime-whisper', label: 'GPT-Realtime-Whisper', releasedAt: '2026-05-07' }
 ] as const;
 
 export const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = 'gpt-live-transcribe';

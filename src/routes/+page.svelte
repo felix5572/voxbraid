@@ -1271,7 +1271,8 @@
 							disabled={active || status === 'stopping'}
 						>
 							{#each REALTIME_TRANSCRIPTION_MODELS as model (model.code)}
-								<option value={model.code}>{model.label}</option>
+								<option value={model.code}>{model.label} · {model.code} · {model.releasedAt}</option
+								>
 							{/each}
 						</select>
 					</label>
