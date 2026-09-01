@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick } from 'svelte';
 	import type { TranslationThread } from './types';
 
 	interface Props {
@@ -12,6 +13,7 @@
 	}
 
 	let { threads, currentThreadId, open, disabled, onClose, onNew, onSelect }: Props = $props();
+	let closeButton: HTMLButtonElement | null = null;
 
 	const TITLE_FORMATTER = new Intl.DateTimeFormat(undefined, {
 		month: 'short',
@@ -34,19 +36,34 @@
 	function updatedLabel(thread: TranslationThread): string {
 		return `最近更新 ${UPDATED_FORMATTER.format(new Date(thread.updatedAt))}`;
 	}
+
+	function handleKeydown(event: KeyboardEvent): void {
+		if (!open || event.key !== 'Escape') return;
+		event.preventDefault();
+		onClose();
+	}
+
+	$effect(() => {
+		if (!open) return;
+		void tick().then(() => closeButton?.focus());
+	});
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 {#if open}
 	<button class="backdrop" aria-label="关闭会话列表" onclick={onClose}></button>
 {/if}
 
-<aside class:open aria-label="会话列表">
+<aside id="session-sidebar" class:open aria-label="会话列表">
 	<div class="sidebar-header">
 		<div>
 			<p>VOXBRAID</p>
 			<h2>会话</h2>
 		</div>
-		<button class="close" aria-label="关闭会话列表" onclick={onClose}>×</button>
+		<button bind:this={closeButton} class="close" aria-label="关闭会话列表" onclick={onClose}>
+			×
+		</button>
 	</div>
 
 	<button class="new-session" onclick={onNew} {disabled}>

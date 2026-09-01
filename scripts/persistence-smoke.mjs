@@ -113,6 +113,10 @@ async function stopCapture(page) {
 	await page.getByRole('button', { name: '开始翻译' }).waitFor();
 }
 
+function mainText(page, text) {
+	return page.getByRole('main').getByText(text, { exact: true });
+}
+
 async function testPauseResumeAndNewThread(browser, baseUrl) {
 	const { browserErrors, context, page } = await createPage(browser, baseUrl);
 	try {
@@ -133,10 +137,12 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 			'第一次暂停后的 Run 保存'
 		);
 		assert.equal(firstRun.endReason, 'user-paused');
+		await page.getByRole('button', { name: new RegExp(firstSource) }).waitFor();
 
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
-		await page.getByText(firstSource, { exact: true }).waitFor();
+		await page.getByRole('button', { name: new RegExp(firstSource) }).waitFor();
+		await mainText(page, firstSource).waitFor();
 		await page.getByText(firstTranslation, { exact: true }).waitFor();
 		assert.equal(await page.locator('select').inputValue(), 'ja');
 
@@ -153,14 +159,14 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		);
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
-		await page.getByText(firstSource, { exact: true }).waitFor();
-		await page.getByText(secondSource, { exact: true }).waitFor();
+		await mainText(page, firstSource).waitFor();
+		await mainText(page, secondSource).waitFor();
 
 		const threadsBeforeNew = await readStore(page, 'threads');
 		assert.equal(threadsBeforeNew.length, 1);
 		await page.getByRole('button', { name: '新建会话' }).click();
 		await page.getByText('开始后，原文字幕会显示在这里。', { exact: true }).waitFor();
-		assert.equal(await page.getByText(firstSource, { exact: true }).count(), 0);
+		assert.equal(await mainText(page, firstSource).count(), 0);
 		assert.equal((await readStore(page, 'threads')).length, 1);
 
 		const newThreadSource = 'A fresh product thread.';
@@ -181,21 +187,33 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 
 		const firstThreadButton = page.locator(`[data-thread-id="${firstRun.threadId}"]`);
 		await firstThreadButton.click();
-		await page.getByText(firstSource, { exact: true }).waitFor();
-		await page.getByText(secondSource, { exact: true }).waitFor();
+		await mainText(page, firstSource).waitFor();
+		await mainText(page, secondSource).waitFor();
 		assert.equal(await firstThreadButton.getAttribute('aria-current'), 'page');
-		assert.equal(await page.getByText(newThreadSource, { exact: true }).count(), 0);
+		assert.equal(await mainText(page, newThreadSource).count(), 0);
 
 		const newThreadButton = page.locator(`[data-thread-id="${newThread.id}"]`);
 		await newThreadButton.click();
-		await page.getByText(newThreadSource, { exact: true }).waitFor();
+		await mainText(page, newThreadSource).waitFor();
 		assert.equal(await newThreadButton.getAttribute('aria-current'), 'page');
-		assert.equal(await page.getByText(firstSource, { exact: true }).count(), 0);
+		assert.equal(await mainText(page, firstSource).count(), 0);
 
 		await page.setViewportSize({ width: 768, height: 1_024 });
-		await page.getByRole('button', { name: '打开会话列表' }).click();
+		const sessionMenu = page.getByRole('button', { name: '打开会话列表' });
+		await sessionMenu.click();
+		await page.getByRole('button', { name: '关闭会话列表', exact: true }).last().waitFor();
+		assert.equal(
+			await page
+				.getByRole('button', { name: '关闭会话列表', exact: true })
+				.last()
+				.evaluate((element) => element === document.activeElement),
+			true
+		);
+		await page.keyboard.press('Escape');
+		assert.equal(await sessionMenu.evaluate((element) => element === document.activeElement), true);
+		await sessionMenu.click();
 		await firstThreadButton.click();
-		await page.getByText(firstSource, { exact: true }).waitFor();
+		await mainText(page, firstSource).waitFor();
 		assert.equal(await firstThreadButton.getAttribute('aria-current'), 'page');
 		assert.deepEqual(browserErrors, []);
 	} finally {
@@ -230,7 +248,7 @@ async function testPeriodicAndPageHideCheckpoints(browser, baseUrl) {
 
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
-		await page.getByText(`${immediateSource}${periodicSource}`, { exact: true }).waitFor();
+		await mainText(page, `${immediateSource}${periodicSource}`).waitFor();
 		const repairedRun = await waitForRecord(
 			page,
 			'runs',
@@ -306,7 +324,7 @@ async function testConnectionFailure(browser, baseUrl) {
 
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
-		await page.getByText(source, { exact: true }).waitFor();
+		await mainText(page, source).waitFor();
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -331,7 +349,7 @@ async function testStorageTimeoutFallback(browser, baseUrl) {
 
 		await startCapture(page);
 		await emitPair(page, 'Translation continues without storage.', '保存なしでも翻訳できます。');
-		await page.getByText('Translation continues without storage.', { exact: true }).waitFor();
+		await mainText(page, 'Translation continues without storage.').waitFor();
 		await stopCapture(page);
 		const expectedError = '[persistence] restore failed';
 		assert.ok(browserErrors.some((message) => message.includes(expectedError)));

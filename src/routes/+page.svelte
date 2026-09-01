@@ -112,6 +112,7 @@
 	let timingProbeSamples: TranscriptTimingSample[] = [];
 	let sourceScroller: HTMLDivElement | null = null;
 	let translationScroller: HTMLDivElement | null = null;
+	let sessionMenuButton: HTMLButtonElement | null = null;
 	let sourceFollowsTail = true;
 	let translationFollowsTail = true;
 	let followFrame: number | null = null;
@@ -224,7 +225,7 @@
 			}
 			session = null;
 			error = '';
-			sessionSidebarOpen = false;
+			closeSessionSidebar();
 		} finally {
 			sessionSwitching = false;
 		}
@@ -233,7 +234,7 @@
 	async function selectThread(threadId: string): Promise<void> {
 		if (sessionActionsDisabled || !repository) return;
 		if (session?.thread.id === threadId) {
-			sessionSidebarOpen = false;
+			closeSessionSidebar();
 			return;
 		}
 
@@ -249,7 +250,7 @@
 			applyStoredThread(stored);
 			error = '';
 			persistenceError = '';
-			sessionSidebarOpen = false;
+			closeSessionSidebar();
 			await refreshThreadList();
 		} catch (switchError) {
 			console.error('[persistence] thread switch failed', switchError);
@@ -257,6 +258,13 @@
 		} finally {
 			sessionSwitching = false;
 		}
+	}
+
+	function closeSessionSidebar(): void {
+		sessionSidebarOpen = false;
+		requestAnimationFrame(() => {
+			if (sessionMenuButton?.offsetParent !== null) sessionMenuButton?.focus();
+		});
 	}
 
 	function isNearTail(element: HTMLDivElement): boolean {
@@ -696,7 +704,7 @@
 		currentThreadId={session?.thread.id ?? null}
 		open={sessionSidebarOpen}
 		disabled={sessionActionsDisabled}
-		onClose={() => (sessionSidebarOpen = false)}
+		onClose={closeSessionSidebar}
 		onNew={() => void startNewThread()}
 		onSelect={(threadId) => void selectThread(threadId)}
 	/>
@@ -705,8 +713,11 @@
 		<header>
 			<div class="header-leading">
 				<button
+					bind:this={sessionMenuButton}
 					class="session-menu"
 					aria-label="打开会话列表"
+					aria-controls="session-sidebar"
+					aria-expanded={sessionSidebarOpen}
 					onclick={() => (sessionSidebarOpen = true)}
 				>
 					<span></span><span></span><span></span>

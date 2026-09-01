@@ -84,6 +84,85 @@ describe('translation session lifecycle', () => {
 		expect(activeCaptureRun(state)?.id).toBe('run-2');
 	});
 
+	it('creates one stable local title from the first source sentence', () => {
+		let state = beginRun(createState());
+		state = appendRealtimeTranscriptEvent(
+			state,
+			{ type: 'session.input_transcript.delta', delta: '  Hello,', elapsed_ms: 200 },
+			'2026-08-31T00:00:02.000Z'
+		);
+		expect(state.thread.title).toBeNull();
+
+		state = appendRealtimeTranscriptEvent(
+			state,
+			{ type: 'session.input_transcript.delta', delta: '   can you hear me? ', elapsed_ms: 400 },
+			'2026-08-31T00:00:02.200Z'
+		);
+		expect(state.thread.title).toBe('Hello, can you hear me?');
+
+		state = appendRealtimeTranscriptEvent(
+			state,
+			{ type: 'session.input_transcript.delta', delta: ' A later sentence.', elapsed_ms: 600 },
+			'2026-08-31T00:00:02.400Z'
+		);
+		expect(state.thread.title).toBe('Hello, can you hear me?');
+	});
+
+	it('uses short unfinished source text as the title when a run closes', () => {
+		let state = beginRun(createState());
+		state = appendRealtimeTranscriptEvent(
+			state,
+			{ type: 'session.output_transcript.delta', delta: '只有译文', elapsed_ms: 200 },
+			'2026-08-31T00:00:02.000Z'
+		);
+		state = appendRealtimeTranscriptEvent(
+			state,
+			{ type: 'session.input_transcript.delta', delta: ' short note ', elapsed_ms: 400 },
+			'2026-08-31T00:00:02.200Z'
+		);
+		expect(state.thread.title).toBeNull();
+
+		state = endActiveCaptureRun(state, {
+			outcome: 'completed',
+			reason: 'user-paused',
+			at: '2026-08-31T00:00:03.000Z'
+		});
+		expect(state.thread.title).toBe('short note');
+	});
+
+	it.each([
+		['Mr. Smith opened the meeting.', 'Mr. Smith opened the meeting.'],
+		['The U.S. economy grew last year.', 'The U.S. economy grew last year.'],
+		['你好。今天我们讨论第二章的内容。', '你好。']
+	])('uses a shared sentence boundary for %s', (source, expectedTitle) => {
+		let state = beginRun(createState());
+		state = appendRealtimeTranscriptEvent(
+			state,
+			{
+				type: 'session.input_transcript.delta',
+				delta: source,
+				elapsed_ms: 400
+			},
+			'2026-08-31T00:00:02.000Z'
+		);
+		expect(state.thread.title).toBe(expectedTitle);
+	});
+
+	it('keeps decimal numbers intact when deriving a title', () => {
+		let state = beginRun(createState());
+		state = appendRealtimeTranscriptEvent(
+			state,
+			{
+				type: 'session.input_transcript.delta',
+				delta: 'It is 3.14 today and we continue.',
+				elapsed_ms: 400
+			},
+			'2026-08-31T00:00:02.000Z'
+		);
+		expect(state.thread.title).toContain('3.14');
+		expect(state.thread.title).not.toBe('It is 3.');
+	});
+
 	it('records startup and connected failures with different lifecycle outcomes', () => {
 		const startupFailure = endActiveCaptureRun(beginRun(createState()), {
 			outcome: 'failed',

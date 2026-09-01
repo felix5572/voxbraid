@@ -217,7 +217,7 @@ Supabase 不接收每一个实时字幕 delta。客户端先聚合成片段，�
     └── 对话消息 Assistant Message
 ```
 
-翻译会话类似一个可持续追加的聊天会话。暂停只结束当前收音片段，不清空或关闭翻译会话；继续时创建新的收音片段。页面侧栏提供新建会话和本地历史切换，收音期间禁止切换；列表只加载轻量 thread 元数据，选中后才读取该会话的完整字幕。用户可以基于截至某处或选定范围的字幕创建 GPT 问答支线，但模型回答不会写回原始转录。底层 OpenAI session 和 conversation 都只是远端资源，不作为产品身份。
+翻译会话类似一个可持续追加的聊天会话。暂停只结束当前收音片段，不清空或关闭翻译会话；继续时创建新的收音片段。页面侧栏提供新建会话和本地历史切换，收音期间禁止切换；列表只加载轻量 thread 元数据，选中后才读取该会话的完整字幕。首句源文会在本地形成稳定标题，不额外调用模型。用户可以基于截至某处或选定范围的字幕创建 GPT 问答支线，但模型回答不会写回原始转录。底层 OpenAI session 和 conversation 都只是远端资源，不作为产品身份。
 
 完整字段、生命周期、暂停语义、断线重建和持久化约束见 [`docs/session-model.md`](docs/session-model.md)。从可重建 IndexedDB 过渡到 Supabase migration 的阶段划分见 [`docs/persistence-roadmap.md`](docs/persistence-roadmap.md)。
 

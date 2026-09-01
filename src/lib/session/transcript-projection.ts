@@ -1,9 +1,5 @@
+import { sentenceBoundaries } from './sentence-boundary';
 import type { SegmentAlignment } from './types';
-
-const SENTENCE_END = /(?:[。！？]["'”’）)\]]*|[.!?]["'”’）)\]]*(?=\s|$))/gu;
-const COMMON_ABBREVIATION =
-	/(?:^|[\s(])(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|Inc|Ltd|No|vs|etc|e\.g|i\.e|approx)\.$/iu;
-const INITIALISM = /(?:\b[A-Za-z]\.){2,}$/u;
 
 export interface TranscriptBlockProjection {
 	sequence: number;
@@ -17,10 +13,7 @@ export function splitTranscriptBlocks(value: string): string[] {
 
 	const blocks: string[] = [];
 	let start = 0;
-	for (const match of value.matchAll(SENTENCE_END)) {
-		const end = (match.index ?? 0) + match[0].length;
-		const candidate = value.slice(start, end);
-		if (COMMON_ABBREVIATION.test(candidate) || INITIALISM.test(candidate)) continue;
+	for (const { end } of sentenceBoundaries(value)) {
 		blocks.push(value.slice(start, end));
 		start = end;
 	}

@@ -1,6 +1,7 @@
 import { toTranscriptDeltaFact } from '../realtime/session-adapter';
 import type { TranslationServerEvent } from '../realtime/types';
 import { reduceTranscriptFacts } from './transcript-facts';
+import { sentenceBoundaries } from './sentence-boundary';
 import type { CaptureRun, CaptureRunEndReason, RunError, TranslationThread } from './types';
 
 export interface TranslationSessionDiagnostics {
@@ -32,6 +33,49 @@ export interface EndCaptureRunInput {
 	reason: CaptureRunEndReason;
 	error?: RunError | null;
 	at: string;
+}
+
+const THREAD_TITLE_MAX_CHARACTERS = 32;
+const THREAD_TITLE_MIN_BOUNDARY_CHARACTERS = 8;
+
+function sourceTitle(sourceText: string, force: boolean): string | null {
+	const normalized = sourceText.replace(/\s+/gu, ' ').trim();
+	if (!normalized) return null;
+
+	const normalizedCharacters = Array.from(normalized);
+	let boundaryEnd: number | null = null;
+	for (const boundary of sentenceBoundaries(normalized)) {
+		if (
+			boundary.kind === 'ascii' &&
+			Array.from(normalized.slice(0, boundary.end)).length < THREAD_TITLE_MIN_BOUNDARY_CHARACTERS
+		) {
+			continue;
+		}
+		boundaryEnd = boundary.end;
+		break;
+	}
+	const hasBoundary = boundaryEnd !== null;
+	if (!force && !hasBoundary && normalizedCharacters.length < THREAD_TITLE_MAX_CHARACTERS) {
+		return null;
+	}
+
+	const candidate = boundaryEnd === null ? normalized : normalized.slice(0, boundaryEnd);
+	const characters = Array.from(candidate);
+	if (characters.length <= THREAD_TITLE_MAX_CHARACTERS) return candidate;
+	return `${characters
+		.slice(0, THREAD_TITLE_MAX_CHARACTERS - 1)
+		.join('')
+		.trimEnd()}…`;
+}
+
+function threadWithSourceTitle(
+	thread: TranslationThread,
+	sourceText: string,
+	force: boolean
+): TranslationThread {
+	if (thread.title?.trim()) return thread;
+	const title = sourceTitle(sourceText, force);
+	return title ? { ...thread, title } : thread;
 }
 
 export function createTranslationSession(
@@ -169,6 +213,10 @@ export function appendRealtimeTranscriptEvent(
 	const replaced = replaceRun(state, target.id, () => result.run);
 	return {
 		...replaced,
+		thread:
+			fact.type === 'source-delta'
+				? threadWithSourceTitle(replaced.thread, result.run.sourceStream.text, false)
+				: replaced.thread,
 		diagnostics: {
 			deltasAfterClose: replaced.diagnostics.deltasAfterClose + result.diagnostics.deltasAfterClose
 		}
@@ -192,7 +240,10 @@ export function endActiveCaptureRun(
 	const replaced = replaceRun(state, run.id, () => result.run);
 	return {
 		...replaced,
-		thread: { ...replaced.thread, updatedAt: input.at },
+		thread: {
+			...threadWithSourceTitle(replaced.thread, result.run.sourceStream.text, true),
+			updatedAt: input.at
+		},
 		activeRunId: null
 	};
 }
