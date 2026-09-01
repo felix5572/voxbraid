@@ -55,6 +55,7 @@ type CaptureRunStatus = 'starting' | 'live' | 'stopping' | 'completed' | 'interr
 
 type CaptureRunEndReason =
 	| 'user-paused'
+	| 'duration-limit'
 	| 'connection-lost'
 	| 'page-suspended'
 	| 'page-terminated'
@@ -96,6 +97,8 @@ interface CaptureRun {
 ```
 
 `createdAt` 是用户发起本次收音的时间；`mediaStartedAt` 是媒体连接真正开始、run 相对时间轴开始计时的时间，两者不能混用。`sourceStream` 和 `translationStream` 保存各自完整的追加文本，是“先保全文本、再整理段落”的兜底事实；segment 是其可读投影，而不是唯一副本。
+
+自用 MVP 对单个连续 run 设置固定 2 小时客户端安全上限，从 `mediaStartedAt` 开始计算；达到上限后关闭 WebRTC、按正常停止路径保存，并记录 `endReason: 'duration-limit'`。这是防止忘记停止的本机保护，不等同于服务端硬额度控制；浏览器被挂起或终止时仍只能依赖恢复规则和 OpenAI Platform 预算止损。
 
 `recoveredFromRunId` 只表示系统因连接失效或页面挂起而自动重建了一个后续 run。用户主动暂停后继续无需设置该字段；同属一个 thread 且 sequence 相邻已经能够表达产品连续性。
 

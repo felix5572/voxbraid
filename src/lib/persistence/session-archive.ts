@@ -30,6 +30,7 @@ const RUN_STATUSES = new Set<CaptureRunStatus>([
 const ACTIVE_RUN_STATUSES = new Set<CaptureRunStatus>(['starting', 'live', 'stopping']);
 const END_REASONS = new Set<CaptureRunEndReason>([
 	'user-paused',
+	'duration-limit',
 	'connection-lost',
 	'page-suspended',
 	'page-terminated',

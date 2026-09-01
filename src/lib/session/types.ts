@@ -13,6 +13,7 @@ export type CaptureRunStatus =
 
 export type CaptureRunEndReason =
 	| 'user-paused'
+	| 'duration-limit'
 	| 'connection-lost'
 	| 'page-suspended'
 	| 'page-terminated'

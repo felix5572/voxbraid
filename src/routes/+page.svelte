@@ -23,6 +23,12 @@
 	import { ScreenWakeLock } from '$lib/screen-wake-lock';
 	import SessionSidebar from '$lib/session/SessionSidebar.svelte';
 	import {
+		CAPTURE_RUN_DURATION_LIMIT_MS,
+		CAPTURE_RUN_DURATION_WARNING_MS,
+		captureRunRemainingMs,
+		formatRemainingDuration
+	} from '$lib/session/capture-run-limit';
+	import {
 		activeCaptureRun,
 		appendRealtimeTranscriptEvent,
 		beginCaptureRun,
@@ -151,6 +157,8 @@
 	let officialUsagePhase = $state<OfficialUsagePhase>('loading');
 	let officialUsageRequest = 0;
 	let captionFontSizePx = $state(DEFAULT_CAPTION_FONT_SIZE_PX);
+	let captureRunDurationLimitMs = $state(CAPTURE_RUN_DURATION_LIMIT_MS);
+	let durationLimitNotice = $state('');
 	let client: TranslationClient | null = null;
 	let clientReady = $state(false);
 	let repository: LocalSessionRepository | null = null;
@@ -196,6 +204,7 @@
 	let diagnosticTranslationElapsedMs = $state<number | null>(null);
 	let diagnosticErrors = $state(0);
 	let diagnosticReportText = $state('开始一次收音后，这里会生成当前 Run 的原始诊断报告。');
+	let durationLimitStopRequested = false;
 	const wakeLock = new ScreenWakeLock();
 
 	const active = $derived(status !== 'idle' && status !== 'failed' && status !== 'stopping');
@@ -217,6 +226,16 @@
 	);
 	const usageEstimate = $derived(estimateRealtimeUsage(session?.runs ?? [], usageNowMs));
 	const estimatedCostLabel = $derived(formatEstimatedCostUsd(usageEstimate.estimatedCostUsd));
+	const activeRunRemainingMs = $derived(
+		captureRunRemainingMs(
+			session ? (activeCaptureRun(session)?.mediaStartedAt ?? null) : null,
+			usageNowMs,
+			captureRunDurationLimitMs
+		)
+	);
+	const activeRunRemainingLabel = $derived(
+		activeRunRemainingMs === null ? '' : formatRemainingDuration(activeRunRemainingMs)
+	);
 	const officialUpdatedLabel = $derived(
 		officialUsage ? OFFICIAL_USAGE_TIME_FORMATTER.format(new Date(officialUsage.updatedAt)) : ''
 	);
@@ -714,14 +733,29 @@
 		} catch (storageError) {
 			console.warn('[caption-font-size] preference could not be loaded', storageError);
 		}
+		const search = new URLSearchParams(location.search);
+		if (import.meta.env.DEV) {
+			const testDurationLimitMs = Number(search.get('capture-run-limit-ms'));
+			if (Number.isFinite(testDurationLimitMs) && testDurationLimitMs > 0) {
+				captureRunDurationLimitMs = testDurationLimitMs;
+			}
+		}
 		const usageTimer = window.setInterval(() => {
 			const activeRun = session ? activeCaptureRun(session) : null;
 			if (activeRun?.mediaStartedAt) {
 				usageNowMs = Date.now();
+				const remainingMs = captureRunRemainingMs(
+					activeRun.mediaStartedAt,
+					usageNowMs,
+					captureRunDurationLimitMs
+				);
+				if (remainingMs === 0 && !durationLimitStopRequested) {
+					durationLimitStopRequested = true;
+					void stop('duration-limit');
+				}
 			}
 		}, 1_000);
 		void refreshOfficialUsage();
-		const search = new URLSearchParams(location.search);
 		timingProbeEnabled = import.meta.env.DEV && search.get('timing-probe') === '1';
 		if (import.meta.env.DEV && search.get('audio-test') === '1') {
 			audioTestEnabled = true;
@@ -962,6 +996,8 @@
 			return;
 		}
 		error = '';
+		durationLimitNotice = '';
+		durationLimitStopRequested = false;
 		resetRealtimeDiagnostics();
 		const at = nowIso();
 		const baseSession =
@@ -1032,12 +1068,15 @@
 		if (session) {
 			session = endActiveCaptureRun(session, {
 				outcome: 'completed',
-				reason: 'user-paused',
+				reason: outcome === 'duration-limit' ? 'duration-limit' : 'user-paused',
 				at: nowIso()
 			});
 			markCheckpointDirty();
 			await flushCheckpoint();
 			await refreshThreadList();
+		}
+		if (outcome === 'duration-limit') {
+			durationLimitNotice = '已达到单次连续收音 2 小时安全上限，翻译已自动停止并保存。';
 		}
 		publishTranscriptTiming();
 		timingProbeStartedAt = null;
@@ -1122,6 +1161,11 @@
 							>约 ${estimatedCostLabel}</span
 						>
 					</strong>
+					{#if activeRunRemainingMs !== null}
+						<small class:limit-warning={activeRunRemainingMs <= CAPTURE_RUN_DURATION_WARNING_MS}>
+							安全保护剩余 {activeRunRemainingLabel}
+						</small>
+					{/if}
 				</div>
 
 				<div
@@ -1209,6 +1253,10 @@
 			</div>
 		{:else if backupMessage}
 			<div class="backup-message" role="status">{backupMessage}</div>
+		{/if}
+
+		{#if durationLimitNotice}
+			<div class="backup-message" role="status">{durationLimitNotice}</div>
 		{/if}
 
 		<section
@@ -1728,6 +1776,15 @@
 		font-size: 13px;
 		font-variant-numeric: tabular-nums;
 		font-weight: 620;
+	}
+	.usage-estimate small {
+		color: #73817a;
+		font-size: 10px;
+		font-variant-numeric: tabular-nums;
+	}
+	.usage-estimate small.limit-warning {
+		color: #e3bd79;
+		font-weight: 650;
 	}
 	.usage-estimate i,
 	.official-usage i {

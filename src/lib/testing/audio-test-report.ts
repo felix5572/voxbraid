@@ -2,7 +2,7 @@ import type { ConnectionStatus } from '../realtime/types';
 import type { TranslationSessionState } from '../session/translation-session';
 
 export type AudioTestOutcome =
-	'audio-ended' | 'user-stopped' | 'startup-failed' | 'connection-failed';
+	'audio-ended' | 'user-stopped' | 'duration-limit' | 'startup-failed' | 'connection-failed';
 
 export interface AudioTestStatusChange {
 	status: ConnectionStatus;

@@ -450,6 +450,35 @@ async function testConnectionFailure(browser, baseUrl) {
 	}
 }
 
+async function testCaptureRunDurationLimit(browser, baseUrl) {
+	const { browserErrors, context, page } = await createPage(
+		browser,
+		baseUrl,
+		'?browser-test=1&capture-run-limit-ms=100'
+	);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		await emitPair(page, 'Automatic duration protection.', '自动时长保护。');
+		await page.getByRole('button', { name: '开始翻译' }).waitFor({ timeout: 4_000 });
+		await page
+			.getByText('已达到单次连续收音 2 小时安全上限，翻译已自动停止并保存。', {
+				exact: true
+			})
+			.waitFor();
+		const limitedRun = await waitForRecord(
+			page,
+			'runs',
+			(record) => record.endReason === 'duration-limit' && record.status === 'completed',
+			'达到安全时长上限后的 Run 保存'
+		);
+		assert.equal(limitedRun.sourceStream.text, 'Automatic duration protection.');
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
 async function testStorageTimeoutFallback(browser, baseUrl) {
 	const { browserErrors, context, page } = await createPage(
 		browser,
@@ -520,9 +549,10 @@ try {
 	await testDegradeAndRecover(browser, baseUrl);
 	await testPeriodicAndPageHideCheckpoints(browser, baseUrl);
 	await testConnectionFailure(browser, baseUrl);
+	await testCaptureRunDurationLimit(browser, baseUrl);
 	await testStorageTimeoutFallback(browser, baseUrl);
 	console.log(
-		'[persistence-smoke] passed: pause/resume, session switching, degrade/recover, checkpoints, reload repair, failure, and storage fallback'
+		'[persistence-smoke] passed: pause/resume, session switching, degrade/recover, checkpoints, reload repair, failure, duration protection, and storage fallback'
 	);
 } finally {
 	await browser?.close();
