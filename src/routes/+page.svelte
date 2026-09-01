@@ -1,7 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { CheckpointWriter } from '$lib/persistence/checkpoint-writer';
-	import type { LocalSessionRepository } from '$lib/persistence/local-session-repository';
+	import type {
+		LocalSessionRepository,
+		StoredThread
+	} from '$lib/persistence/local-session-repository';
 	import {
 		RealtimeTranslationClient,
 		realtimeErrorMessage,
@@ -9,6 +12,7 @@
 		type TranslationClient
 	} from '$lib/realtime/client';
 	import { ScreenWakeLock } from '$lib/screen-wake-lock';
+	import SessionSidebar from '$lib/session/SessionSidebar.svelte';
 	import {
 		activeCaptureRun,
 		appendRealtimeTranscriptEvent,
@@ -85,6 +89,9 @@
 	let error = $state('');
 	let persistencePhase = $state<PersistencePhase>('restoring');
 	let persistenceError = $state('');
+	let threads = $state<TranslationThread[]>([]);
+	let sessionSidebarOpen = $state(false);
+	let sessionSwitching = $state(false);
 	let client: TranslationClient | null = null;
 	let clientReady = $state(false);
 	let repository: LocalSessionRepository | null = null;
@@ -111,6 +118,9 @@
 	const wakeLock = new ScreenWakeLock();
 
 	const active = $derived(status !== 'idle' && status !== 'failed' && status !== 'stopping');
+	const sessionActionsDisabled = $derived(
+		active || status === 'stopping' || persistencePhase === 'restoring' || sessionSwitching
+	);
 	const statusLabel = $derived(
 		persistencePhase === 'restoring' && status === 'idle'
 			? '恢复记录'
@@ -135,6 +145,28 @@
 
 	function languageLabel(code: string): string {
 		return TARGET_LANGUAGES.find((language) => language.code === code)?.label ?? code;
+	}
+
+	function applyStoredThread(stored: StoredThread): void {
+		session = {
+			thread: stored.thread,
+			runs: stored.runs,
+			activeRunId: null,
+			diagnostics: { deltasAfterClose: 0 }
+		};
+		const restoredLanguage =
+			stored.runs.at(-1)?.targetLanguage ?? stored.thread.defaultTargetLanguage;
+		if (isTargetLanguage(restoredLanguage)) targetLanguage = restoredLanguage;
+	}
+
+	async function refreshThreadList(): Promise<void> {
+		if (!repository) return;
+		try {
+			threads = await repository.listThreads();
+		} catch (listError) {
+			console.error('[persistence] thread list failed', listError);
+			persistenceError = '会话列表刷新失败，请稍后重试。';
+		}
 	}
 
 	function markCheckpointDirty(): void {
@@ -183,13 +215,48 @@
 	}
 
 	async function startNewThread(): Promise<void> {
-		if (active || persistencePhase === 'restoring') return;
-		if (checkpointWriter && session) {
-			markCheckpointDirty();
-			if (!(await flushCheckpoint())) return;
+		if (sessionActionsDisabled) return;
+		sessionSwitching = true;
+		try {
+			if (checkpointWriter && session) {
+				markCheckpointDirty();
+				if (!(await flushCheckpoint())) return;
+			}
+			session = null;
+			error = '';
+			sessionSidebarOpen = false;
+		} finally {
+			sessionSwitching = false;
 		}
-		session = null;
-		error = '';
+	}
+
+	async function selectThread(threadId: string): Promise<void> {
+		if (sessionActionsDisabled || !repository) return;
+		if (session?.thread.id === threadId) {
+			sessionSidebarOpen = false;
+			return;
+		}
+
+		sessionSwitching = true;
+		try {
+			if (checkpointWriter && session) {
+				markCheckpointDirty();
+				if (!(await flushCheckpoint())) return;
+			}
+			await repository.repairAbandonedRuns(threadId, nowIso());
+			const stored = await repository.loadThread(threadId);
+			if (!stored) throw new Error(`Thread not found: ${threadId}`);
+			applyStoredThread(stored);
+			error = '';
+			persistenceError = '';
+			sessionSidebarOpen = false;
+			await refreshThreadList();
+		} catch (switchError) {
+			console.error('[persistence] thread switch failed', switchError);
+			persistenceError = '会话切换失败，请稍后重试。';
+		} finally {
+			sessionSwitching = false;
+		}
 	}
 
 	function isNearTail(element: HTMLDivElement): boolean {
@@ -269,7 +336,9 @@
 			at: nowIso()
 		});
 		markCheckpointDirty();
-		void flushCheckpoint();
+		void flushCheckpoint().then((saved) => {
+			if (saved) void refreshThreadList();
+		});
 	}
 
 	function recordTranscriptTiming(event: TranslationServerEvent): void {
@@ -434,7 +503,8 @@
 							await localRepository.saveCheckpoint({ ...snapshot, checkpointedAt: nowIso() });
 						});
 
-						const [latestThread] = await localRepository.listThreads();
+						threads = await localRepository.listThreads();
+						const [latestThread] = threads;
 						if (disposed || !restoreAllowed) {
 							localRepository.close();
 							return;
@@ -447,15 +517,8 @@
 							}
 							const stored = await localRepository.loadThread(latestThread.id);
 							if (stored && !disposed && restoreAllowed) {
-								session = {
-									thread: stored.thread,
-									runs: stored.runs,
-									activeRunId: null,
-									diagnostics: { deltasAfterClose: 0 }
-								};
-								const restoredLanguage =
-									stored.runs.at(-1)?.targetLanguage ?? stored.thread.defaultTargetLanguage;
-								if (isTargetLanguage(restoredLanguage)) targetLanguage = restoredLanguage;
+								applyStoredThread(stored);
+								threads = await localRepository.listThreads();
 							}
 						}
 
@@ -556,6 +619,7 @@
 		});
 		markCheckpointDirty();
 		await flushCheckpoint();
+		await refreshThreadList();
 		if (import.meta.env.DEV && audioTestEnabled && audioTestFile) {
 			const run = activeCaptureRun(session);
 			if (!run) throw new Error('Audio test run was not created.');
@@ -613,6 +677,7 @@
 			});
 			markCheckpointDirty();
 			await flushCheckpoint();
+			await refreshThreadList();
 		}
 		publishTranscriptTiming();
 		timingProbeStartedAt = null;
@@ -625,150 +690,173 @@
 	<meta name="description" content="使用 OpenAI Realtime Translation 将环境音转为实时双语字幕。" />
 </svelte:head>
 
-<main>
-	<header>
-		<div class="brand">
-			<div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
-			<div>
-				<p class="eyebrow">VOXBRAID</p>
-				<h1>环境音实时翻译</h1>
-			</div>
-		</div>
-		<div class:live={status === 'connected'} class:error-state={status === 'failed'} class="status">
-			<span></span>{statusLabel}
-		</div>
-	</header>
+<div class="app-shell">
+	<SessionSidebar
+		{threads}
+		currentThreadId={session?.thread.id ?? null}
+		open={sessionSidebarOpen}
+		disabled={sessionActionsDisabled}
+		onClose={() => (sessionSidebarOpen = false)}
+		onNew={() => void startNewThread()}
+		onSelect={(threadId) => void selectThread(threadId)}
+	/>
 
-	<section class="controls" aria-label="翻译控制">
-		<label>
-			<span>目标语言</span>
-			<select bind:value={targetLanguage} disabled={active || persistencePhase === 'restoring'}>
-				{#each TARGET_LANGUAGES as language (language.code)}
-					<option value={language.code}>{language.label}</option>
-				{/each}
-			</select>
-		</label>
-
-		{#if active}
-			<button class="stop" onclick={() => void stop('user-stopped')}>
-				<span class="stop-icon"></span>停止翻译
-			</button>
-		{:else}
-			<div class="control-actions">
-				{#if session && session.runs.length > 0}
-					<button
-						class="new-thread"
-						onclick={() => void startNewThread()}
-						disabled={persistencePhase === 'restoring' || status === 'stopping'}
-					>
-						新建会话
-					</button>
-				{/if}
+	<main>
+		<header>
+			<div class="header-leading">
 				<button
-					class="start"
-					onclick={start}
-					disabled={!clientReady ||
-						persistencePhase === 'restoring' ||
-						status === 'stopping' ||
-						(import.meta.env.DEV && audioTestEnabled && !audioTestFile)}
+					class="session-menu"
+					aria-label="打开会话列表"
+					onclick={() => (sessionSidebarOpen = true)}
 				>
-					<span class="mic" aria-hidden="true"></span>
-					{import.meta.env.DEV && audioTestEnabled ? '开始录音回放' : '开始翻译'}
+					<span></span><span></span><span></span>
 				</button>
-			</div>
-		{/if}
-	</section>
-
-	{#if import.meta.env.DEV && audioTestEnabled && AudioTestPanel}
-		<AudioTestPanel
-			{active}
-			bind:file={audioTestFile}
-			report={lastAudioTestReport}
-			onDownload={downloadAudioTestReport}
-		/>
-	{/if}
-
-	{#if import.meta.env.DEV && session && persistencePhase === 'ready'}
-		<div class="developer-tools">
-			<button class="export" onclick={() => void downloadSessionArchive()}>导出会话 JSON</button>
-		</div>
-	{/if}
-
-	{#if error}
-		<div class="error" role="alert">
-			<strong>连接没有建立</strong>
-			<span>{error}</span>
-		</div>
-	{/if}
-
-	{#if persistenceError}
-		<div class="warning" role="status">
-			<strong>本地记录未保存</strong>
-			<span>{persistenceError}</span>
-		</div>
-	{/if}
-
-	<section class="captions" aria-live="polite">
-		<article>
-			<div class="caption-label"><span>原文</span><small>自动识别语言</small></div>
-			<div class="caption-scroll" bind:this={sourceScroller} onscroll={updateSourceFollow}>
-				{#if sourceTranscriptRuns.length > 0}
-					{#each sourceTranscriptRuns as run (run.runId)}
-						{#if sourceTranscriptRuns.length > 1 || run.sequence > 1}
-							<div class="run-separator">第 {run.sequence} 段 · {runTime(run)}</div>
-						{/if}
-						<p>{run.text}</p>
-					{/each}
-				{:else}
-					<p class="placeholder">
-						{active ? '正在听取环境声音…' : '开始后，原文字幕会显示在这里。'}
-					</p>
-				{/if}
-			</div>
-		</article>
-
-		<div class="divider" aria-hidden="true"></div>
-
-		<article class="translated">
-			<div class="caption-label">
-				<span>译文</span>
-				<small>{TARGET_LANGUAGES.find((item) => item.code === targetLanguage)?.label}</small>
+				<div class="brand">
+					<div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
+					<div>
+						<p class="eyebrow">VOXBRAID</p>
+						<h1>环境音实时翻译</h1>
+					</div>
+				</div>
 			</div>
 			<div
-				class="caption-scroll"
-				bind:this={translationScroller}
-				onscroll={updateTranslationFollow}
+				class:live={status === 'connected'}
+				class:error-state={status === 'failed'}
+				class="status"
 			>
-				{#if translatedTranscriptRuns.length > 0}
-					{#each translatedTranscriptRuns as run (run.runId)}
-						{#if translatedTranscriptRuns.length > 1 || run.sequence > 1}
-							<div class="run-separator">
-								第 {run.sequence} 段 · {runTime(run)} · {languageLabel(run.targetLanguage)}
-							</div>
-						{/if}
-						<p>{run.text}</p>
-					{/each}
-				{:else}
-					<p class="placeholder">
-						{active ? '翻译准备中…' : '目标语言字幕会同步显示在这里。'}
-					</p>
-				{/if}
+				<span></span>{statusLabel}
 			</div>
-		</article>
-	</section>
+		</header>
 
-	<footer>
-		<span>
-			{import.meta.env.DEV && audioTestEnabled
-				? '本地录音通过 WebRTC 直达 OpenAI'
-				: '音频从此设备通过 WebRTC 直达 OpenAI'}
-		</span>
-		<span>当前不播放译音 · 不保存录音</span>
-	</footer>
-</main>
+		<section class="controls" aria-label="翻译控制">
+			<label>
+				<span>目标语言</span>
+				<select bind:value={targetLanguage} disabled={active || persistencePhase === 'restoring'}>
+					{#each TARGET_LANGUAGES as language (language.code)}
+						<option value={language.code}>{language.label}</option>
+					{/each}
+				</select>
+			</label>
+
+			{#if active}
+				<button class="stop" onclick={() => void stop('user-stopped')}>
+					<span class="stop-icon"></span>停止翻译
+				</button>
+			{:else}
+				<div class="control-actions">
+					<button
+						class="start"
+						onclick={start}
+						disabled={!clientReady ||
+							persistencePhase === 'restoring' ||
+							status === 'stopping' ||
+							(import.meta.env.DEV && audioTestEnabled && !audioTestFile)}
+					>
+						<span class="mic" aria-hidden="true"></span>
+						{import.meta.env.DEV && audioTestEnabled ? '开始录音回放' : '开始翻译'}
+					</button>
+				</div>
+			{/if}
+		</section>
+
+		{#if import.meta.env.DEV && audioTestEnabled && AudioTestPanel}
+			<AudioTestPanel
+				{active}
+				bind:file={audioTestFile}
+				report={lastAudioTestReport}
+				onDownload={downloadAudioTestReport}
+			/>
+		{/if}
+
+		{#if import.meta.env.DEV && session && persistencePhase === 'ready'}
+			<div class="developer-tools">
+				<button class="export" onclick={() => void downloadSessionArchive()}>导出会话 JSON</button>
+			</div>
+		{/if}
+
+		{#if error}
+			<div class="error" role="alert">
+				<strong>连接没有建立</strong>
+				<span>{error}</span>
+			</div>
+		{/if}
+
+		{#if persistenceError}
+			<div class="warning" role="status">
+				<strong>本地记录未保存</strong>
+				<span>{persistenceError}</span>
+			</div>
+		{/if}
+
+		<section class="captions" aria-live="polite">
+			<article>
+				<div class="caption-label"><span>原文</span><small>自动识别语言</small></div>
+				<div class="caption-scroll" bind:this={sourceScroller} onscroll={updateSourceFollow}>
+					{#if sourceTranscriptRuns.length > 0}
+						{#each sourceTranscriptRuns as run (run.runId)}
+							{#if sourceTranscriptRuns.length > 1 || run.sequence > 1}
+								<div class="run-separator">第 {run.sequence} 段 · {runTime(run)}</div>
+							{/if}
+							<p>{run.text}</p>
+						{/each}
+					{:else}
+						<p class="placeholder">
+							{active ? '正在听取环境声音…' : '开始后，原文字幕会显示在这里。'}
+						</p>
+					{/if}
+				</div>
+			</article>
+
+			<div class="divider" aria-hidden="true"></div>
+
+			<article class="translated">
+				<div class="caption-label">
+					<span>译文</span>
+					<small>{TARGET_LANGUAGES.find((item) => item.code === targetLanguage)?.label}</small>
+				</div>
+				<div
+					class="caption-scroll"
+					bind:this={translationScroller}
+					onscroll={updateTranslationFollow}
+				>
+					{#if translatedTranscriptRuns.length > 0}
+						{#each translatedTranscriptRuns as run (run.runId)}
+							{#if translatedTranscriptRuns.length > 1 || run.sequence > 1}
+								<div class="run-separator">
+									第 {run.sequence} 段 · {runTime(run)} · {languageLabel(run.targetLanguage)}
+								</div>
+							{/if}
+							<p>{run.text}</p>
+						{/each}
+					{:else}
+						<p class="placeholder">
+							{active ? '翻译准备中…' : '目标语言字幕会同步显示在这里。'}
+						</p>
+					{/if}
+				</div>
+			</article>
+		</section>
+
+		<footer>
+			<span>
+				{import.meta.env.DEV && audioTestEnabled
+					? '本地录音通过 WebRTC 直达 OpenAI'
+					: '音频从此设备通过 WebRTC 直达 OpenAI'}
+			</span>
+			<span>当前不播放译音 · 不保存录音</span>
+		</footer>
+	</main>
+</div>
 
 <style>
+	.app-shell {
+		min-height: 100vh;
+		display: grid;
+		grid-template-columns: 276px minmax(0, 1fr);
+	}
+
 	main {
+		min-width: 0;
 		width: min(1120px, 100%);
 		min-height: 100vh;
 		margin: 0 auto;
@@ -781,6 +869,7 @@
 	header,
 	.controls,
 	footer,
+	.header-leading,
 	.brand,
 	.caption-label {
 		display: flex;
@@ -795,6 +884,30 @@
 
 	.brand {
 		gap: 14px;
+	}
+
+	.header-leading {
+		gap: 12px;
+	}
+
+	.session-menu {
+		display: none;
+		min-width: 0;
+		width: 42px;
+		height: 42px;
+		padding: 0;
+		border: 1px solid #303936;
+		border-radius: 12px;
+		flex-direction: column;
+		gap: 4px;
+		background: #111613;
+	}
+
+	.session-menu span {
+		width: 17px;
+		height: 2px;
+		border-radius: 2px;
+		background: #aeb9b3;
 	}
 
 	.mark {
@@ -937,12 +1050,6 @@
 		display: flex;
 		gap: 10px;
 	}
-	.new-thread {
-		min-width: 0;
-		border: 1px solid #343d39;
-		background: #111613;
-		color: #b9c1bd;
-	}
 	.mic {
 		width: 10px;
 		height: 15px;
@@ -1071,6 +1178,15 @@
 		gap: 20px;
 		color: #59615d;
 		font-size: 11px;
+	}
+
+	@media (max-width: 820px) {
+		.app-shell {
+			display: block;
+		}
+		.session-menu {
+			display: inline-flex;
+		}
 	}
 
 	@media (max-width: 640px) {

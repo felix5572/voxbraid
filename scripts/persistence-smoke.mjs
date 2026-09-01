@@ -122,6 +122,8 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		const firstSource = 'First automated capture run.';
 		const firstTranslation = '最初の自動収録です。';
 		await startCapture(page);
+		await page.locator('[data-thread-id]').waitFor();
+		assert.equal(await page.locator('[data-thread-id]').isDisabled(), true);
 		await emitPair(page, firstSource, firstTranslation);
 		await stopCapture(page);
 		const firstRun = await waitForRecord(
@@ -174,6 +176,27 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		const threadsAfterNew = await readStore(page, 'threads');
 		assert.equal(threadsAfterNew.length, 2);
 		assert.ok(threadsAfterNew.some((thread) => thread.id === firstRun.threadId));
+		const newThread = threadsAfterNew.find((thread) => thread.id !== firstRun.threadId);
+		assert.ok(newThread);
+
+		const firstThreadButton = page.locator(`[data-thread-id="${firstRun.threadId}"]`);
+		await firstThreadButton.click();
+		await page.getByText(firstSource, { exact: true }).waitFor();
+		await page.getByText(secondSource, { exact: true }).waitFor();
+		assert.equal(await firstThreadButton.getAttribute('aria-current'), 'page');
+		assert.equal(await page.getByText(newThreadSource, { exact: true }).count(), 0);
+
+		const newThreadButton = page.locator(`[data-thread-id="${newThread.id}"]`);
+		await newThreadButton.click();
+		await page.getByText(newThreadSource, { exact: true }).waitFor();
+		assert.equal(await newThreadButton.getAttribute('aria-current'), 'page');
+		assert.equal(await page.getByText(firstSource, { exact: true }).count(), 0);
+
+		await page.setViewportSize({ width: 768, height: 1_024 });
+		await page.getByRole('button', { name: '打开会话列表' }).click();
+		await firstThreadButton.click();
+		await page.getByText(firstSource, { exact: true }).waitFor();
+		assert.equal(await firstThreadButton.getAttribute('aria-current'), 'page');
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -362,7 +385,7 @@ try {
 	await testConnectionFailure(browser, baseUrl);
 	await testStorageTimeoutFallback(browser, baseUrl);
 	console.log(
-		'[persistence-smoke] passed: pause/resume, degrade/recover, checkpoints, reload repair, failure, new thread, and storage fallback'
+		'[persistence-smoke] passed: pause/resume, session switching, degrade/recover, checkpoints, reload repair, failure, and storage fallback'
 	);
 } finally {
 	await browser?.close();

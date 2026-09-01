@@ -60,7 +60,7 @@ corepack pnpm dev
 
 项目采用三层测试：
 
-1. 日常单元测试、事件 fixture 和浏览器持久化验收不连接 OpenAI，用于验证事实 reducer、阅读投影、Run 生命周期、视图裁剪、刷新恢复和新建会话。
+1. 日常单元测试、事件 fixture 和浏览器持久化验收不连接 OpenAI，用于验证事实 reducer、阅读投影、Run 生命周期、视图裁剪、刷新恢复以及多个会话的新建与切换。
 2. 录音回放测试连接真实 OpenAI：日常只跑数秒到数十秒，偶尔跑一段约 1–3 分钟的完整录音，用于验证 WebRTC、字幕事件和关闭时序。
 3. iPad 真机只在关键功能、较大生命周期改动和阶段性回归时执行，用于验证麦克风收音质量、权限弹窗、锁屏、后台挂起、Wake Lock、页面回收、功耗和真实网络切换等桌面无法可靠模拟的行为。
 
@@ -217,7 +217,7 @@ Supabase 不接收每一个实时字幕 delta。客户端先聚合成片段，�
     └── 对话消息 Assistant Message
 ```
 
-翻译会话类似一个可持续追加的聊天会话。暂停只结束当前收音片段，不清空或关闭翻译会话；继续时创建新的收音片段。用户可以基于截至某处或选定范围的字幕创建 GPT 问答支线，但模型回答不会写回原始转录。底层 OpenAI session 和 conversation 都只是远端资源，不作为产品身份。
+翻译会话类似一个可持续追加的聊天会话。暂停只结束当前收音片段，不清空或关闭翻译会话；继续时创建新的收音片段。页面侧栏提供新建会话和本地历史切换，收音期间禁止切换；列表只加载轻量 thread 元数据，选中后才读取该会话的完整字幕。用户可以基于截至某处或选定范围的字幕创建 GPT 问答支线，但模型回答不会写回原始转录。底层 OpenAI session 和 conversation 都只是远端资源，不作为产品身份。
 
 完整字段、生命周期、暂停语义、断线重建和持久化约束见 [`docs/session-model.md`](docs/session-model.md)。从可重建 IndexedDB 过渡到 Supabase migration 的阶段划分见 [`docs/persistence-roadmap.md`](docs/persistence-roadmap.md)。
 
@@ -323,7 +323,7 @@ Web MVP 采用以下策略：
 2. 使用模拟事件完成 iPad 双语字幕界面和状态流转。
 3. 建立服务端短期凭证接口，跑通真实 WebRTC 翻译闭环。
 4. 按核心会话模型实现 thread、run、segment 领域类型、无损双流事实 reducer、独立阅读投影和暂停继续。
-5. 使用 Dexie 接入三层转录本地恢复、事务检查点和 JSON 导出；开发初期允许 schema epoch 重建。
+5. 使用 Dexie 接入三层转录本地恢复、事务检查点、多个会话的创建与切换和 JSON 导出；开发初期允许 schema epoch 重建。
 6. 通过 HTTPS 在真实 iPad 上验证现场环境音、较长会话、Screen Wake Lock、前后台切换、锁屏恢复、功耗和 Safari 页面回收。
 7. 字段稳定后编写 Supabase 声明式 schema，生成并验证首版 migration；身份系统先采用满足自用需求的最小方案。
 8. 实施 GPT 8a：先完成轻量上下文范围、非流式问答、预算拒绝、pending 恢复和 usage 记账。
