@@ -25,7 +25,7 @@
 		<p>总结持续重算当前会话；对话每轮读取当时的完整字幕。</p>
 	</header>
 
-	<div class="workspace-grid">
+	<div class="workspace-stack">
 		<AutoSummaryPanel
 			{session}
 			{outputLanguage}
@@ -85,16 +85,10 @@
 		font-size: 12px;
 	}
 
-	.workspace-grid {
+	.workspace-stack {
 		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		gap: 12px;
-	}
-
-	@media (max-width: 920px) {
-		.workspace-grid {
-			grid-template-columns: 1fr;
-		}
+		grid-template-columns: minmax(0, 1fr);
+		gap: 14px;
 	}
 
 	@media (max-width: 720px) {
