@@ -53,14 +53,14 @@ assistant branch 和 message 不进入这一阶段。待上传标记可以先作
 
 ### Schema epoch
 
-在数据仍可丢弃的开发期，数据库名包含显式 epoch，例如：
+生产构建始终使用固定数据库名 `voxbraid`；开发构建在数据仍可丢弃的阶段使用带显式 epoch 的独立数据库名，例如：
 
 ```ts
 const LOCAL_DB_EPOCH = 1;
-const LOCAL_DB_NAME = `voxbraid-dev-${LOCAL_DB_EPOCH}`;
+const LOCAL_DB_NAME = import.meta.env.DEV ? `voxbraid-dev-${LOCAL_DB_EPOCH}` : 'voxbraid';
 ```
 
-较大的 schema 改动可以递增 epoch，直接让新代码打开一套干净结构，而不为每次试验写升级脚本。但必须遵守：
+较大的 schema 改动可以递增开发 epoch，直接让新代码打开一套干净结构，而不为每次试验写升级脚本；epoch 变化不能影响生产库。若重要内容是在开发服务器中录制，它仍属于开发 epoch 数据，不能因为生产库名稳定就跳过以下纪律：
 
 1. 第一次递增 epoch 之前先实现 thread 级 JSON 导出和导入。
 2. 递增 epoch 时不自动删除旧 IndexedDB；旧库作为人工恢复来源保留。
@@ -75,16 +75,30 @@ Dexie 的 schema version 和 upgrade 机制见其 [Database Versioning](https://
 
 ```ts
 interface SessionRepository {
-	saveCheckpoint(run: CaptureRun): Promise<void>;
-	replaceSegmentRevision(run: CaptureRun, segments: TranscriptSegment[]): Promise<void>;
-	repairAbandonedRuns(threadId: string, now: string): Promise<CaptureRun[]>;
+	saveCheckpoint(input: {
+		thread: TranslationThread;
+		run: CaptureRun;
+		checkpointedAt: string;
+	}): Promise<void>;
+	loadThread(threadId: string): Promise<StoredThread | null>;
+	listThreads(): Promise<TranslationThread[]>;
+	replaceSegmentRevision(input: {
+		run: CaptureRun;
+		segments: TranscriptSegment[];
+		checkpointedAt: string;
+	}): Promise<void>;
+	repairAbandonedRuns(threadId: string, checkpointedAt: string): Promise<CaptureRun[]>;
+	exportThread(threadId: string, exportedAt: string): Promise<string>;
+	importThread(json: string, checkpointedAt: string): Promise<void>;
 }
 ```
 
-- `saveCheckpoint` 保存完整流快照和 run 元数据；实时事实路径不依赖 segment。
+- `saveCheckpoint` 在一个事务中保存 thread 元数据、完整流快照和 run 元数据；实时事实路径不依赖 segment。本地 record 可以保存 `checkpointedAt` 等恢复元数据，但这些字段不进入领域类型。
 - `replaceSegmentRevision` 在一个事务内写入新 revision 的全部 segment，并切换 `run.currentSegmentRevision`。
 - `repairAbandonedRuns` 在页面恢复时一次性修复遗留 run。
-- 完整流平时防抖保存，并在暂停、连接失败、页面隐藏和 `pagehide` 时立即发起 `saveCheckpoint`；组件卸载不能直接丢弃最后的内存状态。浏览器可能随时终止异步卸载工作，因此恢复能力不能只依赖最后一次 unload 写入。
+- `exportThread` 和 `importThread` 使用带 `schemaVersion` 的 thread 级 JSON；导入前验证对象结构、跨 thread 引用和稳定顺序号，再在一个事务内替换该 thread 的本地记录。
+- 完整流变脏后以 10 秒为最大合并间隔保存。这里使用持续写入也会周期触发的 throttle/coalescing 语义，不能把普通 trailing debounce 重置到连续讲话结束才第一次落盘。暂停、连接失败、页面隐藏和 `pagehide` 时立即 flush `saveCheckpoint`；组件卸载不能直接丢弃最后的内存状态。浏览器可能随时终止异步卸载工作，因此恢复能力不能只依赖最后一次 unload 写入。
+- 当前 checkpoint 会重写 run 内两条完整流，累计写入量随长会话呈二次增长。如果 10 秒的崩溃丢失窗口以后不可接受，正式解法是增加追加式 `stream_chunks`，让每次只保存新增文本；不能单纯缩短完整快照间隔来换取更高写入放大。MVP 暂不增加该 store。
 
 不要先设计 `saveThread`、`saveRun`、`saveSegment` 一类通用接口再由页面拼事务；这会让关键原子性依赖每个调用方都正确组合。
 

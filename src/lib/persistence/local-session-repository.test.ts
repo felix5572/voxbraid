@@ -1,0 +1,288 @@
+import 'fake-indexeddb/auto';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
+import { VoxBraidLocalDatabase } from './local-session-database';
+import { LocalSessionRepository } from './local-session-repository';
+
+const START = '2026-09-01T00:00:00.000Z';
+const CHECKPOINT = '2026-09-01T00:00:10.000Z';
+
+function createThread(id = 'thread-1'): TranslationThread {
+	return {
+		id,
+		ownerId: null,
+		title: null,
+		defaultTargetLanguage: 'zh',
+		status: 'active',
+		createdAt: START,
+		updatedAt: START
+	};
+}
+
+function createRun(id = 'run-1', sequence = 1, overrides: Partial<CaptureRun> = {}): CaptureRun {
+	return {
+		id,
+		threadId: 'thread-1',
+		sequence,
+		status: 'live',
+		targetLanguage: 'zh',
+		createdAt: '2026-09-01T00:00:01.000Z',
+		mediaStartedAt: '2026-09-01T00:00:02.000Z',
+		endedAt: null,
+		lastActivityAt: '2026-09-01T00:00:06.000Z',
+		hiddenAt: null,
+		audioDurationMs: 4_000,
+		endTimeEstimated: false,
+		endReason: null,
+		recoveredFromRunId: null,
+		clientPlatform: 'test',
+		lastError: null,
+		sourceStream: {
+			text: 'Hello from the complete source stream.',
+			lastElapsedMs: 4_000,
+			updatedAt: '2026-09-01T00:00:06.000Z'
+		},
+		translationStream: {
+			text: '来自完整事实流的你好。',
+			lastElapsedMs: 4_000,
+			updatedAt: '2026-09-01T00:00:06.000Z'
+		},
+		currentSegmentRevision: null,
+		...overrides
+	};
+}
+
+function createSegment(
+	id: string,
+	revision: number,
+	sequence: number,
+	overrides: Partial<TranscriptSegment> = {}
+): TranscriptSegment {
+	return {
+		id,
+		runId: 'run-1',
+		revision,
+		sequence,
+		sourceText: `source ${sequence}`,
+		translatedText: `译文 ${sequence}`,
+		alignment: 'approximate',
+		createdAt: '2026-09-01T00:00:07.000Z',
+		updatedAt: '2026-09-01T00:00:08.000Z',
+		...overrides
+	};
+}
+
+let database: VoxBraidLocalDatabase;
+let repository: LocalSessionRepository;
+
+beforeEach(() => {
+	database = new VoxBraidLocalDatabase(`voxbraid-test-${crypto.randomUUID()}`);
+	repository = new LocalSessionRepository(database);
+});
+
+afterEach(async () => {
+	await database.delete();
+});
+
+describe('LocalSessionRepository', () => {
+	it('saves the thread and full run checkpoint in one domain-shaped load', async () => {
+		const thread = createThread();
+		const run = createRun();
+
+		await repository.saveCheckpoint({ thread, run, checkpointedAt: CHECKPOINT });
+
+		await expect(repository.loadThread(thread.id)).resolves.toEqual({
+			thread,
+			runs: [run],
+			segments: []
+		});
+		const loaded = await repository.loadThread(thread.id);
+		if (!loaded) throw new Error('Expected the stored thread.');
+		loaded.runs[0].sourceStream.text = 'mutated after reading';
+		expect((await repository.loadThread(thread.id))?.runs[0].sourceStream.text).toBe(
+			run.sourceStream.text
+		);
+		expect(await database.runs.get(run.id)).toMatchObject({
+			checkpointedAt: CHECKPOINT,
+			sourceStream: { text: run.sourceStream.text },
+			translationStream: { text: run.translationStream.text }
+		});
+		await repository.saveCheckpoint({
+			thread: {
+				...createThread('thread-2'),
+				updatedAt: '2026-09-01T00:00:20.000Z'
+			},
+			run: createRun('run-2', 1, { threadId: 'thread-2' }),
+			checkpointedAt: '2026-09-01T00:00:20.000Z'
+		});
+		expect((await repository.listThreads()).map((item) => item.id)).toEqual([
+			'thread-2',
+			'thread-1'
+		]);
+	});
+
+	it('rolls back the thread update when a run sequence constraint fails', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({ thread, run: createRun(), checkpointedAt: CHECKPOINT });
+
+		await expect(
+			repository.saveCheckpoint({
+				thread: { ...thread, title: 'must roll back' },
+				run: createRun('run-2', 1),
+				checkpointedAt: '2026-09-01T00:00:11.000Z'
+			})
+		).rejects.toMatchObject({ name: 'ConstraintError' });
+
+		const stored = await repository.loadThread(thread.id);
+		expect(stored?.thread.title).toBeNull();
+		expect(stored?.runs.map((run) => run.id)).toEqual(['run-1']);
+	});
+
+	it('atomically switches revisions while preserving older projections', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({
+			thread,
+			run: createRun(),
+			checkpointedAt: CHECKPOINT
+		});
+
+		const revision1 = createRun('run-1', 1, { currentSegmentRevision: 1 });
+		await repository.replaceSegmentRevision({
+			run: revision1,
+			segments: [createSegment('segment-1', 1, 1), createSegment('segment-2', 1, 2)],
+			checkpointedAt: '2026-09-01T00:00:12.000Z'
+		});
+		const revision2 = { ...revision1, currentSegmentRevision: 2 };
+		await repository.replaceSegmentRevision({
+			run: revision2,
+			segments: [createSegment('segment-3', 2, 1)],
+			checkpointedAt: '2026-09-01T00:00:13.000Z'
+		});
+
+		const stored = await repository.loadThread(thread.id);
+		expect(stored?.runs[0].currentSegmentRevision).toBe(2);
+		expect(stored?.segments.map((segment) => [segment.revision, segment.sequence])).toEqual([
+			[1, 1],
+			[1, 2],
+			[2, 1]
+		]);
+
+		await expect(
+			repository.replaceSegmentRevision({
+				run: { ...revision2, currentSegmentRevision: 3 },
+				segments: [createSegment('segment-4', 3, 1), createSegment('segment-5', 3, 1)],
+				checkpointedAt: '2026-09-01T00:00:14.000Z'
+			})
+		).rejects.toMatchObject({ name: 'BulkError' });
+		const afterFailure = await repository.loadThread(thread.id);
+		expect(afterFailure?.runs[0].currentSegmentRevision).toBe(2);
+		expect(afterFailure?.segments.some((segment) => segment.revision === 3)).toBe(false);
+	});
+
+	it('repairs abandoned runs without changing completed history', async () => {
+		const thread = createThread();
+		const live = createRun('run-1', 1, {
+			audioDurationMs: 0,
+			sourceStream: { text: 'hello', lastElapsedMs: null, updatedAt: null },
+			translationStream: { text: '', lastElapsedMs: null, updatedAt: null }
+		});
+		const starting = createRun('run-2', 2, {
+			status: 'starting',
+			mediaStartedAt: null,
+			lastActivityAt: null,
+			audioDurationMs: 0,
+			currentSegmentRevision: null
+		});
+		const completed = createRun('run-3', 3, {
+			status: 'completed',
+			endedAt: '2026-09-01T00:00:09.000Z',
+			endReason: 'user-paused'
+		});
+		for (const run of [live, starting, completed]) {
+			await repository.saveCheckpoint({ thread, run, checkpointedAt: CHECKPOINT });
+		}
+		await database.segments.put(
+			createSegment('segment-starting', 1, 1, {
+				runId: starting.id,
+				updatedAt: '2026-09-01T00:00:05.000Z'
+			})
+		);
+
+		const repaired = await repository.repairAbandonedRuns(thread.id, '2026-09-01T00:01:00.000Z');
+
+		expect(repaired).toMatchObject([
+			{
+				id: live.id,
+				status: 'interrupted',
+				endedAt: live.lastActivityAt,
+				audioDurationMs: 4_000,
+				endReason: 'page-terminated',
+				endTimeEstimated: true
+			},
+			{
+				id: starting.id,
+				status: 'interrupted',
+				endedAt: '2026-09-01T00:00:05.000Z',
+				endReason: 'page-terminated'
+			}
+		]);
+		const stored = await repository.loadThread(thread.id);
+		expect(stored?.thread.updatedAt).toBe('2026-09-01T00:01:00.000Z');
+		expect(stored?.runs.find((run) => run.id === completed.id)).toEqual(completed);
+	});
+
+	it('exports and imports one complete thread without local record metadata', async () => {
+		const thread = createThread();
+		const run = createRun('run-1', 1, { currentSegmentRevision: 1 });
+		await repository.saveCheckpoint({ thread, run, checkpointedAt: CHECKPOINT });
+		await repository.replaceSegmentRevision({
+			run,
+			segments: [createSegment('segment-1', 1, 1)],
+			checkpointedAt: CHECKPOINT
+		});
+		const exported = await repository.exportThread(thread.id, '2026-09-01T00:02:00.000Z');
+
+		const importedDatabase = new VoxBraidLocalDatabase(
+			`voxbraid-import-test-${crypto.randomUUID()}`
+		);
+		const importedRepository = new LocalSessionRepository(importedDatabase);
+		try {
+			await importedRepository.importThread(exported, '2026-09-01T00:03:00.000Z');
+			await expect(importedRepository.loadThread(thread.id)).resolves.toEqual({
+				thread,
+				runs: [run],
+				segments: [createSegment('segment-1', 1, 1)]
+			});
+			expect(exported).not.toContain('checkpointedAt');
+		} finally {
+			await importedDatabase.delete();
+		}
+	});
+
+	it('rejects malformed and cross-thread archives before replacing stored data', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({
+			thread,
+			run: createRun(),
+			checkpointedAt: CHECKPOINT
+		});
+
+		await expect(repository.importThread('{', CHECKPOINT)).rejects.toThrow('not valid JSON');
+		const exported = JSON.parse(await repository.exportThread(thread.id, CHECKPOINT)) as {
+			schemaVersion: number;
+			runs: Array<{ threadId: string }>;
+		};
+		exported.schemaVersion = 2;
+		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
+			'Unsupported session archive version'
+		);
+		exported.schemaVersion = 1;
+		exported.runs[0].threadId = 'thread-elsewhere';
+		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
+			'does not belong'
+		);
+		await expect(repository.loadThread(thread.id)).resolves.toMatchObject({
+			runs: [{ id: 'run-1' }]
+		});
+	});
+});
