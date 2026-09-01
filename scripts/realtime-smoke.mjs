@@ -120,6 +120,18 @@ try {
 		);
 	}
 	const page = await browser.newPage();
+	await page.route('**/api/openai/usage-summary', async (route) => {
+		await route.fulfill({
+			contentType: 'application/json',
+			body: JSON.stringify({
+				periodStart: '2026-09-01T00:00:00.000Z',
+				periodEnd: '2026-09-01T12:00:00.000Z',
+				durationSeconds: 0,
+				costUsd: 0,
+				updatedAt: '2026-09-01T12:00:00.000Z'
+			})
+		});
+	});
 	const browserErrors = [];
 	page.on('console', (message) => {
 		if (message.type() !== 'error') return;

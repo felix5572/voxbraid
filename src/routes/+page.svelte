@@ -70,6 +70,14 @@
 		run: CaptureRun;
 	};
 	type PersistencePhase = 'restoring' | 'ready' | 'unavailable';
+	type OfficialUsagePhase = 'loading' | 'ready' | 'unavailable';
+	type OfficialUsageSummary = {
+		periodStart: string;
+		periodEnd: string;
+		durationSeconds: number;
+		costUsd: number;
+		updatedAt: string;
+	};
 
 	const STATUS_LABELS: Record<ConnectionStatus, string> = {
 		idle: '待机',
@@ -87,6 +95,10 @@
 		hour: '2-digit',
 		minute: '2-digit'
 	});
+	const OFFICIAL_USAGE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+		hour: '2-digit',
+		minute: '2-digit'
+	});
 
 	let status = $state<ConnectionStatus>('idle');
 	let targetLanguage = $state<TargetLanguage>('zh');
@@ -98,6 +110,9 @@
 	let sessionSidebarOpen = $state(false);
 	let sessionSwitching = $state(false);
 	let usageNowMs = $state(Date.now());
+	let officialUsage = $state<OfficialUsageSummary | null>(null);
+	let officialUsagePhase = $state<OfficialUsagePhase>('loading');
+	let officialUsageRequest = 0;
 	let client: TranslationClient | null = null;
 	let clientReady = $state(false);
 	let repository: LocalSessionRepository | null = null;
@@ -143,6 +158,12 @@
 	);
 	const usageEstimate = $derived(estimateRealtimeUsage(session?.runs ?? [], usageNowMs));
 	const estimatedCostLabel = $derived(formatEstimatedCostUsd(usageEstimate.estimatedCostUsd));
+	const officialCostLabel = $derived(
+		officialUsage ? formatEstimatedCostUsd(officialUsage.costUsd) : ''
+	);
+	const officialUpdatedLabel = $derived(
+		officialUsage ? OFFICIAL_USAGE_TIME_FORMATTER.format(new Date(officialUsage.updatedAt)) : ''
+	);
 
 	function nowIso(): string {
 		return new Date().toISOString();
@@ -154,6 +175,43 @@
 
 	function languageLabel(code: string): string {
 		return TARGET_LANGUAGES.find((language) => language.code === code)?.label ?? code;
+	}
+
+	function isOfficialUsageSummary(value: unknown): value is OfficialUsageSummary {
+		return (
+			typeof value === 'object' &&
+			value !== null &&
+			'periodStart' in value &&
+			typeof value.periodStart === 'string' &&
+			'periodEnd' in value &&
+			typeof value.periodEnd === 'string' &&
+			'durationSeconds' in value &&
+			typeof value.durationSeconds === 'number' &&
+			Number.isFinite(value.durationSeconds) &&
+			'costUsd' in value &&
+			typeof value.costUsd === 'number' &&
+			Number.isFinite(value.costUsd) &&
+			'updatedAt' in value &&
+			typeof value.updatedAt === 'string'
+		);
+	}
+
+	async function refreshOfficialUsage(): Promise<void> {
+		const request = ++officialUsageRequest;
+		officialUsagePhase = 'loading';
+		try {
+			const response = await fetch('/api/openai/usage-summary', { cache: 'no-store' });
+			const body: unknown = await response.json().catch(() => null);
+			if (!response.ok || !isOfficialUsageSummary(body)) {
+				throw new Error(`Official usage request failed with HTTP ${response.status}.`);
+			}
+			if (request !== officialUsageRequest) return;
+			officialUsage = body;
+			officialUsagePhase = 'ready';
+		} catch {
+			if (request !== officialUsageRequest) return;
+			officialUsagePhase = 'unavailable';
+		}
 	}
 
 	function applyStoredThread(stored: StoredThread): void {
@@ -400,6 +458,7 @@
 				usageNowMs = Date.now();
 			}
 		}, 1_000);
+		void refreshOfficialUsage();
 		const search = new URLSearchParams(location.search);
 		timingProbeEnabled = import.meta.env.DEV && search.get('timing-probe') === '1';
 		if (import.meta.env.DEV && search.get('audio-test') === '1') {
@@ -604,6 +663,7 @@
 
 		return () => {
 			disposed = true;
+			officialUsageRequest += 1;
 			restoreAllowed = false;
 			document.removeEventListener('visibilitychange', handleVisibility);
 			window.removeEventListener('pagehide', handlePageHide);
@@ -764,20 +824,51 @@
 				</select>
 			</label>
 
-			<div
-				class="usage-estimate"
-				title={`翻译与源文转写合计按 $${REALTIME_TRANSLATION_PRICING.usdPerMinute}/分钟估算；实际费用以 OpenAI Platform 为准。`}
-			>
-				<span>本会话估算</span>
-				<strong>
-					<span data-duration-seconds={usageEstimate.durationSeconds}
-						>{usageEstimate.durationSeconds} 秒</span
+			<div class="usage-summary">
+				<div
+					class="usage-estimate"
+					title={`翻译与源文转写合计按 $${REALTIME_TRANSLATION_PRICING.usdPerMinute}/分钟估算；实际费用以 OpenAI Platform 为准。`}
+				>
+					<span>本会话估算</span>
+					<strong>
+						<span data-duration-seconds={usageEstimate.durationSeconds}
+							>{usageEstimate.durationSeconds} 秒</span
+						>
+						<i aria-hidden="true">·</i>
+						<span data-estimated-cost-usd={usageEstimate.estimatedCostUsd}
+							>约 ${estimatedCostLabel}</span
+						>
+					</strong>
+				</div>
+
+				<div
+					class="official-usage"
+					title={officialUsagePhase === 'ready'
+						? `OpenAI 组织本月累计消费；更新于 ${officialUpdatedLabel}，账单数据可能有延迟。`
+						: 'OpenAI 组织本月累计消费；不影响实时翻译。'}
+				>
+					<span>本月官方消费</span>
+					{#if officialUsagePhase === 'ready' && officialUsage}
+						<strong>
+							<span data-official-duration-seconds={officialUsage.durationSeconds}
+								>{officialUsage.durationSeconds} 秒</span
+							>
+							<i aria-hidden="true">·</i>
+							<span data-official-cost-usd={officialUsage.costUsd}>${officialCostLabel}</span>
+						</strong>
+					{:else if officialUsagePhase === 'loading'}
+						<strong class="muted">正在更新</strong>
+					{:else}
+						<strong class="muted">暂不可用</strong>
+					{/if}
+					<button
+						class="usage-refresh"
+						type="button"
+						disabled={officialUsagePhase === 'loading'}
+						onclick={() => void refreshOfficialUsage()}
+						aria-label="刷新本月官方消费">刷新</button
 					>
-					<i aria-hidden="true">·</i>
-					<span data-estimated-cost-usd={usageEstimate.estimatedCostUsd}
-						>约 ${estimatedCostLabel}</span
-					>
-				</strong>
+				</div>
 			</div>
 
 			{#if active}
@@ -1091,24 +1182,47 @@
 		display: flex;
 		gap: 10px;
 	}
-	.usage-estimate {
+	.usage-summary {
 		min-width: 164px;
 		display: grid;
-		gap: 3px;
+		gap: 7px;
+	}
+	.usage-estimate,
+	.official-usage {
+		position: relative;
+		display: grid;
+		gap: 2px;
 		color: #727c77;
 		font-size: 11px;
 		text-align: center;
 	}
-	.usage-estimate strong {
+	.usage-estimate strong,
+	.official-usage strong {
 		color: #c3cec8;
 		font-size: 13px;
 		font-variant-numeric: tabular-nums;
 		font-weight: 620;
 	}
-	.usage-estimate i {
+	.usage-estimate i,
+	.official-usage i {
 		padding: 0 4px;
 		color: #59625d;
 		font-style: normal;
+	}
+	.official-usage strong.muted {
+		color: #78827d;
+		font-weight: 520;
+	}
+	.usage-refresh {
+		position: absolute;
+		right: -1px;
+		top: -2px;
+		min-width: 0;
+		padding: 2px 3px;
+		border: 0;
+		background: transparent;
+		color: #65706a;
+		font-size: 10px;
 	}
 	.mic {
 		width: 10px;
@@ -1267,12 +1381,25 @@
 			align-items: stretch;
 			flex-direction: column;
 		}
-		.usage-estimate {
+		.usage-summary {
 			min-width: 0;
+			gap: 6px;
+		}
+		.usage-estimate,
+		.official-usage {
 			grid-template-columns: auto auto;
 			align-items: baseline;
 			justify-content: space-between;
 			text-align: left;
+		}
+		.official-usage {
+			padding-right: 40px;
+		}
+		.usage-refresh {
+			right: 0;
+			top: 50%;
+			width: auto;
+			transform: translateY(-50%);
 		}
 		.control-actions {
 			width: 100%;

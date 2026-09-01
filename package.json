@@ -18,6 +18,7 @@
 		"test": "TMPDIR=/tmp vitest run",
 		"test:persistence": "node scripts/persistence-smoke.mjs",
 		"test:realtime": "node scripts/realtime-smoke.mjs",
+		"usage:openai": "node scripts/openai-usage.mjs",
 		"test:watch": "TMPDIR=/tmp vitest",
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write ."
