@@ -14,7 +14,8 @@ export function captureSidecarContext(
 	state: TranslationSessionState,
 	scope: SidecarContextScope,
 	capturedAt: string,
-	continuityText = ''
+	continuityText = '',
+	cleanedTranscript = ''
 ): SidecarContextPayload {
 	const runs = state.runs
 		.filter((run) => run.sourceStream.text.length > 0 || run.translationStream.text.length > 0)
@@ -31,6 +32,7 @@ export function captureSidecarContext(
 		scope,
 		capturedAt,
 		continuityText,
+		cleanedTranscript,
 		runs: scope === 'latest-run' ? runs.slice(-1) : runs
 	};
 }

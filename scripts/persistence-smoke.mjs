@@ -415,6 +415,7 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		assert.ok(askRequest);
 		assert.equal(askRequest.intent.question, 'What was captured?');
 		assert.deepEqual(askRequest.intent.history, []);
+		assert.equal(askRequest.context.cleanedTranscript, '课堂清稿第3块\n\n课堂清稿第4块');
 
 		await page.getByLabel('字幕问题', { exact: true }).fill('What did you just answer?');
 		await page.getByRole('button', { name: '提问', exact: true }).click();
@@ -426,6 +427,7 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		assert.deepEqual(askRequests[1].intent.history, [
 			{ question: 'What was captured?', answer: '自动问答结果' }
 		]);
+		assert.equal(askRequests[1].context.cleanedTranscript, askRequest.context.cleanedTranscript);
 		assert.equal(askRequests[1].context.runs.length, 2);
 
 		await startCapture(page);
@@ -487,6 +489,12 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await page.getByLabel('字幕问题', { exact: true }).fill('Fresh thread question');
 		await page.getByRole('button', { name: '提问', exact: true }).click();
 		await page.getByText('自动追问结果', { exact: true }).waitFor();
+		const freshThreadRequest = sidecarRequests.find(
+			(request) =>
+				request.intent.kind === 'ask' && request.intent.question === 'Fresh thread question'
+		);
+		assert.ok(freshThreadRequest);
+		assert.equal(freshThreadRequest.context.cleanedTranscript, '');
 		await page.getByRole('button', { name: '清空对话', exact: true }).click();
 		assert.equal(await page.getByText('Fresh thread question', { exact: true }).count(), 0);
 

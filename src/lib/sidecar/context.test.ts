@@ -44,10 +44,17 @@ describe('captureSidecarContext', () => {
 
 	it('captures all non-empty runs without retaining the domain objects', () => {
 		const state = stateWithRuns();
-		const context = captureSidecarContext(state, 'current-thread', '2026-09-01T10:03:00.000Z');
+		const context = captureSidecarContext(
+			state,
+			'current-thread',
+			'2026-09-01T10:03:00.000Z',
+			'',
+			'整理后的课堂清稿。'
+		);
 		state.runs[0].sourceStream.text = 'mutated';
 
 		expect(context.runs.map((run) => run.sourceText)).toEqual(['First source.', 'Second source.']);
+		expect(context.cleanedTranscript).toBe('整理后的课堂清稿。');
 	});
 });
 

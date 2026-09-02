@@ -21,6 +21,7 @@ function request(kind: 'ask' | 'summarize' | 'retranslate') {
 			scope: 'current-thread',
 			capturedAt: '2026-09-01T10:00:00.000Z',
 			continuityText: '',
+			cleanedTranscript: '整理后的课堂内容。',
 			runs: [
 				{
 					runId: 'run-1',
@@ -52,6 +53,7 @@ describe('sidecar task preparation', () => {
 		expect(prepared.instructions).toContain('never repeat or rewrite it');
 		expect(prepared.inputText).toContain('The original source.');
 		expect(prepared.inputText).toContain('已有的实时译文。');
+		expect(prepared.inputText).not.toContain('cleanedTranscriptProjection');
 	});
 
 	it('passes previous cleaned text as continuity without treating it as output scope', () => {
@@ -86,6 +88,9 @@ describe('sidecar task preparation', () => {
 		expect(prepared.inputText).toContain('Who introduced the term?');
 		expect(prepared.inputText).toContain('The lecturer introduced it.');
 		expect(prepared.inputText).toContain('What happened?');
+		expect(prepared.inputText).toContain('cleanedTranscriptProjection');
+		expect(prepared.inputText).toContain('整理后的课堂内容。');
+		expect(prepared.instructions).toContain('derived context');
 	});
 
 	it('accepts old single-turn questions without a history field', () => {
@@ -95,6 +100,21 @@ describe('sidecar task preparation', () => {
 
 		const parsed = parseSidecarInvokeRequest(value);
 		expect(parsed.intent).toMatchObject({ kind: 'ask', history: [] });
+	});
+
+	it('accepts old requests without cleaned transcript context', () => {
+		const value = request('ask');
+		delete (value.context as { cleanedTranscript?: unknown }).cleanedTranscript;
+
+		const parsed = parseSidecarInvokeRequest(value);
+		expect(parsed.context.cleanedTranscript).toBe('');
+	});
+
+	it('rejects malformed cleaned transcript context', () => {
+		const value = request('ask');
+		(value.context as { cleanedTranscript?: unknown }).cleanedTranscript = 42;
+
+		expect(() => parseSidecarInvokeRequest(value)).toThrow('课堂清稿上下文格式无效');
 	});
 
 	it('rejects malformed conversation history', () => {

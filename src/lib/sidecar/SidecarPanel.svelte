@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { SvelteMap } from 'svelte/reactivity';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
 	import type { TranslationSessionState } from '../session/translation-session';
 	import AutoSummaryPanel from './AutoSummaryPanel.svelte';
@@ -14,6 +15,22 @@
 	let { session, outputLanguage, repository, disabled = false }: Props = $props();
 	let summaryRequesting = $state(false);
 	let conversationRequesting = $state(false);
+	const cleanedTranscripts = new SvelteMap<string, string>();
+	let cleanContextThreadId = $state<string | null>(null);
+	const currentCleanedTranscript = $derived(
+		session ? (cleanedTranscripts.get(session.thread.id) ?? '') : ''
+	);
+	const cleanContextReady = $derived(
+		Boolean(session && cleanContextThreadId === session.thread.id)
+	);
+
+	function handleCleanTranscriptChange(threadId: string, text: string): void {
+		cleanedTranscripts.set(threadId, text);
+	}
+
+	function handleCleanContextLoaded(threadId: string | null): void {
+		cleanContextThreadId = threadId;
+	}
 </script>
 
 <section class="workspace" aria-labelledby="sidecar-title">
@@ -22,7 +39,7 @@
 			<p class="eyebrow">SIDECAR</p>
 			<h2 id="sidecar-title">字幕旁路</h2>
 		</div>
-		<p>清稿持续整理当前会话；对话每轮读取当时的完整字幕。</p>
+		<p>清稿持续整理当前会话；对话每轮读取完整字幕、当前清稿与此前问答。</p>
 	</header>
 
 	<div class="workspace-stack">
@@ -32,11 +49,14 @@
 			{repository}
 			disabled={disabled || conversationRequesting}
 			onRequestingChange={(value) => (summaryRequesting = value)}
+			onCleanTranscriptChange={handleCleanTranscriptChange}
+			onCleanContextLoaded={handleCleanContextLoaded}
 		/>
 		<ConversationPanel
 			{session}
 			{outputLanguage}
-			disabled={disabled || summaryRequesting}
+			cleanedTranscript={currentCleanedTranscript}
+			disabled={disabled || summaryRequesting || !cleanContextReady}
 			onRequestingChange={(value) => (conversationRequesting = value)}
 		/>
 	</div>

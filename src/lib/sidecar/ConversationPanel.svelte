@@ -14,6 +14,7 @@
 	interface Props {
 		session: TranslationSessionState | null;
 		outputLanguage: string;
+		cleanedTranscript: string;
 		disabled?: boolean;
 		onRequestingChange?: (requesting: boolean) => void;
 	}
@@ -21,6 +22,7 @@
 	let {
 		session,
 		outputLanguage,
+		cleanedTranscript,
 		disabled = false,
 		onRequestingChange = () => undefined
 	}: Props = $props();
@@ -91,7 +93,13 @@
 		if (disabled || requesting || !capturedSession || !normalizedQuestion) return;
 
 		const capturedAt = new Date().toISOString();
-		const context = captureSidecarContext(capturedSession, 'current-thread', capturedAt);
+		const context = captureSidecarContext(
+			capturedSession,
+			'current-thread',
+			capturedAt,
+			'',
+			cleanedTranscript
+		);
 		const history = completedHistory();
 		const clientRequestId = crypto.randomUUID();
 		const viewIntent = {
@@ -115,6 +123,7 @@
 			runCount: context.runs.length,
 			sourceCharacters: context.runs.reduce((sum, run) => sum + run.sourceText.length, 0),
 			translationCharacters: context.runs.reduce((sum, run) => sum + run.translationText.length, 0),
+			cleanedTranscriptCharacters: context.cleanedTranscript?.length ?? 0,
 			historyTurns: history.length
 		};
 		copiedInvocationId = null;
@@ -138,7 +147,7 @@
 				result: sidecarLocalFailure(
 					clientRequestId,
 					'context-too-large',
-					'当前字幕与对话历史超过旁路请求 1.5 MB 上限。'
+					'当前字幕、清稿与对话历史超过旁路请求 1.5 MB 上限。'
 				)
 			});
 			return;
@@ -216,7 +225,7 @@
 			<h3 id="conversation-title">自由对话</h3>
 		</div>
 		<div class="header-actions">
-			<span>每轮读取完整字幕与此前问答</span>
+			<span>每轮读取完整字幕、当前清稿与此前问答</span>
 			{#if invocations.length > 0}
 				<button type="button" class="clear" disabled={requesting} onclick={clearConversation}
 					>清空对话</button
@@ -236,7 +245,7 @@
 					<div class:failed={invocation.state === 'failed'} class="answer">
 						<strong>VoxBraid</strong>
 						{#if invocation.state === 'requesting'}
-							<p class="pending">正在读取当前字幕、计算预算并回答…</p>
+							<p class="pending">正在读取当前字幕与清稿、计算预算并回答…</p>
 						{:else if invocation.result?.status === 'failed'}
 							<p class="error" role="alert">
 								{invocation.result.error.code}：{invocation.result.error.message}
@@ -250,6 +259,7 @@
 							<span>{invocation.context.runCount} 段</span>
 							<span>原文 {invocation.context.sourceCharacters} 字</span>
 							<span>译文 {invocation.context.translationCharacters} 字</span>
+							<span>清稿 {invocation.context.cleanedTranscriptCharacters} 字</span>
 							<span>历史 {invocation.context.historyTurns} 轮</span>
 							{#if invocation.result?.model}<span>{invocation.result.model}</span>{/if}
 							{#if invocation.result?.usage}<span>{invocation.result.usage.totalTokens} tokens</span
@@ -273,7 +283,7 @@
 				</article>
 			{/each}
 		{:else}
-			<p class="placeholder">针对当前会话提问；追问会携带本页此前成功问答。</p>
+			<p class="placeholder">针对当前会话提问；每轮会读取完整字幕、现有清稿与此前成功问答。</p>
 		{/if}
 	</div>
 
@@ -282,7 +292,7 @@
 			bind:value={question}
 			maxlength="4000"
 			rows="2"
-			placeholder="针对字幕提一个问题…"
+			placeholder="针对字幕或清稿提一个问题…"
 			aria-label="字幕问题"
 			disabled={disabled || requesting}
 			onkeydown={handleComposerKeydown}></textarea>

@@ -39,6 +39,7 @@ export interface SidecarContextPayload {
 	scope: SidecarContextScope;
 	capturedAt: string;
 	continuityText?: string;
+	cleanedTranscript?: string;
 	runs: SidecarTranscriptRunInput[];
 }
 
@@ -112,6 +113,7 @@ export interface SidecarInvocationView {
 		runCount: number;
 		sourceCharacters: number;
 		translationCharacters: number;
+		cleanedTranscriptCharacters: number;
 		historyTurns: number;
 	};
 	state: 'requesting' | 'completed' | 'failed';

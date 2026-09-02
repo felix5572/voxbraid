@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { inlineErrorDetails } from '../error-details';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
@@ -44,6 +45,8 @@
 		repository: LocalSessionRepository | null;
 		disabled?: boolean;
 		onRequestingChange?: (requesting: boolean) => void;
+		onCleanTranscriptChange?: (threadId: string, text: string) => void;
+		onCleanContextLoaded?: (threadId: string | null) => void;
 	}
 
 	let {
@@ -51,7 +54,9 @@
 		outputLanguage,
 		repository,
 		disabled = false,
-		onRequestingChange = () => undefined
+		onRequestingChange = () => undefined,
+		onCleanTranscriptChange = () => undefined,
+		onCleanContextLoaded = () => undefined
 	}: Props = $props();
 	let legacySummary = $state<StoredAutoSummary | null>(null);
 	let blocks = $state<StoredCleanTranscriptBlock[]>([]);
@@ -90,6 +95,12 @@
 			.filter((text): text is string => Boolean(text?.trim()))
 			.join('\n\n')
 	);
+	const conversationCleanText = $derived(
+		completedBlocks
+			.map((block) => block.text)
+			.filter((text) => Boolean(text.trim()))
+			.join('\n\n')
+	);
 	const totalTokens = $derived(
 		(legacySummary?.usage?.totalTokens ?? 0) +
 			completedBlocks.reduce((total, block) => total + (block.usage?.totalTokens ?? 0), 0)
@@ -115,6 +126,11 @@
 		return nextCleanTranscriptCandidate(run, runCursor(run, manual), { force, allowShort });
 	}
 
+	function publishCleanTranscript(): void {
+		if (!loadedThreadId) return;
+		onCleanTranscriptChange(loadedThreadId, conversationCleanText);
+	}
+
 	async function loadTranscript(
 		nextThreadId: string | null,
 		nextRepository: LocalSessionRepository | null
@@ -123,6 +139,7 @@
 		currentRequestId = null;
 		activeRequest = null;
 		onRequestingChange(false);
+		onCleanContextLoaded(null);
 		legacySummary = null;
 		blocks = [];
 		automaticBaselines.clear();
@@ -162,6 +179,8 @@
 		}
 		loadedThreadId = nextThreadId;
 		phase = 'idle';
+		publishCleanTranscript();
+		onCleanContextLoaded(nextThreadId);
 	}
 
 	function localFailure(
@@ -181,6 +200,7 @@
 		blocks = [...blocks.filter((candidate) => candidate.id !== block.id), block].sort(
 			(left, right) => left.sequence - right.sequence
 		);
+		publishCleanTranscript();
 	}
 
 	function previousFailureAttempts(
@@ -406,6 +426,7 @@
 		if (session?.thread.id !== capturedSession.thread.id) return;
 		legacySummary = null;
 		blocks = [];
+		publishCleanTranscript();
 		automaticBaselines.clear();
 		pendingRunEnds.clear();
 		phase = 'idle';
@@ -425,7 +446,11 @@
 	}
 
 	$effect(() => {
-		void loadTranscript(threadId, repository);
+		// Keep this effect dependent only on the selected thread and repository. The loader mutates
+		// panel state and notifies its parent synchronously, which must not become reload dependencies.
+		const nextThreadId = threadId;
+		const nextRepository = repository;
+		untrack(() => void loadTranscript(nextThreadId, nextRepository));
 	});
 
 	$effect(() => {
