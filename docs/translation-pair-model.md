@@ -1,6 +1,6 @@
 # VoxBraid Live 事实与可修订句段对照投影
 
-状态：第一版已实现；第二版「修订原文 + 可变尾窗」设计待实现。
+状态：第二版「修订原文 + 可变尾窗」已实现，等待真机课程参数观测。
 核对日期：2026-09-02。
 
 ## 一、产品定位
@@ -83,7 +83,11 @@ tokenizer 是项目内的纯函数并带 `TOKENIZER_VERSION`：空格语言按�
 请求输入使用结构化 token 数组，不拼接 `1:The 2:first` 一类自定义文本协议。服务端保留带绝对坐标的 `SourceToken[]` 用于校验和落库，真正发送给模型的每个元素显式缩成 `{ i, t }`：
 
 ```json
-[{ "i": 1, "t": "The" }, { "i": 2, "t": "first" }, { "i": 3, "t": "sentence." }]
+[
+	{ "i": 1, "t": "The" },
+	{ "i": 2, "t": "first" },
+	{ "i": 3, "t": "sentence." }
+]
 ```
 
 模型不需要自行数 JSON 数组位置，只需抄写某组最后一个 token 旁的 `i` 作为 `tokenEnd`。应用由前一组结尾推导该组 raw 范围。这样既保留结构化输入和精确词边界，也显著降低长数组中的编号偏移。第二版不保留“裸字符串数组”实验开关；真实链路只验证这一份正式契约。
@@ -102,15 +106,12 @@ raw sourceStream
 `revisionTrigger()` 是纯函数。每次先捕获一个严格有界的请求尾端：
 
 ```ts
-capturedSourceEnd = Math.min(
-	sourceStream.text.length,
-	frozenEnd + MAX_OPEN_SOURCE_CHARACTERS
-);
+capturedSourceEnd = Math.min(sourceStream.text.length, frozenEnd + MAX_OPEN_SOURCE_CHARACTERS);
 ```
 
 因此本次输入永远是 `[frozenEnd, capturedSourceEnd)`；`[capturedSourceEnd, sourceStream.text.length)` 继续作为 pending raw tail 留在事实流中。即使 Luna 或网络长时间故障导致积压数万字符，恢复后的每次请求也只处理至多 1,600 字；成功滑动 frozen 前缀后再形成下一批，循环追赶而不会因单批超限永久锁死。
 
-`[frozenEnd, capturedSourceEnd)` 有新内容，自动请求距离上次自动请求至少 `MIN_REQUEST_INTERVAL_MS = 4_000`，且满足任一条件时发起：
+相对该 run 最近一次 batch 的 `openEnd` 有新内容时，自动请求距离上次自动请求至少 `MIN_REQUEST_INTERVAL_MS = 4_000`，且满足任一条件时发起；硬字符与时间窗口仍按完整 `[frozenEnd, capturedSourceEnd)` 计算：
 
 - 出现新的真实句末；
 - 至少一个完整句子且静默约 1.2 秒；
@@ -123,7 +124,7 @@ capturedSourceEnd = Math.min(
 
 每次请求携带上一版 open segments 的 raw 范围、修订原文和译文，作为 `previousDraft`。instructions 明确要求：没有新的 raw 证据时保持原分组和措辞；有新证据时才修正此前识别、断句或翻译。previousDraft 是不可信派生参考，不是事实，也不能覆盖当前 raw token。
 
-这条约束减少无意义闪动，但不能升级为“旧稿优先”：当前完整 raw 输入始终拥有最高证据地位。revision 失败时保留上一版 open segments 和完整错误诊断；除 3.3 定义的“唯一违规是单组过长”定向重试外，相同 raw 范围不立即自动重试，新 raw、显式重试或 run 收尾可以再次触发。
+这条约束减少无意义闪动，但不能升级为“旧稿优先”：当前完整 raw 输入始终拥有最高证据地位。revision 失败时保留上一版 open segments 和完整错误诊断；除 3.3 定义的“唯一违规是单组过长”定向重试外，相同 raw 范围不立即自动重试。每次自动请求在发起时就记录四秒下限，不以成功为前提；同一失败范围只有新 raw 或用户显式重试才会再次调用模型。
 
 ### 3.3 滑动提交
 
@@ -131,14 +132,14 @@ capturedSourceEnd = Math.min(
 
 冻结位置由应用决定，不能由模型返回的 `complete` 布尔量控制：
 
-- `finalizing` 时冻结全部合法 group；
-- 长静默且最后 group 结束于本地识别的自然句末时可以冻结全部；
+- run 收尾时，若最后一次成功草稿已经覆盖全部 raw，只在 IndexedDB 中把 open segments 转为 frozen，不为冻结重复调用模型；若仍有未进入草稿的新 raw，才发起 `finalizing` 请求并冻结其合法 group；
+- 长静默且最后一次成功草稿已经覆盖全部 raw、开放区结束于本地识别的自然句末（忽略尾随空白）时，同样只做本地 open → frozen 状态迁移；
 - 连续讲话时先取“最后两个 raw 句末对应范围”，再把目标保留长度夹在 400–800 raw 字符之间；没有两个句末时按 400 字符目标；
 - 只能在模型返回的合法 group 边界上切分，选择不晚于目标位置的最后一个边界，使实际保留量不少于目标；
 - 单个 group 的 raw 范围以约 480 字符为软上限，避免模型返回一个巨型 group 让滑动提交失效；
 - 整个开放请求 raw 范围绝不超过 1,600 字符，达到上限时必须在最靠近保留目标的合法边界冻结前部。
 
-480 字符违规不能让 run 自锁。若一次响应的覆盖、顺序、非空文本等其余校验全部通过，唯一问题只是某组超过 480 字符，则本次仍记为失败并针对同一 raw 范围自动重试一次，附加“必须在给定 token 边界拆分第 N 组”的修正提示。若第二次响应的唯一违规类型仍是单组长度超限（不要求与第一次属于同一组），则接受其中的超长组，标记 `boundaryState: 'forced-tail'`，并允许 `commitPlan()` 在这些组边界推进；所有组仍受 1,600 字符整批硬上限约束。若第二次存在 token 覆盖错误、遗漏、重复、空译文或其他校验错误，仍然失败并暂停自动处理，不猜测模型原意。
+480 字符违规不能让 run 自锁。服务端只裁决 token 覆盖、顺序、非空文本和 1,600 字符整批范围等硬约束；通过硬校验的完整结果原样返回浏览器。浏览器是 480 字符产品软上限的唯一裁决者：若唯一问题只是某组超过 480 字符，则本次仍记为失败并针对同一 raw 范围自动重试一次，附加“必须在给定 token 边界拆分第 N 组”的服务端修正提示。若第二次响应的唯一违规类型仍是单组长度超限（不要求与第一次属于同一组），则接受其中的超长组，标记 `boundaryState: 'forced-tail'`，并允许 `commitPlan()` 在这些组边界推进；所有组仍受 1,600 字符整批硬上限约束。若第二次存在 token 覆盖错误、遗漏、重复、空译文或其他校验错误，仍然失败，不猜测模型原意。
 
 由此形成活性不变量：只要上游能返回完整覆盖且非空的结构化结果，单组分段偏好即使持续不合规也不能阻止 `frozenEnd` 最终前进。接受超长组是有审计记录的降级，不是把 raw 冒充整理结果，也不是生成空译文的 `unrevised` 段。
 
@@ -156,7 +157,7 @@ capturedSourceEnd = Math.min(
 
 - 目标语言；
 - 当前 `[frozenEnd, capturedSourceEnd)` 的完整连续 `SourceToken[]`；
-- 上一至两个冻结句段的 raw 原文、修订原文和译文，最多约 1,500 字符，只用于术语、指代和局部语意衔接，不能被本轮输出覆盖；
+- 上一至两个冻结句段的修订原文和译文，浏览器从最新内容向前按总计 1,500 字符裁剪，只用于术语、指代和局部语意衔接，不能被本轮输出覆盖；raw 原文不重复进入衔接通道；
 - 上一版 open segments 组成的 `previousDraft`，用于没有新证据时保持最小改动；
 - 服务端版本化 instructions。
 
@@ -176,7 +177,7 @@ interface RevisionModelOutput {
 服务端必须验证：
 
 1. `tokenEnd` 是整数、严格递增，首个至少为 1，最后一个恰好等于输入 token 数；
-2. 由相邻 `tokenEnd` 推导的每组 raw 范围连续、无空洞、无重叠；单组 480 字符软上限按第三节的“一次定向重试、再次违规则 forced-tail 接受”处理，整批 1,600 字符是不可放宽的硬上限；
+2. 由相邻 `tokenEnd` 推导的每组 raw 范围连续、无空洞、无重叠；服务端只强制整批 1,600 字符硬上限，单组 480 字符软上限由浏览器按第三节的“一次定向重试、再次违规则 forced-tail 接受”处理；
 3. `revisedSourceText` 和 `translatedText` 均非空且总输出处于产品上限内；
 4. 应用从 token 绝对范围自行拼出不可修改的 `rawText`，模型返回的 `revisedSourceText` 只能作为派生字段保存；
 5. 所有验证通过后，才调用 `commitPlan()` 并原子替换 open segments。
@@ -317,7 +318,7 @@ function canStartProjection(lane: ProjectionLane, inFlight: ReadonlySet<Projecti
 - 用户发起自由对话或课堂清稿时，不取消已在飞的句段对照请求，但暂停调度下一批；交互任务结束后继续。
 - 切换 thread 或 run 时，晚到结果按请求捕获时的 thread/run 写入，不写到当前页面；如果目标已被删除则明确丢弃并记日志。
 - 页面隐藏、网络离线或持久化尚未恢复时不启动新请求；已经在飞的失败按完整浏览器诊断落库。
-- 单次基础设施失败不永久关闭 worker；它保留现有 open 草稿，等待新 raw、显式重试或 finalizing 再处理同一起点。连续三次基础设施失败后暂停该 worker 并显示原因，避免服务故障时持续产生请求。用户可显式恢复。
+- 单次基础设施失败不永久关闭 worker；它保留现有 open 草稿，但相同 raw 范围不会按每秒 tick 自动重放。后续新 raw 或显式重试可以再次处理；连续三次基础设施失败后暂停该 worker 并显示原因，避免服务故障时持续产生请求。用户可显式恢复。
 
 这里不沿用通用 sidecar 的“每次先调用 Input Tokens API”。候选输入由服务端严格限制为小批原文和短 continuity，额外计数请求会把调用次数和关键路径延迟近乎翻倍。安全性写成静态、可测试的不变量：
 
@@ -346,9 +347,9 @@ const MIN_REQUEST_INTERVAL_MS = 4_000; // 仅自动请求；手动重试与 fina
 
 高频成本的主要风险不是单次上下文，而是滑动尾窗的请求次数。真实课程需要记录「每小时请求数、平均 open raw 字符数、每段冻结前经历的成功请求数、首次可见延迟、冻结延迟、平均输入/输出 token、失败率、forced-tail/定向重试率、相邻草稿措辞编辑距离」，再调整静默窗口、保留 raw 字符数、四秒最小请求间隔和硬上限。目标不是 revision 越多越好：通常一份快速草稿加一至两次有后文依据的修订就够；不能为每条 delta 反复调用，也不能只凭一次十秒口播决定三小时课程参数。
 
-## 八、第二版实现范围
+## 八、第二版实现范围与验证
 
-第二版包含：
+第二版已包含：
 
 1. `tokenizeOpenRegion()`、有界 `capturedSourceEnd()`、`revisionTrigger()`、`commitPlan()` 和输出校验纯函数及测试；
 2. 用 `revise-pairs` 替换第一版 `translate-pairs` 服务端任务，使用新的静态 schema、`previousDraft` 和“轻量修订而非总结”提示词；
@@ -356,7 +357,7 @@ const MIN_REQUEST_INTERVAL_MS = 4_000; // 仅自动请求；手动重试与 fina
 4. archive v3 只负责当前格式导出；v1/v2 导入仅恢复当前仍有效的事实与 segments，丢弃旧投影并返回明确提示；
 5. UI 左栏改为「修订原文」，展示 frozen/open 区、当前 raw 进度、请求状态，并允许展开对应 Live 原文片段；
 6. 浏览器自动化覆盖：Live 原文不等待 Luna、open 尾整体替换而 frozen 区不变、previousDraft 随请求发送、失败保留旧稿、故障恢复后用多个 1,600 字符窗口追赶、单组超限定向重试并 forced-tail 前进、四秒自动请求下限、静默全部冻结、run 收尾、刷新恢复、切 thread 不串写；
-7. opt-in 真实短录音确认 `{i,t}` / `tokenEnd` schema 和提示词，再用真实课程测量首次可见延迟、请求频率、冻结延迟、forced-tail 率、措辞变动率和 token 成本。
+7. opt-in 真实 Luna 请求已确认 `{i,t}` / `tokenEnd` schema 和提示词可用（测试请求共 461 tokens）；下一步用真实课程测量首次可见延迟、请求频率、冻结延迟、forced-tail 率、措辞变动率和 token 成本。
 
 第二版不包含：
 
@@ -368,4 +369,4 @@ const MIN_REQUEST_INTERVAL_MS = 4_000; // 仅自动请求；手动重试与 fina
 - 说话人识别、全课程清稿、缺失内容恢复和全局摘要；
 - 用户自选任意模型、prompt 或开放窗口阈值。
 
-实施顺序先完成纯 tokenizer/trigger/commitPlan，再替换模型契约和持久化，最后接 UI。部署 v5 时旧句段投影直接删除，新逻辑从各 run 的 raw `sourceStream` 重新开始；不会自动重算历史或产生费用，只有新 Live 内容或用户显式动作才调用 Luna。
+部署 v5 时旧句段投影直接删除，新逻辑从各 run 的 raw `sourceStream` 重新开始；不会自动重算历史或产生费用，只有新 Live 内容或用户显式动作才调用 Luna。自动化已覆盖事实先显示、开放尾窗重写、冻结前部不变、`previousDraft` 回传、长积压追赶、定向重试与 `forced-tail`、四秒间隔、run 收尾、刷新恢复和跨 thread 归属。
