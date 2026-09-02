@@ -50,7 +50,7 @@ sourceStream
 
 每个句段使用同一行的两列网格：左侧显示 Luna 根据 raw 原文轻量整理后的 `revisedSourceText`，右侧显示同一次调用生成的 `translatedText`。两栏引用同一组连续 token；模型可以重新断句、合句并决定段落边界，但不能遗漏、重复或打乱 raw token。
 
-Live 原文仍在上方事实区随 delta 即时显示，不等待 Luna。句段对照区不逐 token 绘制模型输出，而是在一次结构化请求完整校验后原子替换 open segments。因此阅读者始终先看到最快事实，几十秒内的底部内容随后逐渐变得更易读；两者不是相互覆盖的两个版本。
+Live 原文在上方事实区和修订区的 `live tail` 中随 delta 即时显示，不等待 Luna。修订区不逐 token 绘制模型输出，而是在一次结构化请求完整校验后原子替换 open segments；尚未被该响应覆盖的新 delta 继续留在 live tail。因此读者在同一阅读主区先看到最快事实，随后看到回望生成的修订原文与译文。
 
 展示纪律：
 
@@ -58,7 +58,7 @@ Live 原文仍在上方事实区随 delta 即时显示，不等待 Luna。句段
 - “是否仍在 open 尾窗”和“raw 边界是否自然完整”是两个维度：完整句也可以暂时保持 open 等待后文；被硬切的 `forced-tail` 即使冻结，仍保留边界不完整标记。
 - 请求成功后一次性替换全部 open 行并滑动冻结前部；请求失败时保留最后一次成功草稿和失败诊断，不能让已可读内容消失。
 - Responses API 的 token 流不直接渲染；整批结构化结果校验成功后一次性追加。
-- 尚未进入 open 尾窗的 raw 尾部不在句段对照区显示一个持续增长的正文行，只在 Live 原文和状态栏显示；open 文字只在完整结构化结果到达时变化，避免逐词左右跳动。
+- 尚未进入 open 尾窗的 raw 尾部作为 `live tail` 在左栏即时追加，右栏留空并标记「实时」；本地句末只产生确定性的软换行。末尾追加允许纵向增长，但不回写已经显示的词。完整结构化结果到达后 open segments 原子替换已捕获范围，响应期间新到的 delta 仍留在 live tail。
 - 新批次追加时可以产生纵向滚动；自动跟随底部沿用现有“用户向上滚动后暂停跟随”的规则，并提供「回到最新」。
 - run 切换时显示稳定分隔条；每个 run 使用自己创建时的目标语言，不能用页面当前选择覆盖历史标签。
 - iPad 横屏保持双列；窄屏允许一条句段内部上下堆叠，但不能把所有原文和所有译文拆成两个失去对应关系的大区块。
@@ -98,8 +98,10 @@ tokenizer 是项目内的纯函数并带 `TOKENIZER_VERSION`：空格语言按�
 raw sourceStream
 ├─ frozen segments     已经见过足够后文，不再自动变化
 ├─ open segments       上一版草稿，可与新 raw 一起整体替换
-└─ pending raw tail    尚未进入 Luna，只在 Live 原文显示
+└─ live raw tail       尚未进入 Luna，在修订区左栏即时显示，纯派生且不持久化
 ```
+
+`liveTail = sourceStream.text.slice(max(openEnd, frozenEnd))`。它与 frozen/open segments 无缝铺满 `[0, sourceStream.text.length)`；Luna 返回后 tail 缩短至该请求的 `capturedSourceEnd` 之后，请求在飞期间的新 delta 不等待响应。上方 Live 原文区第一版继续保留，待真机阅读验证后再决定是否折叠。
 
 ### 3.1 触发
 

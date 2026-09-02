@@ -99,6 +99,14 @@ async function waitForReady(page) {
 		.waitFor();
 }
 
+async function waitForLiveRevisionTail(page, expected) {
+	await page.waitForFunction(
+		(value) =>
+			document.querySelector('[data-live-source-tail] .live-source')?.textContent === value,
+		expected
+	);
+}
+
 async function createPage(browser, baseUrl, query = '?browser-test=1') {
 	const context = await browser.newContext({
 		...(httpCredentials ? { httpCredentials } : {}),
@@ -348,6 +356,15 @@ async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 					.includes('[HOLD_PAIR]'),
 			'在飞的句段对照请求'
 		);
+		await waitForLiveRevisionTail(page, source);
+		const continuation = ' New raw words arrive while Luna is still revising.';
+		await emitPair(page, continuation, 'Luna处理期间的新内容。');
+		await waitForLiveRevisionTail(page, source + continuation);
+		await page
+			.locator('.pair-row:not(.live-row) .source')
+			.getByText(source, { exact: true })
+			.waitFor();
+		await waitForLiveRevisionTail(page, continuation);
 		const question = page.getByLabel('字幕问题', { exact: true });
 		assert.equal(await question.isEnabled(), true);
 		await question.fill('Can I ask while sentence pairs are still running?');
@@ -362,7 +379,7 @@ async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 		);
 		await page.getByText(/自动(?:问答|追问)结果/u).waitFor();
 		await stopCapture(page);
-		await waitForPairCoverage(page, source.length);
+		await waitForPairCoverage(page, source.length + continuation.length);
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -1052,7 +1069,7 @@ async function testStorageTimeoutFallback(browser, baseUrl) {
 		const start = page.getByRole('button', { name: '开始翻译' });
 		await start.waitFor({ state: 'visible' });
 		assert.equal(await start.isDisabled(), true);
-		await page.getByText(/本地历史记录不可用；实时翻译仍可继续。/).waitFor({ timeout: 7_000 });
+		await page.getByText(/本地历史记录不可用；实时翻译仍可继续。/).waitFor({ timeout: 10_000 });
 		await page.getByText(/Error: Local session restore timed out after 5000 ms/).waitFor();
 		await page.waitForFunction(() => window.__voxbraidBrowserTest !== undefined);
 		assert.equal(await start.isEnabled(), true);

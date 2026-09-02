@@ -3,6 +3,7 @@
 	import { SvelteMap } from 'svelte/reactivity';
 	import { inlineErrorDetails } from '../error-details';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
+	import { sentenceBoundaries } from '../session/sentence-boundary';
 	import type { CaptureRun } from '../session/types';
 	import { activeCaptureRun, type TranslationSessionState } from '../session/translation-session';
 	import { sendSidecarRequest, sidecarLocalFailure } from '../sidecar/client';
@@ -69,6 +70,24 @@
 		attempt: number;
 	}
 
+	type RevisionDisplayRow =
+		| {
+				kind: 'revised';
+				id: string;
+				runSequence: number;
+				sourceStart: number;
+				segment: StoredRevisedSegment;
+		  }
+		| {
+				kind: 'live';
+				id: string;
+				runId: string;
+				runSequence: number;
+				sourceStart: number;
+				sourceEnd: number;
+				rawText: string;
+		  };
+
 	let {
 		session,
 		repository,
@@ -100,6 +119,47 @@
 			(left, right) => left.runSequence - right.runSequence || left.sourceStart - right.sourceStart
 		)
 	);
+	const displayRows = $derived.by(() => {
+		const currentSegments =
+			loadedThreadId === session?.thread.id ? orderedSegments : ([] as StoredRevisedSegment[]);
+		const rows: RevisionDisplayRow[] = currentSegments.map((segment) => ({
+			kind: 'revised',
+			id: segment.id,
+			runSequence: segment.runSequence,
+			sourceStart: segment.sourceStart,
+			segment
+		}));
+		for (const run of session?.runs ?? []) {
+			const sourceStart = currentSegments
+				.filter((segment) => segment.runId === run.id)
+				.reduce((maximum, segment) => Math.max(maximum, segment.sourceEnd), 0);
+			if (sourceStart >= run.sourceStream.text.length) continue;
+			rows.push({
+				kind: 'live',
+				id: `live:${run.id}`,
+				runId: run.id,
+				runSequence: run.sequence,
+				sourceStart,
+				sourceEnd: run.sourceStream.text.length,
+				rawText: run.sourceStream.text.slice(sourceStart)
+			});
+		}
+		return rows.sort(
+			(left, right) => left.runSequence - right.runSequence || left.sourceStart - right.sourceStart
+		);
+	});
+
+	function liveTailLines(rawText: string): string[] {
+		const boundaries = sentenceBoundaries(rawText);
+		const lines: string[] = [];
+		let start = 0;
+		for (const boundary of boundaries) {
+			lines.push(rawText.slice(start, boundary.end));
+			start = boundary.end;
+		}
+		if (start < rawText.length) lines.push(rawText.slice(start));
+		return lines.length > 0 ? lines : [rawText];
+	}
 
 	function batchesForRun(runId: string): StoredRevisionBatch[] {
 		return batches
@@ -767,8 +827,14 @@
 	});
 
 	$effect(() => {
-		const latest = orderedSegments.at(-1)?.id;
-		if (!latest) return;
+		const latest = displayRows.at(-1);
+		const latestRevision =
+			latest?.kind === 'live'
+				? `${latest.id}:${latest.sourceEnd}`
+				: latest
+					? `${latest.id}:${latest.segment.updatedAt}`
+					: null;
+		if (!latestRevision) return;
 		void tick().then(() => {
 			if (following && scroller) scroller.scrollTop = scroller.scrollHeight;
 		});
@@ -814,20 +880,34 @@
 
 	<div class="column-head" aria-hidden="true"><span>修订原文</span><span>对照译文</span></div>
 	<div class="pairs-scroll" bind:this={scroller} onscroll={updateFollow}>
-		{#if orderedSegments.length === 0 && failedBatches.length === 0}
-			<p class="placeholder">Live 原文会先在上方即时显示；这里随后回望、修订并对照翻译。</p>
+		{#if displayRows.length === 0 && failedBatches.length === 0}
+			<p class="placeholder">开始后，Live 原文会立即显示在这里，再由 Luna 回望修订。</p>
 		{/if}
-		{#each orderedSegments as segment (segment.id)}
-			<div class:paragraph-break={segment.paragraphBreakBefore} class="pair-row">
-				<div class="source">{segment.revisedSourceText}</div>
-				<div class="translation">{segment.translatedText}</div>
-				<details class="raw-evidence">
-					<summary>Live 原文片段 · raw {segment.sourceStart}–{segment.sourceEnd}</summary>
-					<code>{segment.rawText}</code>
-				</details>
-				{#if segment.state === 'open'}<span class="open-badge">修订中</span>{/if}
-				{#if segment.boundaryState === 'forced-tail'}<span class="forced-badge">强制切分</span>{/if}
-			</div>
+		{#each displayRows as row (row.id)}
+			{#if row.kind === 'revised'}
+				<div class:paragraph-break={row.segment.paragraphBreakBefore} class="pair-row">
+					<div class="source">{row.segment.revisedSourceText}</div>
+					<div class="translation">{row.segment.translatedText}</div>
+					<details class="raw-evidence">
+						<summary>
+							Live 原文片段 · raw {row.segment.sourceStart}–{row.segment.sourceEnd}
+						</summary>
+						<code>{row.segment.rawText}</code>
+					</details>
+					{#if row.segment.state === 'open'}<span class="open-badge">修订中</span>{/if}
+					{#if row.segment.boundaryState === 'forced-tail'}<span class="forced-badge">强制切分</span
+						>{/if}
+				</div>
+			{:else}
+				<div class="pair-row live-row" data-live-source-tail={row.runId}>
+					<div class="source live-source">
+						{#each liveTailLines(row.rawText) as line, index (index)}<span>{line}</span>{/each}
+					</div>
+					<div class="translation live-translation" aria-label="等待修订译文"></div>
+					<span class="live-badge">实时</span>
+					<span class="raw-range">raw {row.sourceStart}–{row.sourceEnd}</span>
+				</div>
+			{/if}
 		{/each}
 		{#each failedBatches as batch (batch.id)}
 			<details class="failed">
@@ -952,6 +1032,19 @@
 	.translation {
 		color: #c9e8dd;
 	}
+	.live-row {
+		background: #0d1411;
+	}
+	.live-source {
+		color: #aebbb5;
+	}
+	.live-source span {
+		display: block;
+	}
+	.live-translation,
+	.raw-range {
+		color: #718078;
+	}
 	.raw-evidence {
 		flex: 0 0 100%;
 		margin-top: 7px;
@@ -965,18 +1058,27 @@
 		word-break: break-word;
 	}
 	.open-badge,
-	.forced-badge {
+	.forced-badge,
+	.live-badge,
+	.raw-range {
 		position: absolute;
 		right: 8px;
 		font-size: 9px;
 		color: #819088;
 	}
-	.open-badge {
+	.open-badge,
+	.live-badge {
 		top: 4px;
+	}
+	.live-badge {
+		color: #72b39e;
 	}
 	.forced-badge {
 		bottom: 4px;
 		color: #c6a56f;
+	}
+	.raw-range {
+		bottom: 4px;
 	}
 	.placeholder {
 		margin: 0;
