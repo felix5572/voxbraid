@@ -6,7 +6,13 @@ function request(kind: 'ask' | 'summarize' | 'retranslate') {
 		clientRequestId: 'request-1',
 		intent:
 			kind === 'ask'
-				? { kind, trigger: 'manual', question: 'What happened?', outputLanguage: 'zh' }
+				? {
+						kind,
+						trigger: 'manual',
+						question: 'What happened?',
+						history: [],
+						outputLanguage: 'zh'
+					}
 				: kind === 'summarize'
 					? { kind, trigger: 'manual', outputLanguage: 'zh' }
 					: { kind, trigger: 'manual', targetLanguage: 'zh' },
@@ -67,9 +73,36 @@ describe('sidecar task preparation', () => {
 	});
 
 	it('uses Sol for direct human questions', () => {
-		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(request('ask')));
+		const value = request('ask');
+		if (value.intent.kind !== 'ask') throw new Error('Expected ask intent.');
+		(value.intent.history as Array<{ question: string; answer: string }>).push({
+			question: 'Who introduced the term?',
+			answer: 'The lecturer introduced it.'
+		});
+		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
 
 		expect(prepared.model).toBe('gpt-5.6-sol');
+		expect(prepared.instructions).toContain('prior conversation turns');
+		expect(prepared.inputText).toContain('Who introduced the term?');
+		expect(prepared.inputText).toContain('The lecturer introduced it.');
+		expect(prepared.inputText).toContain('What happened?');
+	});
+
+	it('accepts old single-turn questions without a history field', () => {
+		const value = request('ask');
+		if (value.intent.kind !== 'ask') throw new Error('Expected ask intent.');
+		delete (value.intent as { history?: unknown }).history;
+
+		const parsed = parseSidecarInvokeRequest(value);
+		expect(parsed.intent).toMatchObject({ kind: 'ask', history: [] });
+	});
+
+	it('rejects malformed conversation history', () => {
+		const value = request('ask');
+		if (value.intent.kind !== 'ask') throw new Error('Expected ask intent.');
+		(value.intent.history as unknown[]) = [{ question: 'Follow up', answer: '' }];
+
+		expect(() => parseSidecarInvokeRequest(value)).toThrow('对话历史格式无效');
 	});
 
 	it('accepts periodic summaries but keeps questions and retranslations manual', () => {

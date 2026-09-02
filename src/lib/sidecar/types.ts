@@ -2,11 +2,17 @@ export type SidecarTaskKind = 'ask' | 'summarize' | 'retranslate';
 export type SidecarTrigger = 'manual' | 'periodic';
 export type SidecarContextScope = 'latest-run' | 'current-thread';
 
+export interface SidecarConversationTurn {
+	question: string;
+	answer: string;
+}
+
 export type SidecarIntent =
 	| {
 			kind: 'ask';
 			trigger: 'manual';
 			question: string;
+			history?: SidecarConversationTurn[];
 			outputLanguage: string;
 	  }
 	| {
@@ -106,6 +112,7 @@ export interface SidecarInvocationView {
 		runCount: number;
 		sourceCharacters: number;
 		translationCharacters: number;
+		historyTurns: number;
 	};
 	state: 'requesting' | 'completed' | 'failed';
 	result: SidecarInvokeResult | null;

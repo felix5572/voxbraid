@@ -1,6 +1,6 @@
 # VoxBraid 旁路任务模型
 
-**状态：** 第一批手动调用已实现；第二批增加分块累积的课堂清稿。本文定义 Supabase 接入前的临时旁路能力，不替代 [`session-model.md`](session-model.md) 中可持久化的 `AssistantBranch` / `AssistantMessage`。
+**状态：** 手动调用、分块累积的课堂清稿和页面内多轮自由对话已实现。本文定义 Supabase 接入前的临时旁路能力，不替代 [`session-model.md`](session-model.md) 中可持久化的 `AssistantBranch` / `AssistantMessage`。
 
 ## 目标与边界
 
@@ -36,6 +36,7 @@ type SidecarIntent =
 			kind: 'ask';
 			trigger: 'manual';
 			question: string;
+			history?: Array<{ question: string; answer: string }>;
 			outputLanguage: string;
 	  }
 	| {
@@ -69,7 +70,7 @@ interface SidecarTaskDefinition {
 
 模型按任务性质由服务端预设：直接回应真人自由输入的 `ask` 使用 `gpt-5.6-sol`；课堂清稿使用兼顾长上下文质量和成本的 `gpt-5.6-terra`；目标明确且更看重速度的重译暂用 `gpt-5.6-luna`。第一版浏览器不能覆盖该选择；以后若开放配置，也应从服务端允许的模型集合中选择，而不是接受任意模型名。
 
-延后的 `retranslate` 只读取原文；`ask` 每次读取当前 thread 的完整双语文本；`summarize` 只读取当前待整理块，并附带上一块清稿末尾作为少量连续性参考。自由问答不锁定首次提问时的字幕范围，每一轮都重新捕获当时的完整会话。若输入超过预算，应明确拒绝，不能静默截断或丢掉其中一栏。
+延后的 `retranslate` 只读取原文；`ask` 每次读取当前 thread 的完整双语文本，并携带当前页面内此前成功问答以支持追问；`summarize` 只读取当前待整理块，并附带上一块清稿末尾作为少量连续性参考。自由问答不锁定首次提问时的字幕范围，每一轮都重新捕获当时的完整会话。失败问答不进入后续 history，因为不存在可信的 assistant answer。若完整字幕、此前问答和当前问题合计超过预算，应明确拒绝，不能静默截断、删除旧轮次或丢掉其中一栏；页面提供显式“清空对话”，由用户决定何时舍弃旧问答后重新开始。
 
 ## 二、字幕上下文
 
@@ -230,13 +231,14 @@ interface SidecarInvocationView {
 		runCount: number;
 		sourceCharacters: number;
 		translationCharacters: number;
+		historyTurns: number;
 	};
 	state: 'requesting' | 'completed' | 'failed';
 	result: SidecarInvokeResult | null;
 }
 ```
 
-页面不再复制完整字幕到 invocation；完整文本只存在于原 session 和正在发送的请求对象中。同一页面只允许一个旁路调用执行，防止重复点击造成并发费用。旁路工作区位于字幕和诊断之间：课堂清稿与自由对话始终上下排列并使用完整内容宽度，各自保留固定高度滚动区，内容增长不能持续撑高整个页面。结果标出 `capturedAt`、模型和 token usage，并提供复制按钮。第一版不把文本 token 折算成美元，直到项目建立统一且可维护的文本模型价格口径。
+页面不在 invocation 里复制完整字幕；完整文本只存在于原 session 和正在发送的请求对象中。自由对话在当前页面内按 thread 分别保留有序问答，每轮结果追加而不是覆盖；切换 thread 时显示对应的内存问答，刷新页面后才消失，它仍不是持久化的正式 branch。每次新问题只把该 thread 此前成功问答作为 history，重新捕获当时的完整字幕。同一页面只允许一个旁路调用执行，防止重复点击造成并发费用。旁路工作区位于字幕和诊断之间：课堂清稿与自由对话始终上下排列并使用完整内容宽度，各自保留固定高度滚动区，内容增长不能持续撑高整个页面。每轮结果标出捕获范围、`capturedAt`、模型和 token usage，并提供独立复制按钮。第一版不把文本 token 折算成美元，直到项目建立统一且可维护的文本模型价格口径。
 
 ### 课堂清稿
 

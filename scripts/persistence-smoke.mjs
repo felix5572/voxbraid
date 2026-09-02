@@ -152,7 +152,9 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 	await page.route('**/api/sidecar/invoke', async (route) => {
 		const body = route.request().postDataJSON();
 		sidecarRequests.push(body);
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		const delayMs =
+			body.intent.kind === 'ask' && body.intent.question === 'Hold across thread switch' ? 500 : 25;
+		await new Promise((resolve) => setTimeout(resolve, delayMs));
 		if (
 			body.intent.kind === 'summarize' &&
 			body.context.runs[0]?.sourceText.includes('[FAIL_CLEAN_BLOCK]') &&
@@ -179,10 +181,11 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		const cleanBlockNumber = sidecarRequests.filter(
 			(request) => request.intent.kind === 'summarize'
 		).length;
+		const askNumber = sidecarRequests.filter((request) => request.intent.kind === 'ask').length;
 		const outputs = {
 			summarize: `课堂清稿第${cleanBlockNumber}块`,
 			retranslate: '自动重译结果',
-			ask: '自动问答结果'
+			ask: askNumber === 1 ? '自动问答结果' : '自动追问结果'
 		};
 		await route.fulfill({
 			contentType: 'application/json',
@@ -411,6 +414,19 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		const askRequest = sidecarRequests.find((request) => request.intent.kind === 'ask');
 		assert.ok(askRequest);
 		assert.equal(askRequest.intent.question, 'What was captured?');
+		assert.deepEqual(askRequest.intent.history, []);
+
+		await page.getByLabel('字幕问题', { exact: true }).fill('What did you just answer?');
+		await page.getByRole('button', { name: '提问', exact: true }).click();
+		await page.getByText('自动追问结果', { exact: true }).waitFor();
+		await page.getByText('自动问答结果', { exact: true }).waitFor();
+		const askRequests = sidecarRequests.filter((request) => request.intent.kind === 'ask');
+		assert.equal(askRequests.length, 2);
+		assert.equal(askRequests[1].intent.question, 'What did you just answer?');
+		assert.deepEqual(askRequests[1].intent.history, [
+			{ question: 'What was captured?', answer: '自动问答结果' }
+		]);
+		assert.equal(askRequests[1].context.runs.length, 2);
 
 		await startCapture(page);
 		await emitPair(page, 'x'.repeat(3_000), '自動要約'.repeat(300));
@@ -435,6 +451,7 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await page.getByRole('button', { name: '新建会话' }).click();
 		await page.getByText('开始后，原文字幕会显示在这里。', { exact: true }).waitFor();
 		assert.equal(await mainText(page, firstSource).count(), 0);
+		assert.equal(await page.getByText('What was captured?', { exact: true }).count(), 0);
 		assert.equal((await readStore(page, 'threads')).length, 1);
 
 		const newThreadSource = 'A fresh product thread.';
@@ -457,6 +474,8 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await firstThreadButton.click();
 		await mainText(page, firstSource).waitFor();
 		await mainText(page, secondSource).waitFor();
+		await page.getByText('What was captured?', { exact: true }).waitFor();
+		await page.getByText('自动追问结果', { exact: true }).waitFor();
 		assert.equal(await firstThreadButton.getAttribute('aria-current'), 'page');
 		assert.equal(await mainText(page, newThreadSource).count(), 0);
 
@@ -465,8 +484,31 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await mainText(page, newThreadSource).waitFor();
 		assert.equal(await newThreadButton.getAttribute('aria-current'), 'page');
 		assert.equal(await mainText(page, firstSource).count(), 0);
+		await page.getByLabel('字幕问题', { exact: true }).fill('Fresh thread question');
+		await page.getByRole('button', { name: '提问', exact: true }).click();
+		await page.getByText('自动追问结果', { exact: true }).waitFor();
+		await page.getByRole('button', { name: '清空对话', exact: true }).click();
+		assert.equal(await page.getByText('Fresh thread question', { exact: true }).count(), 0);
 
 		await firstThreadButton.click();
+		await page.getByText('What was captured?', { exact: true }).waitFor();
+		await page.getByLabel('字幕问题', { exact: true }).fill('Hold across thread switch');
+		await page.getByRole('button', { name: '提问', exact: true }).click();
+		await waitForSidecarRequest(
+			page,
+			sidecarRequests,
+			(request) =>
+				request.intent.kind === 'ask' && request.intent.question === 'Hold across thread switch',
+			'跨会话切换中的自由问答请求'
+		);
+		await newThreadButton.click();
+		assert.equal(await page.getByLabel('字幕问题', { exact: true }).isDisabled(), true);
+		await page.waitForFunction(() => {
+			const input = document.querySelector('textarea[aria-label="字幕问题"]');
+			return input instanceof HTMLTextAreaElement && !input.disabled;
+		});
+		await firstThreadButton.click();
+		await page.getByText('Hold across thread switch', { exact: true }).waitFor();
 		const downloadPromise = page.waitForEvent('download');
 		await page.getByRole('button', { name: '导出当前会话 JSON' }).click();
 		const download = await downloadPromise;
