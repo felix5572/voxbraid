@@ -54,6 +54,7 @@ export type SidecarIntent =
 			continuity: SidecarRevisionContextSegment[];
 			previousDraft: SidecarRevisionDraftSegment[];
 			oversizedGroupNumbers: number[];
+			previousInvalidLastTokenIndexes: number[];
 	  };
 
 export interface SidecarTranscriptRunInput {
@@ -103,6 +104,7 @@ export type SidecarErrorCode =
 	| 'context-too-large'
 	| 'browser-network-failed'
 	| 'invalid-response'
+	| 'invalid-revision-boundary'
 	| 'budget-check-failed'
 	| 'request-timeout'
 	| 'upstream-failed'

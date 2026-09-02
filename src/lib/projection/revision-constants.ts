@@ -1,4 +1,4 @@
-export const REVISION_TASK_VERSION = 2;
+export const REVISION_TASK_VERSION = 3;
 export const REVISION_TOKENIZER_VERSION = 1;
 export const REVISION_QUIET_WINDOW_MS = 1_200;
 export const REVISION_HARD_WINDOW_MS = 20_000;

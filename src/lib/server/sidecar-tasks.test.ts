@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import type { SidecarIntent, SidecarInvokeRequest } from '../sidecar/types';
 import { prepareSidecarCall, parseSidecarInvokeRequest } from './sidecar-tasks';
 
-function revisionPairRequest() {
+type RevisionPairIntent = Extract<SidecarIntent, { kind: 'revise-pairs' }>;
+
+function revisionPairRequest(): SidecarInvokeRequest & { intent: RevisionPairIntent } {
 	return {
 		clientRequestId: 'pair-request-1',
 		intent: {
@@ -14,7 +17,8 @@ function revisionPairRequest() {
 			],
 			continuity: [{ revisedSourceText: 'Earlier.', translatedText: '此前。' }],
 			previousDraft: [],
-			oversizedGroupNumbers: [] as number[]
+			oversizedGroupNumbers: [] as number[],
+			previousInvalidLastTokenIndexes: [] as number[]
 		},
 		context: {
 			threadId: 'thread-1',
@@ -76,7 +80,7 @@ describe('sidecar task preparation', () => {
 		expect(prepared).toMatchObject({
 			kind: 'revise-pairs',
 			model: 'gpt-5.6-luna',
-			taskVersion: 2,
+			taskVersion: 3,
 			inputTokenPreflight: 'skip-bounded',
 			maxPreparedInputBytes: 64_000,
 			reasoningEffort: 'none',
@@ -87,7 +91,42 @@ describe('sidecar task preparation', () => {
 		expect(prepared.inputText).toContain('"i": 1');
 		expect(prepared.inputText).toContain('Earlier.');
 		expect(prepared.inputText).not.toContain('realtimeTranslation');
-		expect(prepared.instructions).toContain('strictly increasing tokenEnd');
+		expect(prepared.instructions).toContain('lastTokenIndex');
+		expect(prepared.instructions).toContain('never restarts');
+		expect(prepared.instructions).toContain('Protocol example');
+	});
+
+	it('shows the model only request-local token coordinates for previous drafts', () => {
+		const value = revisionPairRequest();
+		value.intent.previousDraft = [
+			{
+				sourceStart: 0,
+				sourceEnd: 15,
+				rawText: 'First sentence.',
+				revisedSourceText: 'First sentence.',
+				translatedText: '第一句。',
+				paragraphBreakBefore: false
+			}
+		];
+		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
+
+		expect(prepared.inputText).toContain('"firstTokenIndex": 1');
+		expect(prepared.inputText).toContain('"lastTokenIndex": 1');
+		expect(prepared.inputText).not.toContain('"sourceStart"');
+		expect(prepared.inputText).not.toContain('"sourceEnd"');
+		expect(prepared.inputText).not.toContain('"rawText"');
+	});
+
+	it('turns a rejected boundary sequence into a server-owned correction', () => {
+		const value = revisionPairRequest();
+		value.intent.previousInvalidLastTokenIndexes = [46, 86, 61, 86];
+		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
+
+		expect(prepared.inputText).toMatch(
+			/"previousInvalidLastTokenIndexes": \[\s+46,\s+86,\s+61,\s+86\s+\]/u
+		);
+		expect(prepared.inputText).toContain('strictly increasing cumulative lastTokenIndex');
+		expect(prepared.inputText).toContain('"finalLastTokenIndex": 2');
 	});
 
 	it('rejects mismatched or over-sized revision pair input before OpenAI', () => {

@@ -90,7 +90,7 @@ tokenizer 是项目内的纯函数并带 `TOKENIZER_VERSION`：空格语言按�
 ]
 ```
 
-模型不需要自行数 JSON 数组位置，只需抄写某组最后一个 token 旁的 `i` 作为 `tokenEnd`。应用由前一组结尾推导该组 raw 范围。这样既保留结构化输入和精确词边界，也显著降低长数组中的编号偏移。第二版不保留“裸字符串数组”实验开关；真实链路只验证这一份正式契约。
+模型不需要自行数 JSON 数组位置，只需把某组最后一个 token 旁的 `i` 和 `t` 原样抄为 `lastTokenIndex` / `lastTokenText`。schema description 与服务端提示词都把它定义为整批累计坐标：组间严格递增、段落切换时不能重新计数，最后一组必须指向输入末尾。应用由前一组结尾推导该组 raw 范围，并交叉验证 `tokens[lastTokenIndex - 1].t === lastTokenText`。这样正确边界是最省力的输出路径，同时保留结构化输入和精确词边界。第二版不保留“裸字符串数组”实验开关。
 
 每个 run 的展示投影由三部分组成：
 
@@ -124,9 +124,9 @@ capturedSourceEnd = Math.min(sourceStream.text.length, frozenEnd + MAX_OPEN_SOUR
 
 ### 3.2 previousDraft 最小改动锚
 
-每次请求携带上一版 open segments 的 raw 范围、修订原文和译文，作为 `previousDraft`。instructions 明确要求：没有新的 raw 证据时保持原分组和措辞；有新证据时才修正此前识别、断句或翻译。previousDraft 是不可信派生参考，不是事实，也不能覆盖当前 raw token。
+每次请求携带上一版 open segments 的 raw 范围、修订原文和译文，作为 `previousDraft`。浏览器到服务端仍使用绝对 raw 坐标完成事实校验；真正发送给模型前，服务端把范围换算为本次请求内的 `firstTokenIndex` / `lastTokenIndex`，并移除 `sourceStart` / `sourceEnd` / `rawText`。因此模型只看到 `{i,t}` 这一套请求内坐标，不会同时面对绝对字符偏移。instructions 明确要求：没有新的 raw 证据时保持原分组和措辞；有新证据时才修正此前识别、断句或翻译。previousDraft 是不可信派生参考，不是事实，也不能覆盖当前 raw token。
 
-这条约束减少无意义闪动，但不能升级为“旧稿优先”：当前完整 raw 输入始终拥有最高证据地位。revision 失败时保留上一版 open segments 和完整错误诊断；除 3.3 定义的“唯一违规是单组过长”定向重试外，相同 raw 范围不立即自动重试。每次自动请求在发起时就记录四秒下限，不以成功为前提；同一失败范围只有新 raw 或用户显式重试才会再次调用模型。
+这条约束减少无意义闪动，但不能升级为“旧稿优先”：当前完整 raw 输入始终拥有最高证据地位。revision 失败时保留上一版 open segments 和完整错误诊断。单组过长按 3.3 定向重试；`lastTokenIndex` 倒退、越界、未覆盖末尾或 `lastTokenText` 不匹配时，首轮失败同样完整落审计，并把无效边界序列作为结构化数据交回服务端生成一次纠正提示。第二次仍错就停止，不猜测、不静默修正、不继续自动付费重试。其他失败的相同 raw 范围不立即自动重试。每次自动请求在发起时就记录四秒下限，不以成功为前提；同一失败范围只有新 raw 或用户显式重试才会再次调用模型。
 
 ### 3.3 滑动提交
 
@@ -168,7 +168,8 @@ capturedSourceEnd = Math.min(sourceStream.text.length, frozenEnd + MAX_OPEN_SOUR
 ```ts
 interface RevisionModelOutput {
 	groups: Array<{
-		tokenEnd: number;
+		lastTokenIndex: number;
+		lastTokenText: string;
 		revisedSourceText: string;
 		translatedText: string;
 		paragraphBreakBefore: boolean;
@@ -178,15 +179,15 @@ interface RevisionModelOutput {
 
 服务端必须验证：
 
-1. `tokenEnd` 是整数、严格递增，首个至少为 1，最后一个恰好等于输入 token 数；
-2. 由相邻 `tokenEnd` 推导的每组 raw 范围连续、无空洞、无重叠；服务端只强制整批 1,600 字符硬上限，单组 480 字符软上限由浏览器按第三节的“一次定向重试、再次违规则 forced-tail 接受”处理；
+1. `lastTokenIndex` 是整数、严格递增，首个至少为 1，最后一个恰好等于输入 token 数；`lastTokenText` 必须逐字等于该编号 token 的 `t`；
+2. 由相邻 `lastTokenIndex` 推导的每组 raw 范围连续、无空洞、无重叠；服务端只强制整批 1,600 字符硬上限，单组 480 字符软上限由浏览器按第三节的“一次定向重试、再次违规则 forced-tail 接受”处理；
 3. `revisedSourceText` 和 `translatedText` 均非空且总输出处于产品上限内；
 4. 应用从 token 绝对范围自行拼出不可修改的 `rawText`，模型返回的 `revisedSourceText` 只能作为派生字段保存；
 5. 所有验证通过后，才调用 `commitPlan()` 并原子替换 open segments。
 
-除已明确定义的“第二次仅单组长度违规”外，任一约束不满足都返回结构化失败，不猜测模型原意，也不保存半批结果。定向重试和 forced-tail 接受均分别保存 `RevisionBatch`，使第一次失败、重试提示和最终降级可审计。
+除已明确定义的“第二次仅单组长度违规”外，任一约束不满足都返回结构化失败，不猜测模型原意，也不保存半批结果。边界协议错误只允许一次带具体无效序列的定向纠正；第二次仍错即失败。每次定向重试和 forced-tail 接受均分别保存 `RevisionBatch`，使第一次失败、重试提示和最终降级可审计。
 
-Structured Outputs 使用一份随 `taskVersion` 固定的静态 schema，`tokenEnd` 保持普通整数。当前 token 数、递增关系和 raw 范围由服务端在响应后校验，不能把每批合法数字动态写进 JSON Schema 的 `enum`，否则每次请求都会产生一个新 schema，并可能反复承担首次 schema 编译延迟。
+Structured Outputs 使用一份随 `taskVersion` 固定的静态 schema，`lastTokenIndex` 保持普通整数，并在字段 description 中就近定义累计编号语义；`lastTokenText` 提供冗余自证。当前 token 数、递增关系、文本交叉校验和 raw 范围由服务端在响应后验证，不能把每批合法数字动态写进 JSON Schema 的 `enum`，否则每次请求都会产生一个新 schema，并可能反复承担首次 schema 编译延迟。
 
 提示词职责保持窄：
 
@@ -359,7 +360,7 @@ const MIN_REQUEST_INTERVAL_MS = 4_000; // 仅自动请求；手动重试与 fina
 4. archive v3 只负责当前格式导出；v1/v2 导入仅恢复当前仍有效的事实与 segments，丢弃旧投影并返回明确提示；
 5. UI 左栏改为「修订原文」，展示 frozen/open 区、当前 raw 进度、请求状态，并允许展开对应 Live 原文片段；
 6. 浏览器自动化覆盖：Live 原文不等待 Luna、open 尾整体替换而 frozen 区不变、previousDraft 随请求发送、失败保留旧稿、故障恢复后用多个 1,600 字符窗口追赶、单组超限定向重试并 forced-tail 前进、四秒自动请求下限、静默全部冻结、run 收尾、刷新恢复、切 thread 不串写；
-7. opt-in 真实 Luna 请求已确认 `{i,t}` / `tokenEnd` schema 和提示词可用（测试请求共 461 tokens）；下一步用真实课程测量首次可见延迟、请求频率、冻结延迟、forced-tail 率、措辞变动率和 token 成本。
+7. 旧 `{i,t}` / `tokenEnd` 契约曾通过一次 opt-in Luna 请求，但真实课程出现 `86 → 61` 编号倒退，因此升级为 `lastTokenIndex + lastTokenText`、单一模型坐标系和一次边界纠正。`lastTokenText` 仍要求模型原样抄写；校验仅容忍首尾空白差异并记录发生组号，不容忍正文或标点差异，也不据此猜测或修正编号。v3 契约已用包含前导空白 token 和明确话题切换的 opt-in Luna 请求验证：返回多组、累计编号严格递增、末组完整覆盖，811 total tokens，未触发空白归一化。之后用真实课程测量首次可见延迟、请求频率、冻结延迟、forced-tail/边界纠正率、空白归一化率、措辞变动率和 token 成本。
 
 第二版不包含：
 

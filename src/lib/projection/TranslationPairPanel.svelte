@@ -24,6 +24,7 @@
 	import {
 		OversizedRevisionGroupError,
 		parseRevisionModelOutput,
+		RevisionBoundaryError,
 		type ValidatedRevisionGroup
 	} from './revision-output';
 	import {
@@ -392,6 +393,7 @@
 		const continuity = continuityBefore(candidate.runSequence, candidate.openStart);
 		const draft = previousDraft(candidate.runId, candidate.openStart, candidate.openEnd);
 		let oversizedGroupNumbers: number[] = [];
+		let previousInvalidLastTokenIndexes: number[] = [];
 		let attempt = 1;
 		let sequence = nextBatchSequence(candidate.runId);
 		if (candidate.trigger === 'periodic') {
@@ -419,7 +421,8 @@
 					})),
 					continuity,
 					previousDraft: draft,
-					oversizedGroupNumbers
+					oversizedGroupNumbers,
+					previousInvalidLastTokenIndexes
 				},
 				context: {
 					threadId: capturedThreadId,
@@ -462,6 +465,7 @@
 			const updatedAt = new Date().toISOString();
 			let groups: ValidatedRevisionGroup[] | null = null;
 			let oversizedError: OversizedRevisionGroupError | null = null;
+			let boundaryError: RevisionBoundaryError | null = null;
 			let validationError: string | null = null;
 			if (result.status === 'completed') {
 				try {
@@ -470,7 +474,16 @@
 					}).groups;
 				} catch (error) {
 					if (error instanceof OversizedRevisionGroupError) oversizedError = error;
+					else if (error instanceof RevisionBoundaryError) boundaryError = error;
 					else validationError = inlineErrorDetails(error);
+				}
+			} else if (result.error.code === 'invalid-revision-boundary' && result.outputText) {
+				try {
+					parseRevisionModelOutput(result.outputText, candidate.tokens, {
+						allowOversizedGroups: true
+					});
+				} catch (error) {
+					if (error instanceof RevisionBoundaryError) boundaryError = error;
 				}
 			}
 
@@ -523,9 +536,11 @@
 
 			const error = oversizedError
 				? `invalid-response：${oversizedError.name}: ${oversizedError.message}`
-				: validationError
-					? `invalid-response：${validationError}`
-					: undefined;
+				: boundaryError && result.status === 'completed'
+					? `invalid-revision-boundary：${boundaryError.name}: ${boundaryError.message}`
+					: validationError
+						? `invalid-response：${validationError}`
+						: undefined;
 			const failed = failureBatch({
 				candidate,
 				batchId,
@@ -535,7 +550,12 @@
 				clientRequestId,
 				result,
 				error,
-				errorCode: oversizedError || validationError ? 'invalid-response' : undefined,
+				errorCode:
+					oversizedError || validationError
+						? 'invalid-response'
+						: boundaryError && result.status === 'completed'
+							? 'invalid-revision-boundary'
+							: undefined,
 				threadId: capturedThreadId
 			});
 			await persistBatch(capturedRepository, failed, [], capturedFacts);
@@ -545,6 +565,12 @@
 
 			if (oversizedError && attempt === 1) {
 				oversizedGroupNumbers = oversizedError.oversizedGroupNumbers;
+				attempt += 1;
+				sequence += 1;
+				continue;
+			}
+			if (boundaryError && attempt === 1) {
+				previousInvalidLastTokenIndexes = boundaryError.returnedLastTokenIndexes;
 				attempt += 1;
 				sequence += 1;
 				continue;

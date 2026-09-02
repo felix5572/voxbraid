@@ -68,17 +68,21 @@ try {
 				trigger: 'manual',
 				targetLanguage: 'zh',
 				tokens: [
-					{ i: 1, start: 0, end: 34, t: 'The speaker visited a public park.' },
-					{
-						i: 2,
-						start: 34,
-						end: 97,
-						t: ' They walked beside a lake and took the train home after lunch.'
-					}
+					{ i: 1, start: 0, end: 3, t: 'The' },
+					{ i: 2, start: 3, end: 9, t: ' first' },
+					{ i: 3, start: 9, end: 16, t: ' topic.' },
+					{ i: 4, start: 16, end: 20, t: ' Now' },
+					{ i: 5, start: 20, end: 23, t: ' we' },
+					{ i: 6, start: 23, end: 28, t: ' turn' },
+					{ i: 7, start: 28, end: 31, t: ' to' },
+					{ i: 8, start: 31, end: 33, t: ' a' },
+					{ i: 9, start: 33, end: 37, t: ' new' },
+					{ i: 10, start: 37, end: 44, t: ' topic.' }
 				],
 				continuity: [],
 				previousDraft: [],
-				oversizedGroupNumbers: []
+				oversizedGroupNumbers: [],
+				previousInvalidLastTokenIndexes: []
 			}
 		}
 	];
@@ -124,7 +128,19 @@ try {
 		assert.ok(body.outputText?.trim(), `${testCase.kind} 没有返回文本。`);
 		if (testCase.kind === 'revise-pairs') {
 			const output = JSON.parse(body.outputText);
-			assert.equal(output.groups.at(-1)?.tokenEnd, testCase.intent.tokens.length);
+			assert.ok(output.groups.length >= 2, 'revise-pairs 应识别明确的话题切换。');
+			assert.ok(
+				output.groups.every(
+					(group, index, groups) =>
+						index === 0 || group.lastTokenIndex > groups[index - 1].lastTokenIndex
+				),
+				'revise-pairs 的 lastTokenIndex 不得在段落后重置。'
+			);
+			assert.equal(output.groups.at(-1)?.lastTokenIndex, testCase.intent.tokens.length);
+			assert.equal(
+				output.groups.at(-1)?.lastTokenText.trim(),
+				testCase.intent.tokens.at(-1).t.trim()
+			);
 			assert.ok(output.groups.every((group) => group.revisedSourceText?.trim()));
 		}
 		assert.ok(

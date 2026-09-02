@@ -64,7 +64,8 @@ describe('invokeSidecar', () => {
 					output_text: JSON.stringify({
 						groups: [
 							{
-								tokenEnd: 2,
+								lastTokenIndex: 2,
+								lastTokenText: ' Second sentence.',
 								revisedSourceText: 'First sentence. Second sentence.',
 								translatedText: '第一句和第二句。',
 								paragraphBreakBefore: false
@@ -87,7 +88,8 @@ describe('invokeSidecar', () => {
 					],
 					continuity: [],
 					previousDraft: [],
-					oversizedGroupNumbers: []
+					oversizedGroupNumbers: [],
+					previousInvalidLastTokenIndexes: []
 				},
 				context: {
 					threadId: 'thread-1',
@@ -124,7 +126,8 @@ describe('invokeSidecar', () => {
 			outputText: JSON.stringify({
 				groups: [
 					{
-						tokenEnd: 2,
+						lastTokenIndex: 2,
+						lastTokenText: ' Second sentence.',
 						revisedSourceText: 'First sentence. Second sentence.',
 						translatedText: '第一句和第二句。',
 						paragraphBreakBefore: false
@@ -145,7 +148,8 @@ describe('invokeSidecar', () => {
 					output_text: JSON.stringify({
 						groups: [
 							{
-								tokenEnd: 1,
+								lastTokenIndex: 1,
+								lastTokenText: source,
 								revisedSourceText: source,
 								translatedText: '超长组',
 								paragraphBreakBefore: false
@@ -165,7 +169,8 @@ describe('invokeSidecar', () => {
 					tokens: [{ i: 1, start: 0, end: 600, t: source }],
 					continuity: [],
 					previousDraft: [],
-					oversizedGroupNumbers: []
+					oversizedGroupNumbers: [],
+					previousInvalidLastTokenIndexes: []
 				},
 				context: {
 					threadId: 'thread-1',
@@ -203,7 +208,8 @@ describe('invokeSidecar', () => {
 				output_text: JSON.stringify({
 					groups: [
 						{
-							tokenEnd: 2,
+							lastTokenIndex: 2,
+							lastTokenText: 'First sentence.',
 							revisedSourceText: 'First sentence.',
 							translatedText: '错误覆盖。',
 							paragraphBreakBefore: false
@@ -221,7 +227,8 @@ describe('invokeSidecar', () => {
 				tokens: [{ i: 1, start: 0, end: 15, t: 'First sentence.' }],
 				continuity: [],
 				previousDraft: [],
-				oversizedGroupNumbers: []
+				oversizedGroupNumbers: [],
+				previousInvalidLastTokenIndexes: []
 			},
 			context: {
 				threadId: 'thread-1',
@@ -247,10 +254,13 @@ describe('invokeSidecar', () => {
 		const failure = await result(response);
 
 		expect(response.status).toBe(502);
-		expect(failure).toMatchObject({ status: 'failed', error: { code: 'invalid-response' } });
+		expect(failure).toMatchObject({
+			status: 'failed',
+			error: { code: 'invalid-revision-boundary' }
+		});
 		if (failure.status !== 'failed') throw new Error('Expected failed pair response.');
 		expect(failure.error.message).toContain('token 覆盖校验');
-		expect(failure.error.message).toContain('tokenEnd 无效');
+		expect(failure.error.message).toContain('lastTokenIndex');
 	});
 
 	it('rejects invalid requests before calling OpenAI', async () => {

@@ -1,6 +1,10 @@
 import type { ModelUsage, SidecarErrorCode, SidecarInvokeResult } from '../sidecar/types';
 import { errorDetails } from '../error-details';
-import { parseRevisionModelOutput, REVISION_OUTPUT_SCHEMA } from '../projection/revision-output';
+import {
+	parseRevisionModelOutput,
+	RevisionBoundaryError,
+	REVISION_OUTPUT_SCHEMA
+} from '../projection/revision-output';
 import { json } from '@sveltejs/kit';
 import {
 	parseSidecarInvokeRequest,
@@ -390,22 +394,31 @@ export async function invokeSidecar({
 	if (body.status === 'completed' && responseId) {
 		if (prepared.structuredOutput === 'revision-pairs') {
 			try {
-				outputText = JSON.stringify(
-					parseRevisionModelOutput(
-						outputText,
-						prepared.revisionTokens.map((token) => ({
-							index: token.i,
-							start: token.start,
-							end: token.end,
-							text: token.t
-						})),
-						// The server owns hard token coverage and range validation. The browser owns
-						// the 480-character product preference and its targeted retry/fallback.
-						{ allowOversizedGroups: true }
-					).output
+				const parsedRevision = parseRevisionModelOutput(
+					outputText,
+					prepared.revisionTokens.map((token) => ({
+						index: token.i,
+						start: token.start,
+						end: token.end,
+						text: token.t
+					})),
+					// The server owns hard token coverage and range validation. The browser owns
+					// the 480-character product preference and its targeted retry/fallback.
+					{ allowOversizedGroups: true }
 				);
+				outputText = JSON.stringify(parsedRevision.output);
+				if (parsedRevision.whitespaceNormalizedGroupNumbers.length > 0) {
+					console.info('[sidecar] revision boundary token whitespace normalized', {
+						clientRequestId: prepared.clientRequestId,
+						responseId,
+						requestId: upstreamRequestId,
+						groupNumbers: parsedRevision.whitespaceNormalizedGroupNumbers
+					});
+				}
 			} catch (error) {
 				const details = errorDetails(error);
+				const errorCode: SidecarErrorCode =
+					error instanceof RevisionBoundaryError ? 'invalid-revision-boundary' : 'invalid-response';
 				console.error('[sidecar] revision pair output validation failed', {
 					clientRequestId: prepared.clientRequestId,
 					responseId,
@@ -417,7 +430,7 @@ export async function invokeSidecar({
 					failure(
 						prepared.clientRequestId,
 						now,
-						'invalid-response',
+						errorCode,
 						`OpenAI 修订对照输出没有通过 token 覆盖校验${requestIdSuffix(upstreamRequestId)}。\n原始错误：\n${details}\n原始模型输出：\n${boundedResponseBody(outputText)}`,
 						{ responseId, model, outputText: outputText || null, usage }
 					),

@@ -5,7 +5,8 @@ import {
 } from './revision-constants';
 
 export interface RevisionModelGroup {
-	tokenEnd: number;
+	lastTokenIndex: number;
+	lastTokenText: string;
 	revisedSourceText: string;
 	translatedText: string;
 	paragraphBreakBefore: boolean;
@@ -23,6 +24,12 @@ export interface ValidatedRevisionGroup extends RevisionModelGroup {
 	oversized: boolean;
 }
 
+export interface ParsedRevisionModelOutput {
+	output: RevisionModelOutput;
+	groups: ValidatedRevisionGroup[];
+	whitespaceNormalizedGroupNumbers: number[];
+}
+
 export class OversizedRevisionGroupError extends TypeError {
 	constructor(
 		readonly groups: ValidatedRevisionGroup[],
@@ -32,6 +39,16 @@ export class OversizedRevisionGroupError extends TypeError {
 			`修订对照第 ${oversizedGroupNumbers.join('、')} 组超过 ${REVISION_MAX_GROUP_SOURCE_CHARACTERS} 字符软上限。`
 		);
 		this.name = 'OversizedRevisionGroupError';
+	}
+}
+
+export class RevisionBoundaryError extends TypeError {
+	constructor(
+		message: string,
+		readonly returnedLastTokenIndexes: number[]
+	) {
+		super(message);
+		this.name = 'RevisionBoundaryError';
 	}
 }
 
@@ -51,9 +68,24 @@ export const REVISION_OUTPUT_SCHEMA = Object.freeze({
 				items: {
 					type: 'object',
 					additionalProperties: false,
-					required: ['tokenEnd', 'revisedSourceText', 'translatedText', 'paragraphBreakBefore'],
+					required: [
+						'lastTokenIndex',
+						'lastTokenText',
+						'revisedSourceText',
+						'translatedText',
+						'paragraphBreakBefore'
+					],
 					properties: {
-						tokenEnd: { type: 'integer' },
+						lastTokenIndex: {
+							type: 'integer',
+							description:
+								'Copy the i value of the last input token belonging to this group. Values strictly increase across groups, never restart, and the final value equals the final input token i.'
+						},
+						lastTokenText: {
+							type: 'string',
+							description:
+								'Copy the t value of the token selected by lastTokenIndex exactly, including leading whitespace and punctuation.'
+						},
 						revisedSourceText: { type: 'string' },
 						translatedText: { type: 'string' },
 						paragraphBreakBefore: { type: 'boolean' }
@@ -68,11 +100,22 @@ function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+export function revisionLastTokenIndexesFromOutput(value: string): number[] | null {
+	try {
+		const parsed: unknown = JSON.parse(value);
+		if (!record(parsed) || !Array.isArray(parsed.groups) || parsed.groups.length === 0) return null;
+		const indexes = parsed.groups.map((group) => (record(group) ? group.lastTokenIndex : null));
+		return indexes.every((index) => Number.isSafeInteger(index)) ? (indexes as number[]) : null;
+	} catch {
+		return null;
+	}
+}
+
 export function parseRevisionModelOutput(
 	value: string,
 	tokens: readonly SourceToken[],
 	options: { allowOversizedGroups?: boolean } = {}
-): { output: RevisionModelOutput; groups: ValidatedRevisionGroup[] } {
+): ParsedRevisionModelOutput {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(value);
@@ -93,12 +136,15 @@ export function parseRevisionModelOutput(
 	}
 
 	const groups: ValidatedRevisionGroup[] = [];
-	let previousTokenEnd = 0;
+	const whitespaceNormalizedGroupNumbers: number[] = [];
+	const returnedLastTokenIndexes = revisionLastTokenIndexesFromOutput(value) ?? [];
+	let previousLastTokenIndex = 0;
 	let outputCharacters = 0;
 	for (const [index, rawGroup] of parsed.groups.entries()) {
 		if (
 			!record(rawGroup) ||
-			!Number.isSafeInteger(rawGroup.tokenEnd) ||
+			!Number.isSafeInteger(rawGroup.lastTokenIndex) ||
+			typeof rawGroup.lastTokenText !== 'string' ||
 			typeof rawGroup.revisedSourceText !== 'string' ||
 			!rawGroup.revisedSourceText.trim() ||
 			typeof rawGroup.translatedText !== 'string' ||
@@ -107,19 +153,34 @@ export function parseRevisionModelOutput(
 		) {
 			throw new TypeError(`修订对照模型第 ${index + 1} 组格式无效。`);
 		}
-		const tokenEnd = rawGroup.tokenEnd as number;
-		if (tokenEnd <= previousTokenEnd || tokenEnd > tokens.length) {
-			throw new TypeError(`修订对照模型第 ${index + 1} 组 tokenEnd 无效。`);
+		const lastTokenIndex = rawGroup.lastTokenIndex as number;
+		const lastTokenText = rawGroup.lastTokenText as string;
+		if (lastTokenIndex <= previousLastTokenIndex || lastTokenIndex > tokens.length) {
+			throw new RevisionBoundaryError(
+				`修订对照模型第 ${index + 1} 组 lastTokenIndex=${lastTokenIndex} 无效；上一组结束于 ${previousLastTokenIndex}，本批最后一个 token 是 ${tokens.length}。`,
+				returnedLastTokenIndexes
+			);
 		}
-		const first = tokens[previousTokenEnd];
-		const last = tokens[tokenEnd - 1];
+		const first = tokens[previousLastTokenIndex];
+		const last = tokens[lastTokenIndex - 1];
+		if (lastTokenText.trim() !== last.text.trim()) {
+			const matchingIndexes = tokens
+				.filter((token) => token.text.trim() === lastTokenText.trim())
+				.map((token) => token.index);
+			throw new RevisionBoundaryError(
+				`修订对照模型第 ${index + 1} 组 lastTokenText 与 token ${lastTokenIndex} 不一致（忽略首尾空白后比较）；该文本在当前请求中的匹配位置为 ${matchingIndexes.length > 0 ? matchingIndexes.join('、') : '无'}。`,
+				returnedLastTokenIndexes
+			);
+		}
+		if (lastTokenText !== last.text) whitespaceNormalizedGroupNumbers.push(index + 1);
 		const rawText = tokens
-			.slice(previousTokenEnd, tokenEnd)
+			.slice(previousLastTokenIndex, lastTokenIndex)
 			.map((token) => token.text)
 			.join('');
 		const group: ValidatedRevisionGroup = {
-			tokenStart: previousTokenEnd + 1,
-			tokenEnd,
+			tokenStart: previousLastTokenIndex + 1,
+			lastTokenIndex,
+			lastTokenText,
 			sourceStart: first.start,
 			sourceEnd: last.end,
 			rawText,
@@ -133,10 +194,13 @@ export function parseRevisionModelOutput(
 			throw new TypeError(`修订对照模型输出超过 ${REVISION_MAX_OUTPUT_CHARACTERS} 字符上限。`);
 		}
 		groups.push(group);
-		previousTokenEnd = tokenEnd;
+		previousLastTokenIndex = lastTokenIndex;
 	}
-	if (previousTokenEnd !== tokens.length) {
-		throw new TypeError(`修订对照模型只覆盖到 token ${previousTokenEnd}，预期 ${tokens.length}。`);
+	if (previousLastTokenIndex !== tokens.length) {
+		throw new RevisionBoundaryError(
+			`修订对照模型只覆盖到 token ${previousLastTokenIndex}，预期 ${tokens.length}。`,
+			returnedLastTokenIndexes
+		);
 	}
 	const oversizedGroupNumbers = groups
 		.map((group, index) => (group.oversized ? index + 1 : 0))
@@ -155,6 +219,7 @@ export function parseRevisionModelOutput(
 				return group;
 			})
 		},
-		groups
+		groups,
+		whitespaceNormalizedGroupNumbers
 	};
 }

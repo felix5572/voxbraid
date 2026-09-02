@@ -229,7 +229,8 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 				pairGroupCharacters + token.t.length > 400
 			) {
 				pairGroups.push({
-					tokenEnd: index,
+					lastTokenIndex: index,
+					lastTokenText: pairTokens[index - 1].t,
 					revisedSourceText: pairTokens
 						.slice(pairGroupStart, index)
 						.map((item) => item.t)
@@ -245,7 +246,8 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		}
 		if (pairTokens.length > 0) {
 			pairGroups.push({
-				tokenEnd: pairTokens.length,
+				lastTokenIndex: pairTokens.length,
+				lastTokenText: pairTokens.at(-1).t,
 				revisedSourceText: pairTokens
 					.slice(pairGroupStart)
 					.map((item) => item.t)
@@ -256,7 +258,26 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 			});
 		}
 		if (pairRaw.includes('[INVALID_REVISION]') && pairGroups[0]) {
-			pairGroups[0].tokenEnd = pairTokens.length + 1;
+			pairGroups[0].translatedText = '';
+		}
+		if (
+			pairRaw.includes('[INVALID_BOUNDARY') &&
+			pairGroups[0] &&
+			(body.intent.previousInvalidLastTokenIndexes.length === 0 ||
+				pairRaw.includes('[INVALID_BOUNDARY_TWICE]'))
+		) {
+			const invalidIndexes = [1, pairTokens.length, pairTokens.length - 1, pairTokens.length];
+			pairGroups.splice(
+				0,
+				pairGroups.length,
+				...invalidIndexes.map((lastTokenIndex, index) => ({
+					lastTokenIndex,
+					lastTokenText: pairTokens[lastTokenIndex - 1].t,
+					revisedSourceText: `Injected revision group ${index + 1}.`,
+					translatedText: `注入的修订组 ${index + 1}。`,
+					paragraphBreakBefore: index > 0
+				}))
+			);
 		}
 		const outputs = {
 			summarize: `课堂清稿第${cleanBlockNumber}块`,
@@ -569,6 +590,71 @@ async function testInvalidRevisionDoesNotRetry(browser, baseUrl) {
 			sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs').length,
 			1,
 			'同一失败 raw 窗口不应自动重复付费请求'
+		);
+		await stopCapture(page);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
+async function testInvalidRevisionBoundaryGetsOneTargetedRetry(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		const source = '[INVALID_BOUNDARY] First sentence. Second sentence.';
+		await emitPair(page, source, '边界纠正测试。');
+		const failed = await waitForRecord(
+			page,
+			'revisionBatches',
+			(record) => record.status === 'failed' && record.errorCode === 'invalid-revision-boundary',
+			'修订边界首轮失败审计'
+		);
+		await waitForRecord(
+			page,
+			'revisionBatches',
+			(record) =>
+				record.runId === failed.runId &&
+				record.sequence > failed.sequence &&
+				record.status === 'completed',
+			'修订边界定向纠正成功'
+		);
+		const requests = sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs');
+		assert.equal(requests.length, 2);
+		assert.deepEqual(requests[0].intent.previousInvalidLastTokenIndexes, []);
+		assert.deepEqual(requests[1].intent.previousInvalidLastTokenIndexes, [
+			1,
+			requests[0].intent.tokens.length,
+			requests[0].intent.tokens.length - 1,
+			requests[0].intent.tokens.length
+		]);
+		await stopCapture(page);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
+async function testRepeatedInvalidRevisionBoundaryStopsAfterCorrection(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		const source = '[INVALID_BOUNDARY_TWICE] First sentence. Second sentence.';
+		await emitPair(page, source, '重复边界错误测试。');
+		await waitForStoreCondition(
+			page,
+			'revisionBatches',
+			(records) =>
+				records.filter((record) => record.errorCode === 'invalid-revision-boundary').length >= 2,
+			'第二次修订边界失败审计'
+		);
+		await page.waitForTimeout(5_000);
+		assert.equal(
+			sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs').length,
+			2,
+			'第二次边界纠正失败后不得继续自动付费重试'
 		);
 		await stopCapture(page);
 		assert.deepEqual(browserErrors, []);
@@ -1168,6 +1254,8 @@ try {
 	await testOpenWindowRevision(browser, baseUrl);
 	await testOversizedRevisionProgress(browser, baseUrl);
 	await testInvalidRevisionDoesNotRetry(browser, baseUrl);
+	await testInvalidRevisionBoundaryGetsOneTargetedRetry(browser, baseUrl);
+	await testRepeatedInvalidRevisionBoundaryStopsAfterCorrection(browser, baseUrl);
 	await testDegradeAndRecover(browser, baseUrl);
 	await testPeriodicAndPageHideCheckpoints(browser, baseUrl);
 	await testConnectionFailure(browser, baseUrl);
