@@ -98,7 +98,7 @@ interface SessionRepository {
 }
 ```
 
-- `saveCheckpoint` 在一个事务中保存 thread 元数据、完整流快照和 run 元数据；实时事实路径不依赖 segment。本地 record 可以保存 `checkpointedAt` 等恢复元数据，但这些字段不进入领域类型。
+- `saveCheckpoint` 在一个事务中保存 thread 元数据、完整流快照和 run 元数据；实时事实路径不依赖 segment。本地 record 可以保存 `checkpointedAt` 等恢复元数据，但这些字段不进入领域类型。run 双流是 append-only 事实，checkpoint 与派生投影保存路径都可以延长双流，但任何写入路径都不得用较短快照回退已落盘内容；非前缀变化必须拒绝。
 - `replaceSegmentRevision` 在一个事务内写入新 revision 的全部 segment，并切换 `run.currentSegmentRevision`。
 - `repairAbandonedRuns` 在页面恢复时一次性修复遗留 run。
 - `clearCleanTranscript` 在一个事务中只删除旧整场清稿和新版分块清稿投影，供用户明确选择“重新整理全部”；它不能触碰字幕事实。

@@ -1,10 +1,20 @@
-export type SidecarTaskKind = 'ask' | 'summarize' | 'retranslate';
+export type SidecarTaskKind = 'ask' | 'summarize' | 'retranslate' | 'translate-pairs';
 export type SidecarTrigger = 'manual' | 'periodic';
 export type SidecarContextScope = 'latest-run' | 'current-thread';
 
 export interface SidecarConversationTurn {
 	question: string;
 	answer: string;
+}
+
+export interface SidecarTranslationPairAtom {
+	id: string;
+	text: string;
+}
+
+export interface SidecarTranslationPairContinuity {
+	sourceText: string;
+	translatedText: string;
 }
 
 export type SidecarIntent =
@@ -24,6 +34,13 @@ export type SidecarIntent =
 			kind: 'retranslate';
 			trigger: 'manual';
 			targetLanguage: string;
+	  }
+	| {
+			kind: 'translate-pairs';
+			trigger: SidecarTrigger;
+			targetLanguage: string;
+			atoms: SidecarTranslationPairAtom[];
+			continuity: SidecarTranslationPairContinuity[];
 	  };
 
 export interface SidecarTranscriptRunInput {

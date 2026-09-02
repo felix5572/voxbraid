@@ -1,5 +1,9 @@
 import type { ModelUsage, SidecarErrorCode, SidecarInvokeResult } from '../sidecar/types';
 import { errorDetails } from '../error-details';
+import {
+	parseTranslationPairModelOutput,
+	TRANSLATION_PAIR_OUTPUT_SCHEMA
+} from '../projection/translation-pair-output';
 import { json } from '@sveltejs/kit';
 import {
 	parseSidecarInvokeRequest,
@@ -130,6 +134,12 @@ function responseBody(prepared: PreparedSidecarCall): Record<string, unknown> {
 	};
 }
 
+function preparedInputBytes(prepared: PreparedSidecarCall): number {
+	return new TextEncoder().encode(
+		JSON.stringify({ instructions: prepared.instructions, input: prepared.inputText })
+	).byteLength;
+}
+
 async function upstreamFetch(
 	url: string,
 	body: object,
@@ -232,68 +242,86 @@ export async function invokeSidecar({
 		taskVersion: prepared.taskVersion,
 		model: prepared.model
 	});
-
-	let countResponse: Response;
-	try {
-		countResponse = await upstreamFetch(INPUT_TOKENS_URL, responseBody(prepared), {
-			fetcher,
-			apiKey,
-			timeoutMs
-		});
-	} catch (error) {
-		const details = errorDetails(error);
-		console.error('[sidecar] input token count failed', {
-			clientRequestId: prepared.clientRequestId,
-			error: details
-		});
-		return json(
-			failure(
-				prepared.clientRequestId,
-				now,
-				'budget-check-failed',
-				`输入 token 计数请求失败。原始错误：\n${details}`,
-				{ model: prepared.model }
-			),
-			{ status: 502, headers: noStoreHeaders() }
-		);
-	}
-
-	const countRequestId = requestId(countResponse);
-	const countResult = await readUpstreamBody(countResponse);
-	const countBody = countResult.parsed;
-	if (!countResponse.ok || !isRecord(countBody) || !nonNegativeNumber(countBody.input_tokens)) {
-		const upstreamDetails = upstreamErrorDetails(countBody);
-		const rawUpstream = boundedResponseBody(countResult.raw);
-		console.error('[sidecar] input token count rejected', {
-			clientRequestId: prepared.clientRequestId,
-			status: countResponse.status,
-			requestId: countRequestId,
-			code: stringField(isRecord(countBody) ? countBody.error : null, 'code'),
-			body: rawUpstream
-		});
-		return json(
-			failure(
-				prepared.clientRequestId,
-				now,
-				'budget-check-failed',
-				`OpenAI 输入 token 计数失败（HTTP ${countResponse.status}${requestIdSuffix(countRequestId)}）${upstreamDetails ? `：${upstreamDetails}` : '。'}\n原始响应：\n${rawUpstream}`,
-				{ model: prepared.model }
-			),
-			{ status: 502, headers: noStoreHeaders() }
-		);
-	}
-
-	if (countBody.input_tokens > prepared.maxInputTokens) {
+	const inputBytes = preparedInputBytes(prepared);
+	if (prepared.maxPreparedInputBytes !== null && inputBytes > prepared.maxPreparedInputBytes) {
 		return json(
 			failure(
 				prepared.clientRequestId,
 				now,
 				'context-too-large',
-				`所选字幕共 ${countBody.input_tokens} 个输入 token，超过此任务 ${prepared.maxInputTokens} 个的上限。`,
+				`句段对照最终模型输入为 ${inputBytes} 字节，超过 ${prepared.maxPreparedInputBytes} 字节上限。`,
 				{ model: prepared.model }
 			),
 			{ status: 413, headers: noStoreHeaders() }
 		);
+	}
+
+	if (prepared.inputTokenPreflight === 'required') {
+		let countResponse: Response;
+		try {
+			countResponse = await upstreamFetch(INPUT_TOKENS_URL, responseBody(prepared), {
+				fetcher,
+				apiKey,
+				timeoutMs
+			});
+		} catch (error) {
+			const details = errorDetails(error);
+			console.error('[sidecar] input token count failed', {
+				clientRequestId: prepared.clientRequestId,
+				error: details
+			});
+			return json(
+				failure(
+					prepared.clientRequestId,
+					now,
+					'budget-check-failed',
+					`输入 token 计数请求失败。原始错误：\n${details}`,
+					{ model: prepared.model }
+				),
+				{ status: 502, headers: noStoreHeaders() }
+			);
+		}
+
+		const countRequestId = requestId(countResponse);
+		const countResult = await readUpstreamBody(countResponse);
+		const countBody = countResult.parsed;
+		if (!countResponse.ok || !isRecord(countBody) || !nonNegativeNumber(countBody.input_tokens)) {
+			const upstreamDetails = upstreamErrorDetails(countBody);
+			const rawUpstream = boundedResponseBody(countResult.raw);
+			console.error('[sidecar] input token count rejected', {
+				clientRequestId: prepared.clientRequestId,
+				status: countResponse.status,
+				requestId: countRequestId,
+				code: stringField(isRecord(countBody) ? countBody.error : null, 'code'),
+				body: rawUpstream
+			});
+			return json(
+				failure(
+					prepared.clientRequestId,
+					now,
+					'budget-check-failed',
+					`OpenAI 输入 token 计数失败（HTTP ${countResponse.status}${requestIdSuffix(countRequestId)}）${upstreamDetails ? `：${upstreamDetails}` : '。'}\n原始响应：\n${rawUpstream}`,
+					{ model: prepared.model }
+				),
+				{ status: 502, headers: noStoreHeaders() }
+			);
+		}
+
+		if (prepared.maxInputTokens === null) {
+			throw new Error('A task requiring token preflight must define maxInputTokens.');
+		}
+		if (countBody.input_tokens > prepared.maxInputTokens) {
+			return json(
+				failure(
+					prepared.clientRequestId,
+					now,
+					'context-too-large',
+					`所选字幕共 ${countBody.input_tokens} 个输入 token，超过此任务 ${prepared.maxInputTokens} 个的上限。`,
+					{ model: prepared.model }
+				),
+				{ status: 413, headers: noStoreHeaders() }
+			);
+		}
 	}
 
 	let upstream: Response;
@@ -304,7 +332,11 @@ export async function invokeSidecar({
 				...responseBody(prepared),
 				max_output_tokens: prepared.maxOutputTokens,
 				store: false,
-				stream: false
+				stream: false,
+				...(prepared.reasoningEffort ? { reasoning: { effort: prepared.reasoningEffort } } : {}),
+				...(prepared.structuredOutput === 'translation-pairs'
+					? { text: { format: TRANSLATION_PAIR_OUTPUT_SCHEMA } }
+					: {})
 			},
 			{ fetcher, apiKey, timeoutMs }
 		);
@@ -356,9 +388,35 @@ export async function invokeSidecar({
 
 	const responseId = stringField(body, 'id');
 	const model = stringField(body, 'model') ?? prepared.model;
-	const outputText = extractOutputText(body);
+	let outputText = extractOutputText(body);
 	const usage = extractUsage(body);
 	if (body.status === 'completed' && responseId) {
+		if (prepared.structuredOutput === 'translation-pairs') {
+			try {
+				outputText = JSON.stringify(
+					parseTranslationPairModelOutput(outputText, prepared.translationPairAtomIds)
+				);
+			} catch (error) {
+				const details = errorDetails(error);
+				console.error('[sidecar] translation pair output validation failed', {
+					clientRequestId: prepared.clientRequestId,
+					responseId,
+					requestId: upstreamRequestId,
+					error: details,
+					outputText: boundedResponseBody(outputText)
+				});
+				return json(
+					failure(
+						prepared.clientRequestId,
+						now,
+						'invalid-response',
+						`OpenAI 句段对照输出没有通过 atom 覆盖校验${requestIdSuffix(upstreamRequestId)}。\n原始错误：\n${details}\n原始模型输出：\n${boundedResponseBody(outputText)}`,
+						{ responseId, model, outputText: outputText || null, usage }
+					),
+					{ status: 502, headers: noStoreHeaders() }
+				);
+			}
+		}
 		console.info('[sidecar] request completed', {
 			clientRequestId: prepared.clientRequestId,
 			responseId,

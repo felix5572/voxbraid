@@ -8,8 +8,15 @@ import type {
 	TranscriptStreamSnapshot,
 	TranslationThread
 } from '../session/types';
+import type {
+	StoredTranslationPairBatch,
+	StoredTranslationPairProjection,
+	StoredTranslationPairSegment,
+	TranslationPairFailureAttempt
+} from '../projection/translation-pair-records';
+import type { ModelUsage, SidecarErrorCode, SidecarFailureDiagnostic } from '../sidecar/types';
 
-export const SESSION_ARCHIVE_VERSION = 1 as const;
+export const SESSION_ARCHIVE_VERSION = 2 as const;
 
 export interface SessionArchive {
 	schemaVersion: typeof SESSION_ARCHIVE_VERSION;
@@ -17,6 +24,7 @@ export interface SessionArchive {
 	thread: TranslationThread;
 	runs: CaptureRun[];
 	segments: TranscriptSegment[];
+	translationPairs: StoredTranslationPairProjection;
 }
 
 const RUN_STATUSES = new Set<CaptureRunStatus>([
@@ -38,6 +46,17 @@ const END_REASONS = new Set<CaptureRunEndReason>([
 	'startup-failed'
 ]);
 const ALIGNMENTS = new Set<SegmentAlignment>(['approximate', 'unpaired']);
+const SIDECAR_ERROR_CODES = new Set<SidecarErrorCode>([
+	'invalid-request',
+	'empty-context',
+	'context-too-large',
+	'browser-network-failed',
+	'invalid-response',
+	'budget-check-failed',
+	'request-timeout',
+	'upstream-failed',
+	'upstream-incomplete'
+]);
 
 function record(value: unknown, label: string): Record<string, unknown> {
 	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -88,9 +107,148 @@ function nonnegativeNumber(value: unknown, label: string): number {
 	return result;
 }
 
+function nullableNonnegativeNumber(value: unknown, label: string): number | null {
+	return value === null ? null : nonnegativeNumber(value, label);
+}
+
 function boolean(value: unknown, label: string): boolean {
 	if (typeof value !== 'boolean') throw new Error(`${label} must be a boolean.`);
 	return value;
+}
+
+function modelUsage(value: unknown, label: string): ModelUsage {
+	const input = record(value, label);
+	return {
+		inputTokens: nonnegativeNumber(input.inputTokens, `${label}.inputTokens`),
+		cachedInputTokens: nullableNonnegativeNumber(
+			input.cachedInputTokens,
+			`${label}.cachedInputTokens`
+		),
+		outputTokens: nonnegativeNumber(input.outputTokens, `${label}.outputTokens`),
+		reasoningTokens: nullableNonnegativeNumber(input.reasoningTokens, `${label}.reasoningTokens`),
+		totalTokens: nonnegativeNumber(input.totalTokens, `${label}.totalTokens`)
+	};
+}
+
+function failureDiagnostic(value: unknown, label: string): SidecarFailureDiagnostic | null {
+	if (value === null) return null;
+	const input = record(value, label);
+	return {
+		durationMs: nullableNonnegativeNumber(input.durationMs, `${label}.durationMs`),
+		visibilityState: nullableString(input.visibilityState, `${label}.visibilityState`),
+		online: input.online === null ? null : boolean(input.online, `${label}.online`),
+		requestBytes: nullableNonnegativeNumber(input.requestBytes, `${label}.requestBytes`),
+		httpStatus: nullableNonnegativeNumber(input.httpStatus, `${label}.httpStatus`)
+	};
+}
+
+function upstreamStatus(
+	value: unknown,
+	label: string
+): 'failed' | 'incomplete' | 'cancelled' | null {
+	if (value === null) return null;
+	const result = string(value, label);
+	if (result !== 'failed' && result !== 'incomplete' && result !== 'cancelled') {
+		throw new Error(`${label} is invalid.`);
+	}
+	return result;
+}
+
+function sidecarErrorCode(value: unknown, label: string): SidecarErrorCode | null {
+	if (value === null) return null;
+	const result = string(value, label) as SidecarErrorCode;
+	if (!SIDECAR_ERROR_CODES.has(result)) throw new Error(`${label} is invalid.`);
+	return result;
+}
+
+function failureAttempt(value: unknown, label: string): TranslationPairFailureAttempt {
+	const input = record(value, label);
+	return {
+		capturedAt: timestamp(input.capturedAt, `${label}.capturedAt`),
+		failedAt: timestamp(input.failedAt, `${label}.failedAt`),
+		clientRequestId: string(input.clientRequestId, `${label}.clientRequestId`),
+		responseId: nullableString(input.responseId, `${label}.responseId`),
+		model: nullableString(input.model, `${label}.model`),
+		upstreamStatus: upstreamStatus(input.upstreamStatus, `${label}.upstreamStatus`),
+		errorCode: sidecarErrorCode(input.errorCode, `${label}.errorCode`),
+		error: string(input.error, `${label}.error`),
+		diagnostic: failureDiagnostic(input.diagnostic, `${label}.diagnostic`)
+	};
+}
+
+function translationPairBatch(value: unknown, index: number): StoredTranslationPairBatch {
+	const label = `translationPairs.batches[${index}]`;
+	const input = record(value, label);
+	const status = string(input.status, `${label}.status`);
+	const projectionState = string(input.projectionState, `${label}.projectionState`);
+	const usageStatus = string(input.usageStatus, `${label}.usageStatus`);
+	if (status !== 'completed' && status !== 'failed') throw new Error(`${label}.status is invalid.`);
+	if (projectionState !== 'stable' && projectionState !== 'provisional') {
+		throw new Error(`${label}.projectionState is invalid.`);
+	}
+	if (usageStatus !== 'recorded' && usageStatus !== 'unavailable') {
+		throw new Error(`${label}.usageStatus is invalid.`);
+	}
+	if (!Array.isArray(input.failureAttempts)) {
+		throw new Error(`${label}.failureAttempts must be an array.`);
+	}
+	const usage = input.usage === null ? null : modelUsage(input.usage, `${label}.usage`);
+	if ((usageStatus === 'recorded') !== (usage !== null)) {
+		throw new Error(`${label}.usage does not match usageStatus.`);
+	}
+	return {
+		id: string(input.id, `${label}.id`),
+		threadId: string(input.threadId, `${label}.threadId`),
+		runId: string(input.runId, `${label}.runId`),
+		runSequence: positiveInteger(input.runSequence, `${label}.runSequence`),
+		sequence: positiveInteger(input.sequence, `${label}.sequence`),
+		revision: positiveInteger(input.revision, `${label}.revision`),
+		projectionState,
+		targetLanguage: string(input.targetLanguage, `${label}.targetLanguage`),
+		sourceStart: nonnegativeNumber(input.sourceStart, `${label}.sourceStart`),
+		sourceEnd: nonnegativeNumber(input.sourceEnd, `${label}.sourceEnd`),
+		sourceElapsedEndMs: nullableNonnegativeNumber(
+			input.sourceElapsedEndMs,
+			`${label}.sourceElapsedEndMs`
+		),
+		status,
+		capturedAt: timestamp(input.capturedAt, `${label}.capturedAt`),
+		completedAt: nullableTimestamp(input.completedAt, `${label}.completedAt`),
+		model: nullableString(input.model, `${label}.model`),
+		taskVersion: positiveInteger(input.taskVersion, `${label}.taskVersion`),
+		clientRequestId: string(input.clientRequestId, `${label}.clientRequestId`),
+		responseId: nullableString(input.responseId, `${label}.responseId`),
+		usageStatus,
+		usage,
+		upstreamStatus: upstreamStatus(input.upstreamStatus, `${label}.upstreamStatus`),
+		errorCode: sidecarErrorCode(input.errorCode, `${label}.errorCode`),
+		error: nullableString(input.error, `${label}.error`),
+		diagnostic: failureDiagnostic(input.diagnostic, `${label}.diagnostic`),
+		failureAttempts: input.failureAttempts.map((attempt, attemptIndex) =>
+			failureAttempt(attempt, `${label}.failureAttempts[${attemptIndex}]`)
+		),
+		updatedAt: timestamp(input.updatedAt, `${label}.updatedAt`)
+	};
+}
+
+function translationPairSegment(value: unknown, index: number): StoredTranslationPairSegment {
+	const label = `translationPairs.segments[${index}]`;
+	const input = record(value, label);
+	return {
+		id: string(input.id, `${label}.id`),
+		batchId: string(input.batchId, `${label}.batchId`),
+		batchRevision: positiveInteger(input.batchRevision, `${label}.batchRevision`),
+		threadId: string(input.threadId, `${label}.threadId`),
+		runId: string(input.runId, `${label}.runId`),
+		runSequence: positiveInteger(input.runSequence, `${label}.runSequence`),
+		sequence: positiveInteger(input.sequence, `${label}.sequence`),
+		sourceStart: nonnegativeNumber(input.sourceStart, `${label}.sourceStart`),
+		sourceEnd: nonnegativeNumber(input.sourceEnd, `${label}.sourceEnd`),
+		sourceText: string(input.sourceText, `${label}.sourceText`),
+		translatedText: string(input.translatedText, `${label}.translatedText`),
+		paragraphBreakBefore: boolean(input.paragraphBreakBefore, `${label}.paragraphBreakBefore`),
+		createdAt: timestamp(input.createdAt, `${label}.createdAt`)
+	};
 }
 
 function stream(value: unknown, label: string): TranscriptStreamSnapshot {
@@ -195,6 +353,24 @@ export function validateSessionArchive(archive: SessionArchive): SessionArchive 
 		'run IDs'
 	);
 	unique(
+		archive.translationPairs.batches.map((item) => item.id),
+		'translation pair batch IDs'
+	);
+	unique(
+		archive.translationPairs.batches.map((item) => `${item.runId}:${item.sequence}`),
+		'translation pair run sequences'
+	);
+	unique(
+		archive.translationPairs.segments.map((item) => item.id),
+		'translation pair segment IDs'
+	);
+	unique(
+		archive.translationPairs.segments.map(
+			(item) => `${item.batchId}:${item.batchRevision}:${item.sequence}`
+		),
+		'translation pair batch/revision sequences'
+	);
+	unique(
 		archive.runs.map((item) => String(item.sequence)),
 		'run sequences'
 	);
@@ -227,6 +403,51 @@ export function validateSessionArchive(archive: SessionArchive): SessionArchive 
 	for (const item of archive.segments) {
 		if (!runIds.has(item.runId)) throw new Error(`Segment ${item.id} points to a missing run.`);
 	}
+	const runsById = new Map(archive.runs.map((item) => [item.id, item]));
+	const batchesById = new Map(archive.translationPairs.batches.map((item) => [item.id, item]));
+	for (const batch of archive.translationPairs.batches) {
+		const parentRun = runsById.get(batch.runId);
+		if (
+			batch.threadId !== archive.thread.id ||
+			!parentRun ||
+			parentRun.sequence !== batch.runSequence ||
+			batch.sourceEnd <= batch.sourceStart ||
+			batch.sourceEnd > parentRun.sourceStream.text.length
+		) {
+			throw new Error(`Translation pair batch ${batch.id} does not match its run.`);
+		}
+		const batchSegments = archive.translationPairs.segments
+			.filter((segment) => segment.batchId === batch.id)
+			.sort((left, right) => left.sequence - right.sequence);
+		if ((batch.status === 'completed') !== batchSegments.length > 0) {
+			throw new Error(`Translation pair batch ${batch.id} status does not match its segments.`);
+		}
+		let expectedStart = batch.sourceStart;
+		for (const segment of batchSegments) {
+			if (
+				segment.batchRevision !== batch.revision ||
+				segment.threadId !== batch.threadId ||
+				segment.runId !== batch.runId ||
+				segment.runSequence !== batch.runSequence ||
+				segment.sourceStart !== expectedStart ||
+				segment.sourceEnd <= segment.sourceStart ||
+				segment.sourceText !==
+					parentRun.sourceStream.text.slice(segment.sourceStart, segment.sourceEnd) ||
+				!segment.translatedText.trim()
+			) {
+				throw new Error(`Translation pair segment ${segment.id} changed or misaligned facts.`);
+			}
+			expectedStart = segment.sourceEnd;
+		}
+		if (batchSegments.length > 0 && expectedStart !== batch.sourceEnd) {
+			throw new Error(`Translation pair batch ${batch.id} is not completely covered.`);
+		}
+	}
+	for (const segment of archive.translationPairs.segments) {
+		if (!batchesById.has(segment.batchId)) {
+			throw new Error(`Translation pair segment ${segment.id} points to a missing batch.`);
+		}
+	}
 	return structuredClone(archive);
 }
 
@@ -238,18 +459,32 @@ export function parseSessionArchive(value: string): SessionArchive {
 		throw new Error('Session archive is not valid JSON.', { cause: error });
 	}
 	const input = record(parsed, 'archive');
-	if (input.schemaVersion !== SESSION_ARCHIVE_VERSION) {
+	if (input.schemaVersion !== 1 && input.schemaVersion !== SESSION_ARCHIVE_VERSION) {
 		throw new Error(`Unsupported session archive version: ${String(input.schemaVersion)}.`);
 	}
 	if (!Array.isArray(input.runs)) throw new Error('archive.runs must be an array.');
 	if (!Array.isArray(input.segments)) throw new Error('archive.segments must be an array.');
+	const pairInput =
+		input.schemaVersion === 1
+			? { batches: [], segments: [] }
+			: record(input.translationPairs, 'archive.translationPairs');
+	if (!Array.isArray(pairInput.batches)) {
+		throw new Error('archive.translationPairs.batches must be an array.');
+	}
+	if (!Array.isArray(pairInput.segments)) {
+		throw new Error('archive.translationPairs.segments must be an array.');
+	}
 
 	return validateSessionArchive({
 		schemaVersion: SESSION_ARCHIVE_VERSION,
 		exportedAt: timestamp(input.exportedAt, 'archive.exportedAt'),
 		thread: thread(input.thread),
 		runs: input.runs.map(run),
-		segments: input.segments.map(segment)
+		segments: input.segments.map(segment),
+		translationPairs: {
+			batches: pairInput.batches.map(translationPairBatch),
+			segments: pairInput.segments.map(translationPairSegment)
+		}
 	});
 }
 

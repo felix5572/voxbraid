@@ -1,6 +1,38 @@
 import { describe, expect, it } from 'vitest';
 import { prepareSidecarCall, parseSidecarInvokeRequest } from './sidecar-tasks';
 
+function translationPairRequest() {
+	return {
+		clientRequestId: 'pair-request-1',
+		intent: {
+			kind: 'translate-pairs',
+			trigger: 'periodic',
+			targetLanguage: 'zh',
+			atoms: [
+				{ id: 'run-1:0:15', text: 'First sentence.' },
+				{ id: 'run-1:15:32', text: ' Second sentence.' }
+			],
+			continuity: [{ sourceText: 'Earlier.', translatedText: '此前。' }]
+		},
+		context: {
+			threadId: 'thread-1',
+			scope: 'latest-run',
+			capturedAt: '2026-09-02T10:00:00.000Z',
+			continuityText: '',
+			cleanedTranscript: '',
+			runs: [
+				{
+					runId: 'run-1',
+					sequence: 1,
+					targetLanguage: 'zh',
+					sourceText: 'First sentence. Second sentence.',
+					translationText: ''
+				}
+			]
+		}
+	};
+}
+
 function request(kind: 'ask' | 'summarize' | 'retranslate') {
 	return {
 		clientRequestId: 'request-1',
@@ -36,6 +68,66 @@ function request(kind: 'ask' | 'summarize' | 'retranslate') {
 }
 
 describe('sidecar task preparation', () => {
+	it('prepares bounded Luna structured output without an input-token preflight', () => {
+		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(translationPairRequest()));
+
+		expect(prepared).toMatchObject({
+			kind: 'translate-pairs',
+			model: 'gpt-5.6-luna',
+			taskVersion: 1,
+			inputTokenPreflight: 'skip-bounded',
+			maxPreparedInputBytes: 32_000,
+			reasoningEffort: 'none',
+			structuredOutput: 'translation-pairs',
+			translationPairAtomIds: ['run-1:0:15', 'run-1:15:32']
+		});
+		expect(prepared.inputText).toContain('currentAtoms');
+		expect(prepared.inputText).toContain('Earlier.');
+		expect(prepared.inputText).not.toContain('realtimeTranslation');
+		expect(prepared.instructions).toContain('exactly once');
+	});
+
+	it('rejects mismatched or over-sized translation pair input before OpenAI', () => {
+		const mismatch = translationPairRequest();
+		mismatch.context.runs[0].sourceText = 'different source';
+		expect(() => prepareSidecarCall(parseSidecarInvokeRequest(mismatch))).toThrow(
+			'atom 文本或目标语言与 Run 事实切片不一致'
+		);
+
+		const oversized = translationPairRequest();
+		oversized.intent.atoms = [{ id: 'run-1:0:1601', text: 'x'.repeat(1_601) }];
+		oversized.context.runs[0].sourceText = 'x'.repeat(1_601);
+		expect(() => parseSidecarInvokeRequest(oversized)).toThrow('超过 1600 字符上限');
+	});
+
+	it('rejects atom IDs that do not form one exact run-local character range', () => {
+		const wrongRun = translationPairRequest();
+		wrongRun.intent.atoms[0].id = 'run-other:0:15';
+		expect(() => prepareSidecarCall(parseSidecarInvokeRequest(wrongRun))).toThrow(
+			'atom ID、字符范围或连续顺序无效'
+		);
+
+		const gap = translationPairRequest();
+		gap.intent.atoms[1].id = 'run-1:16:33';
+		expect(() => prepareSidecarCall(parseSidecarInvokeRequest(gap))).toThrow(
+			'atom ID、字符范围或连续顺序无效'
+		);
+	});
+
+	it('keeps a maximum bounded pair input comfortably below the static byte limit', () => {
+		const value = translationPairRequest();
+		const source = '原'.repeat(1_600);
+		value.intent.atoms = [{ id: 'run-1:0:1600', text: source }];
+		value.intent.continuity = [{ sourceText: '前'.repeat(750), translatedText: '译'.repeat(750) }];
+		value.context.runs[0].sourceText = source;
+		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
+		const bytes = new TextEncoder().encode(
+			JSON.stringify({ instructions: prepared.instructions, input: prepared.inputText })
+		).byteLength;
+
+		expect(bytes).toBeLessThanOrEqual(32_000);
+	});
+
 	it('keeps both transcript channels for summaries and questions', () => {
 		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(request('summarize')));
 

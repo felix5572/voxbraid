@@ -233,7 +233,7 @@ type ProjectionLane = 'interactive' | 'background-clean' | 'background-pairs';
 function canStartProjection(lane: ProjectionLane, inFlight: ReadonlySet<ProjectionLane>): boolean;
 ```
 
-每条车道最多一个请求在飞；`interactive` 有请求时两个 background 车道不启动新请求。已经在飞的 background 请求不被取消，完成后才让交互任务优先。车道规则是纯函数并单元测试，面板不自行复制优先级判断。
+每条车道最多一个请求在飞；交互请求可以在已有 background 请求执行期间立即发起，避免输入框随后台批次反复禁用。`interactive` 有请求时两个 background 车道不启动新请求；已经在飞的 background 请求不被取消。车道规则是纯函数并单元测试，面板不自行复制优先级判断。
 
 句段对照使用 `background-pairs` 单并发 worker。约束如下：
 

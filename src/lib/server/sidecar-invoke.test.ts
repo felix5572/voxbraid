@@ -54,6 +54,139 @@ function jsonResponse(body: unknown, status = 200, requestId?: string): Response
 afterEach(() => vi.restoreAllMocks());
 
 describe('invokeSidecar', () => {
+	it('generates and validates translation pairs with one bounded Responses call', async () => {
+		const fetcher = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+			async () =>
+				jsonResponse({
+					id: 'resp-pair-1',
+					model: 'gpt-5.6-luna',
+					status: 'completed',
+					output_text: JSON.stringify({
+						groups: [
+							{
+								atomIds: ['run-1:0:15', 'run-1:15:32'],
+								translatedText: '第一句和第二句。',
+								paragraphBreakBefore: false
+							}
+						]
+					}),
+					usage: { input_tokens: 80, output_tokens: 20, total_tokens: 100 }
+				})
+		);
+		const response = await invokeSidecar({
+			request: rawRequest({
+				clientRequestId: 'pair-request-1',
+				intent: {
+					kind: 'translate-pairs',
+					trigger: 'periodic',
+					targetLanguage: 'zh',
+					atoms: [
+						{ id: 'run-1:0:15', text: 'First sentence.' },
+						{ id: 'run-1:15:32', text: ' Second sentence.' }
+					],
+					continuity: []
+				},
+				context: {
+					threadId: 'thread-1',
+					scope: 'latest-run',
+					capturedAt: NOW,
+					continuityText: '',
+					cleanedTranscript: '',
+					runs: [
+						{
+							runId: 'run-1',
+							sequence: 1,
+							targetLanguage: 'zh',
+							sourceText: 'First sentence. Second sentence.',
+							translationText: ''
+						}
+					]
+				}
+			}),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW
+		});
+
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		expect(String(fetcher.mock.calls[0]?.[0])).toContain('/v1/responses');
+		const body = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
+		expect(body).toMatchObject({
+			model: 'gpt-5.6-luna',
+			reasoning: { effort: 'none' },
+			text: { format: { type: 'json_schema', name: 'translation_pair_batch', strict: true } }
+		});
+		expect(await result(response)).toMatchObject({
+			status: 'completed',
+			outputText: JSON.stringify({
+				groups: [
+					{
+						atomIds: ['run-1:0:15', 'run-1:15:32'],
+						translatedText: '第一句和第二句。',
+						paragraphBreakBefore: false
+					}
+				]
+			})
+		});
+	});
+
+	it('rejects completed translation pair output with invalid atom coverage', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const fetcher = vi.fn(async () =>
+			jsonResponse({
+				id: 'resp-pair-invalid',
+				model: 'gpt-5.6-luna',
+				status: 'completed',
+				output_text: JSON.stringify({
+					groups: [
+						{
+							atomIds: ['unknown'],
+							translatedText: '错误覆盖。',
+							paragraphBreakBefore: false
+						}
+					]
+				})
+			})
+		);
+		const body = {
+			clientRequestId: 'pair-request-2',
+			intent: {
+				kind: 'translate-pairs',
+				trigger: 'periodic',
+				targetLanguage: 'zh',
+				atoms: [{ id: 'run-1:0:15', text: 'First sentence.' }],
+				continuity: []
+			},
+			context: {
+				threadId: 'thread-1',
+				scope: 'latest-run',
+				capturedAt: NOW,
+				runs: [
+					{
+						runId: 'run-1',
+						sequence: 1,
+						targetLanguage: 'zh',
+						sourceText: 'First sentence.',
+						translationText: ''
+					}
+				]
+			}
+		};
+		const response = await invokeSidecar({
+			request: rawRequest(body),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW
+		});
+		const failure = await result(response);
+
+		expect(response.status).toBe(502);
+		expect(failure).toMatchObject({ status: 'failed', error: { code: 'invalid-response' } });
+		if (failure.status !== 'failed') throw new Error('Expected failed pair response.');
+		expect(failure.error.message).toContain('atom 覆盖校验');
+		expect(failure.error.message).toContain('unknown');
+	});
+
 	it('rejects invalid requests before calling OpenAI', async () => {
 		const fetcher = vi.fn();
 		const invalidBody = (await request().json()) as Record<string, unknown>;

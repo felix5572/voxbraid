@@ -1,6 +1,8 @@
 <script lang="ts">
-	import { SvelteMap } from 'svelte/reactivity';
+	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
+	import { canStartProjection, type ProjectionLane } from '../projection/projection-lanes';
+	import TranslationPairPanel from '../projection/TranslationPairPanel.svelte';
 	import type { TranslationSessionState } from '../session/translation-session';
 	import AutoSummaryPanel from './AutoSummaryPanel.svelte';
 	import ConversationPanel from './ConversationPanel.svelte';
@@ -15,6 +17,7 @@
 	let { session, outputLanguage, repository, disabled = false }: Props = $props();
 	let summaryRequesting = $state(false);
 	let conversationRequesting = $state(false);
+	let pairRequesting = $state(false);
 	const cleanedTranscripts = new SvelteMap<string, string>();
 	let cleanContextThreadId = $state<string | null>(null);
 	const currentCleanedTranscript = $derived(
@@ -23,6 +26,13 @@
 	const cleanContextReady = $derived(
 		Boolean(session && cleanContextThreadId === session.thread.id)
 	);
+	const inFlightLanes = $derived.by(() => {
+		const lanes = new SvelteSet<ProjectionLane>();
+		if (conversationRequesting) lanes.add('interactive');
+		if (summaryRequesting) lanes.add('background-clean');
+		if (pairRequesting) lanes.add('background-pairs');
+		return lanes;
+	});
 
 	function handleCleanTranscriptChange(threadId: string, text: string): void {
 		cleanedTranscripts.set(threadId, text);
@@ -43,11 +53,17 @@
 	</header>
 
 	<div class="workspace-stack">
+		<TranslationPairPanel
+			{session}
+			{repository}
+			disabled={disabled || !canStartProjection('background-pairs', inFlightLanes)}
+			onRequestingChange={(value) => (pairRequesting = value)}
+		/>
 		<AutoSummaryPanel
 			{session}
 			{outputLanguage}
 			{repository}
-			disabled={disabled || conversationRequesting}
+			disabled={disabled || !canStartProjection('background-clean', inFlightLanes)}
 			onRequestingChange={(value) => (summaryRequesting = value)}
 			onCleanTranscriptChange={handleCleanTranscriptChange}
 			onCleanContextLoaded={handleCleanContextLoaded}
@@ -56,7 +72,7 @@
 			{session}
 			{outputLanguage}
 			cleanedTranscript={currentCleanedTranscript}
-			disabled={disabled || summaryRequesting || !cleanContextReady}
+			disabled={disabled || !canStartProjection('interactive', inFlightLanes) || !cleanContextReady}
 			onRequestingChange={(value) => (conversationRequesting = value)}
 		/>
 	</div>

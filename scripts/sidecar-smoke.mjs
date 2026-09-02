@@ -59,6 +59,23 @@ try {
 			kind: 'retranslate',
 			expectedModel: 'gpt-5.6-luna',
 			intent: { kind: 'retranslate', trigger: 'manual', targetLanguage: '中文 (zh)' }
+		},
+		{
+			kind: 'translate-pairs',
+			expectedModel: 'gpt-5.6-luna',
+			intent: {
+				kind: 'translate-pairs',
+				trigger: 'manual',
+				targetLanguage: 'zh',
+				atoms: [
+					{ id: 'paid-smoke-run:0:34', text: 'The speaker visited a public park.' },
+					{
+						id: 'paid-smoke-run:34:97',
+						text: ' They walked beside a lake and took the train home after lunch.'
+					}
+				],
+				continuity: []
+			}
 		}
 	];
 
@@ -82,7 +99,9 @@ try {
 							sequence: 1,
 							targetLanguage: 'zh',
 							sourceText:
-								'The speaker visited a public park, walked beside a lake, and took the train home after lunch.',
+								testCase.kind === 'translate-pairs'
+									? testCase.intent.atoms.map((atom) => atom.text).join('')
+									: 'The speaker visited a public park, walked beside a lake, and took the train home after lunch.',
 							translationText: '讲者去了公园，在湖边散步，午饭后乘火车回家。'
 						}
 					]
@@ -99,6 +118,13 @@ try {
 		assert.equal(typeof body.responseId, 'string');
 		assert.equal(body.model, testCase.expectedModel);
 		assert.ok(body.outputText?.trim(), `${testCase.kind} 没有返回文本。`);
+		if (testCase.kind === 'translate-pairs') {
+			const output = JSON.parse(body.outputText);
+			assert.deepEqual(
+				output.groups.flatMap((group) => group.atomIds),
+				testCase.intent.atoms.map((atom) => atom.id)
+			);
+		}
 		assert.ok(
 			(body.usageStatus === 'recorded' && body.usage?.totalTokens >= 0) ||
 				(body.usageStatus === 'unavailable' && body.usage === null),

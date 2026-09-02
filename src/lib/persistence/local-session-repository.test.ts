@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
 import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
+import type {
+	StoredTranslationPairBatch,
+	StoredTranslationPairSegment
+} from '../projection/translation-pair-records';
 import { VoxBraidLocalDatabase } from './local-session-database';
 import { LocalSessionRepository } from './local-session-repository';
 
@@ -57,6 +61,62 @@ function createCleanBlock(
 		usage: null,
 		error: null,
 		updatedAt: CHECKPOINT,
+		...overrides
+	};
+}
+
+function createTranslationPairBatch(
+	overrides: Partial<StoredTranslationPairBatch> = {}
+): StoredTranslationPairBatch {
+	return {
+		id: 'pair-batch-1',
+		threadId: 'thread-1',
+		runId: 'run-1',
+		runSequence: 1,
+		sequence: 1,
+		revision: 1,
+		projectionState: 'stable',
+		targetLanguage: 'zh',
+		sourceStart: 0,
+		sourceEnd: 20,
+		sourceElapsedEndMs: 4_000,
+		status: 'completed',
+		capturedAt: '2026-09-01T00:00:09.000Z',
+		completedAt: CHECKPOINT,
+		model: 'gpt-5.6-luna',
+		taskVersion: 1,
+		clientRequestId: 'pair-request-1',
+		responseId: 'pair-response-1',
+		usageStatus: 'unavailable',
+		usage: null,
+		upstreamStatus: null,
+		errorCode: null,
+		error: null,
+		diagnostic: null,
+		failureAttempts: [],
+		updatedAt: CHECKPOINT,
+		...overrides
+	};
+}
+
+function createTranslationPairSegment(
+	overrides: Partial<StoredTranslationPairSegment> = {}
+): StoredTranslationPairSegment {
+	const sourceText = createRun().sourceStream.text.slice(0, 20);
+	return {
+		id: 'pair-segment-1',
+		batchId: 'pair-batch-1',
+		batchRevision: 1,
+		threadId: 'thread-1',
+		runId: 'run-1',
+		runSequence: 1,
+		sequence: 1,
+		sourceStart: 0,
+		sourceEnd: 20,
+		sourceText,
+		translatedText: '完整原文片段的译文。',
+		paragraphBreakBefore: false,
+		createdAt: CHECKPOINT,
 		...overrides
 	};
 }
@@ -158,6 +218,8 @@ describe('LocalSessionRepository', () => {
 			expect(await upgraded.threads.get(thread.id)).toMatchObject(thread);
 			expect(await upgraded.autoSummaries.toArray()).toEqual([]);
 			expect(await upgraded.cleanTranscriptBlocks.toArray()).toEqual([]);
+			expect(await upgraded.translationPairBatches.toArray()).toEqual([]);
+			expect(await upgraded.translationPairSegments.toArray()).toEqual([]);
 		} finally {
 			await upgraded.delete();
 		}
@@ -182,6 +244,35 @@ describe('LocalSessionRepository', () => {
 			await upgraded.open();
 			expect(await upgraded.autoSummaries.get('thread-1')).toEqual(createAutoSummary());
 			expect(await upgraded.cleanTranscriptBlocks.toArray()).toEqual([]);
+		} finally {
+			await upgraded.delete();
+		}
+	});
+
+	it('upgrades version 3 cleanup data and initializes empty translation pair stores', async () => {
+		const name = `voxbraid-v3-upgrade-test-${crypto.randomUUID()}`;
+		const legacy = new Dexie(name);
+		legacy.version(1).stores({
+			threads: '&id,status,updatedAt',
+			runs: '&id,threadId,status,&[threadId+sequence],[threadId+status]',
+			segments: '&id,runId,[runId+revision],&[runId+revision+sequence]'
+		});
+		legacy.version(2).stores({ autoSummaries: '&threadId,updatedAt' });
+		legacy.version(3).stores({
+			cleanTranscriptBlocks: '&id,threadId,runId,status,updatedAt,&[threadId+sequence]'
+		});
+		await legacy.open();
+		await legacy.table('threads').put({ ...createThread(), checkpointedAt: CHECKPOINT });
+		await legacy.table('runs').put({ ...createRun(), checkpointedAt: CHECKPOINT });
+		await legacy.table('cleanTranscriptBlocks').put(createCleanBlock());
+		legacy.close();
+
+		const upgraded = new VoxBraidLocalDatabase(name);
+		try {
+			await upgraded.open();
+			expect(await upgraded.cleanTranscriptBlocks.get('clean-block-1')).toEqual(createCleanBlock());
+			expect(await upgraded.translationPairBatches.toArray()).toEqual([]);
+			expect(await upgraded.translationPairSegments.toArray()).toEqual([]);
 		} finally {
 			await upgraded.delete();
 		}
@@ -221,6 +312,47 @@ describe('LocalSessionRepository', () => {
 			'thread-2',
 			'thread-1'
 		]);
+	});
+
+	it('never lets a stale checkpoint shorten facts extended by a projection write', async () => {
+		const thread = createThread();
+		const completeRun = createRun();
+		const shortRun = createRun('run-1', 1, {
+			sourceStream: {
+				...completeRun.sourceStream,
+				text: completeRun.sourceStream.text.slice(0, 20)
+			},
+			translationStream: {
+				...completeRun.translationStream,
+				text: completeRun.translationStream.text.slice(0, 8)
+			}
+		});
+		await repository.saveCheckpoint({ thread, run: shortRun, checkpointedAt: CHECKPOINT });
+		await repository.saveTranslationPairBatch({
+			batch: createTranslationPairBatch(),
+			segments: [createTranslationPairSegment()],
+			facts: { thread, run: completeRun, checkpointedAt: CHECKPOINT }
+		});
+
+		await repository.saveCheckpoint({
+			thread,
+			run: shortRun,
+			checkpointedAt: '2026-09-01T00:00:11.000Z'
+		});
+		expect((await repository.loadThread(thread.id))?.runs[0]).toMatchObject({
+			sourceStream: { text: completeRun.sourceStream.text },
+			translationStream: { text: completeRun.translationStream.text }
+		});
+
+		await expect(
+			repository.saveCheckpoint({
+				thread,
+				run: createRun('run-1', 1, {
+					sourceStream: { ...completeRun.sourceStream, text: 'different non-prefix facts' }
+				}),
+				checkpointedAt: '2026-09-01T00:00:12.000Z'
+			})
+		).rejects.toThrow('not append-only');
 	});
 
 	it('rolls back the thread update when a run sequence constraint fails', async () => {
@@ -304,6 +436,108 @@ describe('LocalSessionRepository', () => {
 		await expect(repository.saveCleanTranscriptBlock(createCleanBlock())).rejects.toThrow(
 			'Run not found'
 		);
+	});
+
+	it('atomically stores a validated translation pair batch and replaces its revision', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({ thread, run: createRun(), checkpointedAt: CHECKPOINT });
+		const firstBatch = createTranslationPairBatch();
+		const firstSegment = createTranslationPairSegment();
+		await repository.saveTranslationPairBatch({
+			batch: firstBatch,
+			segments: [firstSegment]
+		});
+		await expect(repository.loadTranslationPairProjection(thread.id)).resolves.toEqual({
+			batches: [firstBatch],
+			segments: [firstSegment]
+		});
+
+		const secondBatch = createTranslationPairBatch({ revision: 2, projectionState: 'stable' });
+		const secondSegment = createTranslationPairSegment({
+			id: 'pair-segment-revision-2',
+			batchRevision: 2,
+			translatedText: '第二版译文。'
+		});
+		await repository.saveTranslationPairBatch({
+			batch: secondBatch,
+			segments: [secondSegment]
+		});
+		await expect(repository.loadTranslationPairProjection(thread.id)).resolves.toEqual({
+			batches: [secondBatch],
+			segments: [secondSegment]
+		});
+	});
+
+	it('persists the minimum captured facts when a pair completes before the first checkpoint', async () => {
+		const thread = createThread();
+		const run = createRun();
+		const batch = createTranslationPairBatch();
+		const segment = createTranslationPairSegment();
+
+		await repository.saveTranslationPairBatch({
+			batch,
+			segments: [segment],
+			facts: { thread, run, checkpointedAt: CHECKPOINT }
+		});
+
+		await expect(repository.loadThread(thread.id)).resolves.toEqual({
+			thread,
+			runs: [run],
+			segments: []
+		});
+		await expect(repository.loadTranslationPairProjection(thread.id)).resolves.toEqual({
+			batches: [batch],
+			segments: [segment]
+		});
+	});
+
+	it('preserves source facts and rolls back a malformed translation pair replacement', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({ thread, run: createRun(), checkpointedAt: CHECKPOINT });
+		const batch = createTranslationPairBatch();
+		const segment = createTranslationPairSegment();
+		await repository.saveTranslationPairBatch({ batch, segments: [segment] });
+
+		await expect(
+			repository.saveTranslationPairBatch({
+				batch: { ...batch, revision: 2 },
+				segments: [
+					{
+						...segment,
+						id: 'bad-segment',
+						batchRevision: 2,
+						sourceText: 'model changed the facts'
+					}
+				]
+			})
+		).rejects.toThrow('changed source facts');
+		await expect(repository.loadTranslationPairProjection(thread.id)).resolves.toEqual({
+			batches: [batch],
+			segments: [segment]
+		});
+	});
+
+	it('stores a failed pair batch as an empty range placeholder and clears the projection', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({ thread, run: createRun(), checkpointedAt: CHECKPOINT });
+		const failed = createTranslationPairBatch({
+			status: 'failed',
+			completedAt: null,
+			responseId: null,
+			errorCode: 'upstream-failed',
+			error: 'upstream-failed: temporary failure'
+		});
+		await repository.saveTranslationPairBatch({ batch: failed, segments: [] });
+		await expect(repository.loadTranslationPairProjection(thread.id)).resolves.toEqual({
+			batches: [failed],
+			segments: []
+		});
+
+		await repository.clearTranslationPairProjection(thread.id);
+		await expect(repository.loadTranslationPairProjection(thread.id)).resolves.toEqual({
+			batches: [],
+			segments: []
+		});
 	});
 
 	it('atomically switches revisions while preserving older projections', async () => {
@@ -408,6 +642,12 @@ describe('LocalSessionRepository', () => {
 			segments: [createSegment('segment-1', 1, 1)],
 			checkpointedAt: CHECKPOINT
 		});
+		const pairBatch = createTranslationPairBatch();
+		const pairSegment = createTranslationPairSegment();
+		await repository.saveTranslationPairBatch({
+			batch: pairBatch,
+			segments: [pairSegment]
+		});
 		const exported = await repository.exportThread(thread.id, '2026-09-01T00:02:00.000Z');
 
 		const importedDatabase = new VoxBraidLocalDatabase(
@@ -422,6 +662,10 @@ describe('LocalSessionRepository', () => {
 				thread,
 				runs: [run],
 				segments: [createSegment('segment-1', 1, 1)]
+			});
+			await expect(importedRepository.loadTranslationPairProjection(thread.id)).resolves.toEqual({
+				batches: [pairBatch],
+				segments: [pairSegment]
 			});
 			expect(exported).not.toContain('checkpointedAt');
 		} finally {
@@ -442,17 +686,35 @@ describe('LocalSessionRepository', () => {
 			schemaVersion: number;
 			runs: Array<{ threadId: string }>;
 		};
-		exported.schemaVersion = 2;
+		exported.schemaVersion = 3;
 		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
 			'Unsupported session archive version'
 		);
-		exported.schemaVersion = 1;
+		exported.schemaVersion = 2;
 		exported.runs[0].threadId = 'thread-elsewhere';
 		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
 			'does not belong'
 		);
 		await expect(repository.loadThread(thread.id)).resolves.toMatchObject({
 			runs: [{ id: 'run-1' }]
+		});
+	});
+
+	it('imports a version 1 archive with an empty translation pair projection', async () => {
+		const legacy = {
+			schemaVersion: 1,
+			exportedAt: CHECKPOINT,
+			thread: createThread(),
+			runs: [createRun()],
+			segments: []
+		};
+
+		await expect(repository.importThread(JSON.stringify(legacy), CHECKPOINT)).resolves.toBe(
+			'thread-1'
+		);
+		await expect(repository.loadTranslationPairProjection('thread-1')).resolves.toEqual({
+			batches: [],
+			segments: []
 		});
 	});
 });

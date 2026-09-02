@@ -153,7 +153,12 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		const body = route.request().postDataJSON();
 		sidecarRequests.push(body);
 		const delayMs =
-			body.intent.kind === 'ask' && body.intent.question === 'Hold across thread switch' ? 500 : 25;
+			body.intent.kind === 'ask' && body.intent.question === 'Hold across thread switch'
+				? 500
+				: body.intent.kind === 'translate-pairs' &&
+					  body.intent.atoms?.some((atom) => atom.text.includes('[HOLD_PAIR]'))
+					? 600
+					: 25;
 		await new Promise((resolve) => setTimeout(resolve, delayMs));
 		if (
 			body.intent.kind === 'summarize' &&
@@ -182,10 +187,22 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 			(request) => request.intent.kind === 'summarize'
 		).length;
 		const askNumber = sidecarRequests.filter((request) => request.intent.kind === 'ask').length;
+		const pairNumber = sidecarRequests.filter(
+			(request) => request.intent.kind === 'translate-pairs'
+		).length;
 		const outputs = {
 			summarize: `课堂清稿第${cleanBlockNumber}块`,
 			retranslate: '自动重译结果',
-			ask: askNumber === 1 ? '自动问答结果' : '自动追问结果'
+			ask: askNumber === 1 ? '自动问答结果' : '自动追问结果',
+			'translate-pairs': JSON.stringify({
+				groups: [
+					{
+						atomIds: body.intent.atoms?.map((atom) => atom.id) ?? [],
+						translatedText: `独立句段译文 ${pairNumber}`,
+						paragraphBreakBefore: pairNumber > 1
+					}
+				]
+			})
 		};
 		await route.fulfill({
 			contentType: 'application/json',
@@ -254,6 +271,90 @@ async function testCleanTranscriptContinuesAfterFailure(browser, baseUrl) {
 			'重试成功后保留第一次失败诊断'
 		);
 		assert.equal(retried.failureAttempts[0].errorCode, 'upstream-failed');
+		await waitForRecord(
+			page,
+			'translationPairBatches',
+			(record) => record.status === 'completed' && record.sourceEnd === source.length,
+			'长原文的句段对照队列追平'
+		);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
+async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		const source = '[HOLD_PAIR] The background sentence pair request is deliberately slow.';
+		await emitPair(page, source, '后台句段请求被故意放慢。');
+		await waitForSidecarRequest(
+			page,
+			sidecarRequests,
+			(request) =>
+				request.intent.kind === 'translate-pairs' &&
+				request.intent.atoms.some((atom) => atom.text.includes('[HOLD_PAIR]')),
+			'在飞的句段对照请求'
+		);
+		const question = page.getByLabel('字幕问题', { exact: true });
+		assert.equal(await question.isEnabled(), true);
+		await question.fill('Can I ask while sentence pairs are still running?');
+		await page.getByRole('button', { name: '提问', exact: true }).click();
+		await waitForSidecarRequest(
+			page,
+			sidecarRequests,
+			(request) =>
+				request.intent.kind === 'ask' &&
+				request.intent.question === 'Can I ask while sentence pairs are still running?',
+			'后台句段生成期间的交互请求'
+		);
+		await page.getByText(/自动(?:问答|追问)结果/u).waitFor();
+		await stopCapture(page);
+		await waitForPairCoverage(page, source.length);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
+async function testProvisionalPairRevision(browser, baseUrl) {
+	const { browserErrors, context, page } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		const partial = 'word '.repeat(160);
+		await emitPair(page, partial, '暂定译文。');
+		const provisional = await waitForRecord(
+			page,
+			'translationPairBatches',
+			(record) =>
+				record.status === 'completed' &&
+				record.projectionState === 'provisional' &&
+				record.sourceEnd === partial.length,
+			'无标点硬边界生成暂定句段'
+		);
+
+		const ending = 'finishes.';
+		await emitPair(page, ending, '完成。');
+		const stable = await waitForRecord(
+			page,
+			'translationPairBatches',
+			(record) =>
+				record.id === provisional.id &&
+				record.revision === 2 &&
+				record.projectionState === 'stable' &&
+				record.sourceEnd === partial.length + ending.length,
+			'真实句末到达后原位替换暂定句段'
+		);
+		const storedSegments = (await readStore(page, 'translationPairSegments')).filter(
+			(record) => record.batchId === stable.id
+		);
+		assert.equal(storedSegments.length, 1);
+		assert.equal(storedSegments[0].batchRevision, 2);
+		assert.equal(storedSegments[0].sourceText, partial + ending);
+		await stopCapture(page);
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -293,8 +394,17 @@ async function stopCapture(page) {
 	await page.getByRole('button', { name: '开始翻译' }).waitFor();
 }
 
+async function waitForPairCoverage(page, sourceLength, label = '句段对照追平原文') {
+	return waitForRecord(
+		page,
+		'translationPairBatches',
+		(record) => record.status === 'completed' && record.sourceEnd === sourceLength,
+		label
+	);
+}
+
 function mainText(page, text) {
-	return page.getByRole('main').getByText(text, { exact: true });
+	return page.locator('.captions').getByText(text, { exact: true });
 }
 
 async function testPauseResumeAndNewThread(browser, baseUrl) {
@@ -349,12 +459,37 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 			'第一次暂停后的 Run 保存'
 		);
 		assert.equal(firstRun.endReason, 'user-paused');
+		const firstPairBatch = await waitForRecord(
+			page,
+			'translationPairBatches',
+			(record) => record.threadId === firstRun.threadId && record.status === 'completed',
+			'首个句段对照批次保存'
+		);
+		const firstPairSegment = await waitForRecord(
+			page,
+			'translationPairSegments',
+			(record) => record.batchId === firstPairBatch.id,
+			'首个句段对照结果原子保存'
+		);
+		assert.equal(firstPairSegment.sourceText, firstSource.slice(0, firstPairBatch.sourceEnd));
+		assert.match(firstPairSegment.translatedText, /^独立句段译文 \d+$/);
+		await waitForRecord(
+			page,
+			'translationPairBatches',
+			(record) =>
+				record.threadId === firstRun.threadId &&
+				record.runId === firstRun.id &&
+				record.status === 'completed' &&
+				record.sourceEnd === firstSource.length,
+			'暂停后句段对照追平完整原文'
+		);
 		await page.getByRole('button', { name: new RegExp(firstTitle) }).waitFor();
 
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
 		await page.getByRole('button', { name: new RegExp(firstTitle) }).waitFor();
 		await mainText(page, firstSource).waitFor();
+		await page.getByText(firstPairSegment.translatedText, { exact: true }).waitFor();
 		await page.getByText(firstTranslation.slice(0, 1).repeat(3), { exact: true }).waitFor();
 		assert.equal(await page.getByLabel('目标语言', { exact: true }).inputValue(), 'ja');
 
@@ -363,11 +498,20 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await startCapture(page);
 		await emitPair(page, secondSource, secondTranslation);
 		await stopCapture(page);
-		await waitForRecord(
+		const secondRun = await waitForRecord(
 			page,
 			'runs',
 			(record) => record.sourceStream.text.includes(secondSource) && record.sequence === 2,
 			'继续收音后的第二个 Run 保存'
+		);
+		await waitForRecord(
+			page,
+			'translationPairBatches',
+			(record) =>
+				record.runId === secondRun.id &&
+				record.status === 'completed' &&
+				record.sourceEnd === secondSource.length,
+			'刷新前第二段句段对照追平'
 		);
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
@@ -378,13 +522,15 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await summarize.click();
 		assert.equal(await summarize.isDisabled(), true);
 		await page.getByText('课堂清稿第2块', { exact: true }).waitFor();
-		assert.equal(sidecarRequests.length, 2);
-		assert.equal(sidecarRequests[0].intent.kind, 'summarize');
-		assert.equal(sidecarRequests[0].context.scope, 'latest-run');
-		assert.equal(sidecarRequests[0].context.runs.length, 1);
-		assert.equal(sidecarRequests[0].context.runs[0].sourceText, firstSource);
-		assert.equal(sidecarRequests[1].context.runs[0].sourceText, secondSource);
-		assert.equal(sidecarRequests[1].context.continuityText, '课堂清稿第1块');
+		const summaryRequests = sidecarRequests.filter(
+			(request) => request.intent.kind === 'summarize'
+		);
+		assert.equal(summaryRequests.length, 2);
+		assert.equal(summaryRequests[0].context.scope, 'latest-run');
+		assert.equal(summaryRequests[0].context.runs.length, 1);
+		assert.equal(summaryRequests[0].context.runs[0].sourceText, firstSource);
+		assert.equal(summaryRequests[1].context.runs[0].sourceText, secondSource);
+		assert.equal(summaryRequests[1].context.continuityText, '课堂清稿第1块');
 		await waitForRecord(
 			page,
 			'cleanTranscriptBlocks',
@@ -500,6 +646,10 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 
 		await firstThreadButton.click();
 		await page.getByText('What was captured?', { exact: true }).waitFor();
+		await page.waitForFunction(() => {
+			const input = document.querySelector('textarea[aria-label="字幕问题"]');
+			return input instanceof HTMLTextAreaElement && !input.disabled;
+		});
 		await page.getByLabel('字幕问题', { exact: true }).fill('Hold across thread switch');
 		await page.getByRole('button', { name: '提问', exact: true }).click();
 		await waitForSidecarRequest(
@@ -556,6 +706,10 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await sessionMenu.click();
 		await firstThreadButton.click();
 		await mainText(page, firstSource).waitFor();
+		await page.waitForFunction(() => {
+			const input = document.querySelector('textarea[aria-label="字幕问题"]');
+			return input instanceof HTMLTextAreaElement && !input.disabled;
+		});
 		assert.equal(await firstThreadButton.getAttribute('aria-current'), 'page');
 		assert.deepEqual(browserErrors, []);
 	} finally {
@@ -586,6 +740,11 @@ async function testPeriodicAndPageHideCheckpoints(browser, baseUrl) {
 			(record) => record.sourceStream.text.includes(periodicSource),
 			'10 秒周期 checkpoint',
 			12_000
+		);
+		await waitForPairCoverage(
+			page,
+			immediateSource.length + periodicSource.length,
+			'pagehide 场景句段对照追平'
 		);
 
 		await page.reload({ waitUntil: 'networkidle' });
@@ -641,6 +800,11 @@ async function testDegradeAndRecover(browser, baseUrl) {
 			'连接恢复后的字幕保存'
 		);
 		await page.waitForFunction(() => window.__voxbraidWakeLockTest?.releases === 1);
+		await waitForPairCoverage(
+			page,
+			'Before a temporary network problem.'.length + afterRecovery.length,
+			'网络恢复场景句段对照追平'
+		);
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -664,6 +828,7 @@ async function testConnectionFailure(browser, baseUrl) {
 		);
 		assert.equal(failedRun.endReason, 'connection-lost');
 		assert.equal(failedRun.lastError?.message, '模拟连接中断。');
+		await waitForPairCoverage(page, source.length, '连接失败场景句段对照追平');
 
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
@@ -697,6 +862,11 @@ async function testCaptureRunDurationLimit(browser, baseUrl) {
 			'达到安全时长上限后的 Run 保存'
 		);
 		assert.equal(limitedRun.sourceStream.text, 'Automatic duration protection.');
+		await waitForPairCoverage(
+			page,
+			limitedRun.sourceStream.text.length,
+			'时长保护场景句段对照追平'
+		);
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -722,6 +892,7 @@ async function testStorageTimeoutFallback(browser, baseUrl) {
 		await emitPair(page, 'Translation continues without storage.', '保存なしでも翻訳できます。');
 		await mainText(page, 'Translation continues without storage.').waitFor();
 		await stopCapture(page);
+		await page.getByText(/^独立句段译文 \d+$/, { exact: true }).waitFor();
 		const expectedError = '[persistence] restore failed';
 		assert.ok(browserErrors.some((message) => message.includes(expectedError)));
 		assert.deepEqual(
@@ -769,7 +940,9 @@ try {
 	}
 
 	await testPauseResumeAndNewThread(browser, baseUrl);
+	await testInteractiveRequestDuringPairGeneration(browser, baseUrl);
 	await testCleanTranscriptContinuesAfterFailure(browser, baseUrl);
+	await testProvisionalPairRevision(browser, baseUrl);
 	await testDegradeAndRecover(browser, baseUrl);
 	await testPeriodicAndPageHideCheckpoints(browser, baseUrl);
 	await testConnectionFailure(browser, baseUrl);
