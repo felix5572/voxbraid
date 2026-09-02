@@ -396,25 +396,18 @@ export async function invokeSidecar({
 			try {
 				const parsedRevision = parseRevisionModelOutput(
 					outputText,
-					prepared.revisionTokens.map((token) => ({
-						index: token.i,
-						start: token.start,
-						end: token.end,
-						text: token.t
+					prepared.revisionAtoms.map((atom) => ({
+						index: atom.i,
+						start: atom.start,
+						end: atom.end,
+						text: atom.t,
+						boundary: atom.boundary
 					})),
-					// The server owns hard token coverage and range validation. The browser owns
-					// the 480-character product preference and its targeted retry/fallback.
+					// The server owns hard atom coverage and range validation. The browser owns
+					// the 240-character readability preference and its targeted retry/fallback.
 					{ allowOversizedGroups: true }
 				);
 				outputText = JSON.stringify(parsedRevision.output);
-				if (parsedRevision.whitespaceNormalizedGroupNumbers.length > 0) {
-					console.info('[sidecar] revision boundary token whitespace normalized', {
-						clientRequestId: prepared.clientRequestId,
-						responseId,
-						requestId: upstreamRequestId,
-						groupNumbers: parsedRevision.whitespaceNormalizedGroupNumbers
-					});
-				}
 			} catch (error) {
 				const details = errorDetails(error);
 				const errorCode: SidecarErrorCode =
@@ -431,7 +424,7 @@ export async function invokeSidecar({
 						prepared.clientRequestId,
 						now,
 						errorCode,
-						`OpenAI 修订对照输出没有通过 token 覆盖校验${requestIdSuffix(upstreamRequestId)}。\n原始错误：\n${details}\n原始模型输出：\n${boundedResponseBody(outputText)}`,
+						`OpenAI 修订对照输出没有通过原子覆盖校验${requestIdSuffix(upstreamRequestId)}。\n原始错误：\n${details}\n原始模型输出：\n${boundedResponseBody(outputText)}`,
 						{ responseId, model, outputText: outputText || null, usage }
 					),
 					{ status: 502, headers: noStoreHeaders() }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { sourceClauseAtoms } from '../projection/revision-projection';
 import type { SidecarIntent, SidecarInvokeRequest } from '../sidecar/types';
 import { prepareSidecarCall, parseSidecarInvokeRequest } from './sidecar-tasks';
 
@@ -11,14 +12,14 @@ function revisionPairRequest(): SidecarInvokeRequest & { intent: RevisionPairInt
 			kind: 'revise-pairs',
 			trigger: 'periodic',
 			targetLanguage: 'zh',
-			tokens: [
-				{ i: 1, start: 0, end: 15, t: 'First sentence.' },
-				{ i: 2, start: 15, end: 32, t: ' Second sentence.' }
+			atoms: [
+				{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' },
+				{ i: 2, start: 15, end: 32, t: ' Second sentence.', boundary: 'sentence' }
 			],
 			continuity: [{ revisedSourceText: 'Earlier.', translatedText: '此前。' }],
 			previousDraft: [],
 			oversizedGroupNumbers: [] as number[],
-			previousInvalidLastTokenIndexes: [] as number[]
+			previousInvalidAtomRanges: [] as Array<{ firstAtom: number; lastAtom: number }>
 		},
 		context: {
 			threadId: 'thread-1',
@@ -80,23 +81,23 @@ describe('sidecar task preparation', () => {
 		expect(prepared).toMatchObject({
 			kind: 'revise-pairs',
 			model: 'gpt-5.6-luna',
-			taskVersion: 3,
+			taskVersion: 4,
 			inputTokenPreflight: 'skip-bounded',
 			maxPreparedInputBytes: 64_000,
 			reasoningEffort: 'none',
 			structuredOutput: 'revision-pairs'
 		});
-		expect(prepared.revisionTokens.map((token) => token.i)).toEqual([1, 2]);
-		expect(prepared.inputText).toContain('currentTokens');
+		expect(prepared.revisionAtoms.map((atom) => atom.i)).toEqual([1, 2]);
+		expect(prepared.inputText).toContain('currentAtoms');
 		expect(prepared.inputText).toContain('"i": 1');
 		expect(prepared.inputText).toContain('Earlier.');
 		expect(prepared.inputText).not.toContain('realtimeTranslation');
-		expect(prepared.instructions).toContain('lastTokenIndex');
-		expect(prepared.instructions).toContain('never restarts');
+		expect(prepared.instructions).toContain('firstAtom');
+		expect(prepared.instructions).toContain('Never restart numbering');
 		expect(prepared.instructions).toContain('Protocol example');
 	});
 
-	it('shows the model only request-local token coordinates for previous drafts', () => {
+	it('shows the model only request-local atom coordinates for previous drafts', () => {
 		const value = revisionPairRequest();
 		value.intent.previousDraft = [
 			{
@@ -110,8 +111,8 @@ describe('sidecar task preparation', () => {
 		];
 		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
 
-		expect(prepared.inputText).toContain('"firstTokenIndex": 1');
-		expect(prepared.inputText).toContain('"lastTokenIndex": 1');
+		expect(prepared.inputText).toContain('"firstAtom": 1');
+		expect(prepared.inputText).toContain('"lastAtom": 1');
 		expect(prepared.inputText).not.toContain('"sourceStart"');
 		expect(prepared.inputText).not.toContain('"sourceEnd"');
 		expect(prepared.inputText).not.toContain('"rawText"');
@@ -119,39 +120,49 @@ describe('sidecar task preparation', () => {
 
 	it('turns a rejected boundary sequence into a server-owned correction', () => {
 		const value = revisionPairRequest();
-		value.intent.previousInvalidLastTokenIndexes = [46, 86, 61, 86];
+		value.intent.previousInvalidAtomRanges = [
+			{ firstAtom: 1, lastAtom: 2 },
+			{ firstAtom: 2, lastAtom: 2 }
+		];
 		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
 
-		expect(prepared.inputText).toMatch(
-			/"previousInvalidLastTokenIndexes": \[\s+46,\s+86,\s+61,\s+86\s+\]/u
-		);
-		expect(prepared.inputText).toContain('strictly increasing cumulative lastTokenIndex');
-		expect(prepared.inputText).toContain('"finalLastTokenIndex": 2');
+		expect(prepared.inputText).toContain('"previousInvalidAtomRanges"');
+		expect(prepared.inputText).toContain('"firstAtom": 2');
+		expect(prepared.inputText).toContain('tile every atom exactly once');
+		expect(prepared.inputText).toContain('"finalAtomIndex": 2');
 	});
 
 	it('rejects mismatched or over-sized revision pair input before OpenAI', () => {
 		const mismatch = revisionPairRequest();
 		mismatch.context.runs[0].sourceText = 'different source';
 		expect(() => prepareSidecarCall(parseSidecarInvokeRequest(mismatch))).toThrow(
-			'token 文本或目标语言与 Run 事实切片不一致'
+			'原子文本或目标语言与 Run 事实切片不一致'
 		);
 
 		const oversized = revisionPairRequest();
-		oversized.intent.tokens = [{ i: 1, start: 0, end: 1_601, t: 'x'.repeat(1_601) }];
+		oversized.intent.atoms = [
+			{ i: 1, start: 0, end: 1_601, t: 'x'.repeat(1_601), boundary: 'forced' }
+		];
 		oversized.context.runs[0].sourceText = 'x'.repeat(1_601);
 		expect(() => parseSidecarInvokeRequest(oversized)).toThrow('超过 1600 字符硬上限');
 	});
 
-	it('rejects token indexes and ranges that are not exact and continuous', () => {
+	it('rejects atom indexes and ranges that are not exact and continuous', () => {
 		const gap = revisionPairRequest();
-		gap.intent.tokens[1].start = 16;
-		expect(() => parseSidecarInvokeRequest(gap)).toThrow('token 编号、字符范围或连续顺序无效');
+		gap.intent.atoms[1].start = 16;
+		expect(() => parseSidecarInvokeRequest(gap)).toThrow('原子编号、字符范围、边界或连续顺序无效');
 	});
 
 	it('keeps a maximum bounded pair input comfortably below the static byte limit', () => {
 		const value = revisionPairRequest();
 		const source = '原'.repeat(1_600);
-		value.intent.tokens = [{ i: 1, start: 0, end: 1_600, t: source }];
+		value.intent.atoms = sourceClauseAtoms(source, 0, source.length).map((atom) => ({
+			i: atom.index,
+			start: atom.start,
+			end: atom.end,
+			t: atom.text,
+			boundary: atom.boundary
+		}));
 		value.intent.continuity = [
 			{
 				revisedSourceText: '修'.repeat(750),

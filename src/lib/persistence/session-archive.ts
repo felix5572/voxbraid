@@ -13,10 +13,7 @@ import type {
 	StoredRevisionBatch,
 	StoredRevisionProjection
 } from '../projection/revision-records';
-import {
-	REVISION_MAX_GROUP_SOURCE_CHARACTERS,
-	REVISION_MAX_OPEN_SOURCE_CHARACTERS
-} from '../projection/revision-constants';
+import { REVISION_MAX_OPEN_SOURCE_CHARACTERS } from '../projection/revision-constants';
 import type { ModelUsage, SidecarErrorCode, SidecarFailureDiagnostic } from '../sidecar/types';
 
 export const SESSION_ARCHIVE_VERSION = 3 as const;
@@ -449,8 +446,6 @@ export function validateSessionArchive(archive: SessionArchive): SessionArchive 
 				item.rawText !== run.sourceStream.text.slice(item.sourceStart, item.sourceEnd) ||
 				!item.revisedSourceText.trim() ||
 				!item.translatedText.trim() ||
-				(item.sourceEnd - item.sourceStart > REVISION_MAX_GROUP_SOURCE_CHARACTERS &&
-					item.boundaryState !== 'forced-tail') ||
 				(item.state === 'frozen' && sawOpen) ||
 				(item.state === 'frozen' && item.frozenAt === null) ||
 				(item.state === 'open' && item.frozenAt !== null)

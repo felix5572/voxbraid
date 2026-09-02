@@ -39,6 +39,25 @@ try {
 	const address = server.httpServer?.address();
 	if (!address || typeof address === 'string') throw new Error('无法读取测试服务器端口。');
 	const endpoint = `http://127.0.0.1:${address.port}/api/sidecar/invoke`;
+	const { sourceClauseAtoms } = await server.ssrLoadModule(
+		'/src/lib/projection/revision-projection.ts'
+	);
+	const revisionSource =
+		'The first topic, with one example. The sample contains 3,000 observations, so the numeric comma remains inside one clause. ' +
+		`${'continuous speech without punctuation '.repeat(9)}. ` +
+		'Now we turn to a new topic.';
+	const revisionAtoms = sourceClauseAtoms(revisionSource, 0, revisionSource.length, 'en').map(
+		(atom) => ({
+			i: atom.index,
+			start: atom.start,
+			end: atom.end,
+			t: atom.text,
+			boundary: atom.boundary
+		})
+	);
+	assert.equal(revisionAtoms.map((atom) => atom.t).join(''), revisionSource);
+	assert.ok(revisionAtoms.some((atom) => atom.boundary === 'forced'));
+	assert.ok(revisionAtoms.some((atom) => atom.t.includes('3,000')));
 	const cases = [
 		{
 			kind: 'ask',
@@ -67,22 +86,11 @@ try {
 				kind: 'revise-pairs',
 				trigger: 'manual',
 				targetLanguage: 'zh',
-				tokens: [
-					{ i: 1, start: 0, end: 3, t: 'The' },
-					{ i: 2, start: 3, end: 9, t: ' first' },
-					{ i: 3, start: 9, end: 16, t: ' topic.' },
-					{ i: 4, start: 16, end: 20, t: ' Now' },
-					{ i: 5, start: 20, end: 23, t: ' we' },
-					{ i: 6, start: 23, end: 28, t: ' turn' },
-					{ i: 7, start: 28, end: 31, t: ' to' },
-					{ i: 8, start: 31, end: 33, t: ' a' },
-					{ i: 9, start: 33, end: 37, t: ' new' },
-					{ i: 10, start: 37, end: 44, t: ' topic.' }
-				],
+				atoms: revisionAtoms,
 				continuity: [],
 				previousDraft: [],
 				oversizedGroupNumbers: [],
-				previousInvalidLastTokenIndexes: []
+				previousInvalidAtomRanges: []
 			}
 		}
 	];
@@ -108,7 +116,7 @@ try {
 							targetLanguage: 'zh',
 							sourceText:
 								testCase.kind === 'revise-pairs'
-									? testCase.intent.tokens.map((token) => token.t).join('')
+									? testCase.intent.atoms.map((atom) => atom.t).join('')
 									: 'The speaker visited a public park, walked beside a lake, and took the train home after lunch.',
 							translationText: '讲者去了公园，在湖边散步，午饭后乘火车回家。'
 						}
@@ -132,15 +140,12 @@ try {
 			assert.ok(
 				output.groups.every(
 					(group, index, groups) =>
-						index === 0 || group.lastTokenIndex > groups[index - 1].lastTokenIndex
+						index === 0 || group.firstAtom === groups[index - 1].lastAtom + 1
 				),
-				'revise-pairs 的 lastTokenIndex 不得在段落后重置。'
+				'revise-pairs 的原子范围必须连续且不得在段落后重置。'
 			);
-			assert.equal(output.groups.at(-1)?.lastTokenIndex, testCase.intent.tokens.length);
-			assert.equal(
-				output.groups.at(-1)?.lastTokenText.trim(),
-				testCase.intent.tokens.at(-1).t.trim()
-			);
+			assert.equal(output.groups[0]?.firstAtom, 1);
+			assert.equal(output.groups.at(-1)?.lastAtom, testCase.intent.atoms.length);
 			assert.ok(output.groups.every((group) => group.revisedSourceText?.trim()));
 		}
 		assert.ok(

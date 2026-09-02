@@ -1,30 +1,34 @@
+import { clauseBoundaries, type ClauseBoundaryKind } from '../session/clause-boundary';
 import { sentenceBoundaries } from '../session/sentence-boundary';
 import {
 	REVISION_HARD_SOURCE_CHARACTERS,
 	REVISION_HARD_WINDOW_MS,
+	REVISION_MAX_ATOM_SOURCE_CHARACTERS,
 	REVISION_MAX_GROUP_SOURCE_CHARACTERS,
 	REVISION_MAX_OPEN_SOURCE_CHARACTERS,
-	REVISION_MAX_RETAINED_CHARACTERS,
+	REVISION_MIN_QUIET_SOURCE_CHARACTERS,
 	REVISION_MIN_REQUEST_INTERVAL_MS,
-	REVISION_MIN_RETAINED_CHARACTERS,
 	REVISION_QUIET_WINDOW_MS,
 	REVISION_TOKENIZER_VERSION
 } from './revision-constants';
 
-export interface SourceToken {
+export type SourceAtomBoundary = ClauseBoundaryKind | 'open' | 'forced';
+
+export interface SourceClauseAtom {
 	index: number;
 	start: number;
 	end: number;
 	text: string;
+	boundary: SourceAtomBoundary;
 }
 
-export interface ModelSourceToken {
+export interface ModelSourceAtom {
 	i: number;
 	t: string;
+	boundary: SourceAtomBoundary;
 }
 
-export type RevisionWaitingFor =
-	'nothing' | 'request-interval' | 'sentence-ending' | 'quiet-window' | 'ready';
+export type RevisionWaitingFor = 'nothing' | 'request-interval' | 'punctuation-or-quiet' | 'ready';
 
 export interface RevisionTriggerInput {
 	text: string;
@@ -52,6 +56,7 @@ export interface RevisionGroupRange {
 	sourceStart: number;
 	sourceEnd: number;
 	oversized: boolean;
+	endingBoundary: SourceAtomBoundary;
 }
 
 export interface RevisionCommitPlan {
@@ -87,7 +92,7 @@ export function capturedRevisionSourceEnd(textLength: number, frozenEnd: number)
 
 function segmented(value: string, locale?: string): Array<{ segment: string; index: number }> {
 	if (typeof Intl.Segmenter !== 'function') {
-		throw new Error('Intl.Segmenter is required to tokenize revision source text.');
+		throw new Error('Intl.Segmenter is required to atomize revision source text.');
 	}
 	const segmenter = new Intl.Segmenter(locale, { granularity: 'word' });
 	return [...segmenter.segment(value)].map((item) => ({
@@ -96,54 +101,73 @@ function segmented(value: string, locale?: string): Array<{ segment: string; ind
 	}));
 }
 
-export function tokenizeRevisionSource(
+function forcedSplitEnd(value: string, start: number, end: number, locale?: string): number {
+	const target = Math.min(end, start + REVISION_MAX_ATOM_SOURCE_CHARACTERS);
+	if (target === end) return end;
+	const candidates = segmented(value.slice(start, end), locale)
+		.map((piece) => start + piece.index + piece.segment.length)
+		.filter(
+			(candidate) =>
+				candidate > start && candidate <= target && value.slice(start, candidate).trim().length > 0
+		);
+	return candidates.at(-1) ?? target;
+}
+
+export function sourceClauseAtoms(
 	text: string,
 	start: number,
 	end: number,
 	locale?: string
-): SourceToken[] {
+): SourceClauseAtom[] {
 	assertRange(text, start, end);
 	const raw = text.slice(start, end);
-	const pieces = segmented(raw, locale);
-	const tokens: SourceToken[] = [];
-	let pendingWhitespace = '';
-	let pendingStart = start;
+	const atoms: SourceClauseAtom[] = [];
+	let relativeStart = 0;
 
-	for (const piece of pieces) {
-		const absoluteStart = start + piece.index;
-		if (/^\s+$/u.test(piece.segment)) {
-			if (!pendingWhitespace) pendingStart = absoluteStart;
-			pendingWhitespace += piece.segment;
-			continue;
+	const appendSpan = (relativeEnd: number, boundary: SourceAtomBoundary): void => {
+		while (relativeEnd - relativeStart > REVISION_MAX_ATOM_SOURCE_CHARACTERS) {
+			const split = forcedSplitEnd(raw, relativeStart, relativeEnd, locale);
+			atoms.push({
+				index: atoms.length + 1,
+				start: start + relativeStart,
+				end: start + split,
+				text: raw.slice(relativeStart, split),
+				boundary: 'forced'
+			});
+			relativeStart = split;
 		}
-		const tokenStart = pendingWhitespace ? pendingStart : absoluteStart;
-		const tokenText = pendingWhitespace + piece.segment;
-		tokens.push({
-			index: tokens.length + 1,
-			start: tokenStart,
-			end: absoluteStart + piece.segment.length,
-			text: tokenText
-		});
-		pendingWhitespace = '';
-	}
+		if (relativeEnd > relativeStart) {
+			atoms.push({
+				index: atoms.length + 1,
+				start: start + relativeStart,
+				end: start + relativeEnd,
+				text: raw.slice(relativeStart, relativeEnd),
+				boundary
+			});
+			relativeStart = relativeEnd;
+		}
+	};
 
-	if (pendingWhitespace) {
-		const previous = tokens.at(-1);
-		if (previous) {
+	for (const boundary of clauseBoundaries(raw)) appendSpan(boundary.end, boundary.kind);
+	if (relativeStart < raw.length) {
+		const tail = raw.slice(relativeStart);
+		if (!tail.trim() && atoms.length > 0) {
+			const previous = atoms.at(-1)!;
 			previous.end = end;
-			previous.text += pendingWhitespace;
+			previous.text += tail;
+			relativeStart = raw.length;
 		} else {
-			tokens.push({ index: 1, start, end, text: pendingWhitespace });
+			appendSpan(raw.length, 'open');
 		}
 	}
-	if (tokens.length === 0 || tokens.map((token) => token.text).join('') !== raw) {
-		throw new Error('Revision tokenizer did not preserve the source range.');
+	if (atoms.length === 0 || atoms.map((atom) => atom.text).join('') !== raw) {
+		throw new Error('Revision atomizer did not preserve the source range.');
 	}
-	return tokens;
+	return atoms;
 }
 
-export function modelSourceTokens(tokens: readonly SourceToken[]): ModelSourceToken[] {
-	return tokens.map((token) => ({ i: token.index, t: token.text }));
+export function modelSourceAtoms(atoms: readonly SourceClauseAtom[]): ModelSourceAtom[] {
+	return atoms.map((atom) => ({ i: atom.index, t: atom.text, boundary: atom.boundary }));
 }
 
 function elapsed(nowMs: number, timestamp: string | null): number {
@@ -199,18 +223,19 @@ export function revisionTrigger(input: RevisionTriggerInput): RevisionTriggerRes
 		Math.min(input.latestCapturedEnd, capturedSourceEnd),
 		capturedSourceEnd
 	);
-	const sentenceCount = sentenceBoundaries(newlyCapturedText.trimEnd()).length;
+	const punctuationBoundaryCount = clauseBoundaries(newlyCapturedText.trimEnd()).length;
 	const ready =
 		input.manual ||
 		input.finalizing ||
 		capturedSourceEnd < input.text.length ||
 		pendingCharacters >= REVISION_HARD_SOURCE_CHARACTERS ||
 		pendingForMs >= REVISION_HARD_WINDOW_MS ||
-		sentenceCount >= 2 ||
-		(sentenceCount >= 1 && quietForMs >= REVISION_QUIET_WINDOW_MS);
+		punctuationBoundaryCount >= 1 ||
+		(quietForMs >= REVISION_QUIET_WINDOW_MS &&
+			newlyCapturedText.length >= REVISION_MIN_QUIET_SOURCE_CHARACTERS);
 	return {
 		ready,
-		waitingFor: ready ? 'ready' : sentenceCount > 0 ? 'quiet-window' : 'sentence-ending',
+		waitingFor: ready ? 'ready' : 'punctuation-or-quiet',
 		capturedSourceEnd,
 		pendingCharacters,
 		quietForMs,
@@ -223,10 +248,6 @@ export function revisionTextEndsNaturally(rawText: string): boolean {
 	const content = rawText.trimEnd();
 	if (!content) return false;
 	return sentenceBoundaries(content).at(-1)?.end === content.length;
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-	return Math.max(minimum, Math.min(maximum, value));
 }
 
 export function commitRevisionGroups(input: {
@@ -250,38 +271,28 @@ export function commitRevisionGroups(input: {
 	}
 	if (expectedStart !== requestEnd) throw new Error('Revision groups do not cover the request.');
 
-	const naturalText = rawText.trimEnd();
-	const boundaries = sentenceBoundaries(naturalText);
 	const endsNaturally = revisionTextEndsNaturally(rawText);
 	if (input.finalizing || (endsNaturally && input.quietForMs >= REVISION_QUIET_WINDOW_MS)) {
 		return { frozenEnd: requestEnd, openStart: requestEnd, openEnd: requestEnd };
 	}
 
-	const previousBoundary = boundaries.length >= 3 ? boundaries.at(-3)!.end : 0;
-	const lastTwoSentenceCharacters = rawText.length - previousBoundary;
-	const desiredRetained =
-		boundaries.length >= 2
-			? clamp(
-					lastTwoSentenceCharacters,
-					REVISION_MIN_RETAINED_CHARACTERS,
-					REVISION_MAX_RETAINED_CHARACTERS
-				)
-			: REVISION_MIN_RETAINED_CHARACTERS;
-	const targetFrozenEnd = requestEnd - desiredRetained;
-	const ordinaryBoundary = [...groups]
-		.reverse()
-		.find((group) => group.sourceEnd <= targetFrozenEnd)?.sourceEnd;
-	let frozenEnd = ordinaryBoundary ?? requestStart;
+	const sentenceEndingGroups = groups.filter((group) => group.endingBoundary === 'sentence');
+	const freezeThrough =
+		sentenceEndingGroups.length > 2
+			? sentenceEndingGroups[sentenceEndingGroups.length - 3].sourceEnd
+			: requestStart;
+	let frozenEnd = freezeThrough;
 	if (
 		frozenEnd === requestStart &&
 		requestEnd - requestStart >= REVISION_MAX_OPEN_SOURCE_CHARACTERS
 	) {
-		frozenEnd = groups.find((group) => group.sourceEnd > targetFrozenEnd)?.sourceEnd ?? requestEnd;
+		frozenEnd = groups[0]?.sourceEnd ?? requestEnd;
 	}
 	return { frozenEnd, openStart: frozenEnd, openEnd: requestEnd };
 }
 
 export const REVISION_PROJECTION_METADATA = Object.freeze({
 	tokenizerVersion: REVISION_TOKENIZER_VERSION,
+	maxAtomCharacters: REVISION_MAX_ATOM_SOURCE_CHARACTERS,
 	maxGroupCharacters: REVISION_MAX_GROUP_SOURCE_CHARACTERS
 });

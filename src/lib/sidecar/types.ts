@@ -7,11 +7,17 @@ export interface SidecarConversationTurn {
 	answer: string;
 }
 
-export interface SidecarRevisionToken {
+export interface SidecarRevisionAtom {
 	i: number;
 	start: number;
 	end: number;
 	t: string;
+	boundary: 'sentence' | 'clause' | 'open' | 'forced';
+}
+
+export interface SidecarInvalidAtomRange {
+	firstAtom: number;
+	lastAtom: number;
 }
 
 export interface SidecarRevisionContextSegment {
@@ -50,11 +56,11 @@ export type SidecarIntent =
 			kind: 'revise-pairs';
 			trigger: SidecarTrigger;
 			targetLanguage: string;
-			tokens: SidecarRevisionToken[];
+			atoms: SidecarRevisionAtom[];
 			continuity: SidecarRevisionContextSegment[];
 			previousDraft: SidecarRevisionDraftSegment[];
 			oversizedGroupNumbers: number[];
-			previousInvalidLastTokenIndexes: number[];
+			previousInvalidAtomRanges: SidecarInvalidAtomRange[];
 	  };
 
 export interface SidecarTranscriptRunInput {

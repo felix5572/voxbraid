@@ -64,8 +64,8 @@ describe('invokeSidecar', () => {
 					output_text: JSON.stringify({
 						groups: [
 							{
-								lastTokenIndex: 2,
-								lastTokenText: ' Second sentence.',
+								firstAtom: 1,
+								lastAtom: 2,
 								revisedSourceText: 'First sentence. Second sentence.',
 								translatedText: '第一句和第二句。',
 								paragraphBreakBefore: false
@@ -82,14 +82,14 @@ describe('invokeSidecar', () => {
 					kind: 'revise-pairs',
 					trigger: 'periodic',
 					targetLanguage: 'zh',
-					tokens: [
-						{ i: 1, start: 0, end: 15, t: 'First sentence.' },
-						{ i: 2, start: 15, end: 32, t: ' Second sentence.' }
+					atoms: [
+						{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' },
+						{ i: 2, start: 15, end: 32, t: ' Second sentence.', boundary: 'sentence' }
 					],
 					continuity: [],
 					previousDraft: [],
 					oversizedGroupNumbers: [],
-					previousInvalidLastTokenIndexes: []
+					previousInvalidAtomRanges: []
 				},
 				context: {
 					threadId: 'thread-1',
@@ -126,8 +126,8 @@ describe('invokeSidecar', () => {
 			outputText: JSON.stringify({
 				groups: [
 					{
-						lastTokenIndex: 2,
-						lastTokenText: ' Second sentence.',
+						firstAtom: 1,
+						lastAtom: 2,
 						revisedSourceText: 'First sentence. Second sentence.',
 						translatedText: '第一句和第二句。',
 						paragraphBreakBefore: false
@@ -148,8 +148,8 @@ describe('invokeSidecar', () => {
 					output_text: JSON.stringify({
 						groups: [
 							{
-								lastTokenIndex: 1,
-								lastTokenText: source,
+								firstAtom: 1,
+								lastAtom: 3,
 								revisedSourceText: source,
 								translatedText: '超长组',
 								paragraphBreakBefore: false
@@ -166,11 +166,15 @@ describe('invokeSidecar', () => {
 					kind: 'revise-pairs',
 					trigger: 'periodic',
 					targetLanguage: 'zh',
-					tokens: [{ i: 1, start: 0, end: 600, t: source }],
+					atoms: [
+						{ i: 1, start: 0, end: 240, t: source.slice(0, 240), boundary: 'forced' },
+						{ i: 2, start: 240, end: 480, t: source.slice(240, 480), boundary: 'forced' },
+						{ i: 3, start: 480, end: 600, t: source.slice(480), boundary: 'open' }
+					],
 					continuity: [],
 					previousDraft: [],
 					oversizedGroupNumbers: [],
-					previousInvalidLastTokenIndexes: []
+					previousInvalidAtomRanges: []
 				},
 				context: {
 					threadId: 'thread-1',
@@ -198,7 +202,7 @@ describe('invokeSidecar', () => {
 		expect(await result(response)).toMatchObject({ status: 'completed' });
 	});
 
-	it('rejects completed revision pair output with invalid token coverage', async () => {
+	it('rejects completed revision pair output with invalid atom coverage', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 		const fetcher = vi.fn(async () =>
 			jsonResponse({
@@ -208,8 +212,8 @@ describe('invokeSidecar', () => {
 				output_text: JSON.stringify({
 					groups: [
 						{
-							lastTokenIndex: 2,
-							lastTokenText: 'First sentence.',
+							firstAtom: 2,
+							lastAtom: 2,
 							revisedSourceText: 'First sentence.',
 							translatedText: '错误覆盖。',
 							paragraphBreakBefore: false
@@ -224,11 +228,11 @@ describe('invokeSidecar', () => {
 				kind: 'revise-pairs',
 				trigger: 'periodic',
 				targetLanguage: 'zh',
-				tokens: [{ i: 1, start: 0, end: 15, t: 'First sentence.' }],
+				atoms: [{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' }],
 				continuity: [],
 				previousDraft: [],
 				oversizedGroupNumbers: [],
-				previousInvalidLastTokenIndexes: []
+				previousInvalidAtomRanges: []
 			},
 			context: {
 				threadId: 'thread-1',
@@ -259,8 +263,8 @@ describe('invokeSidecar', () => {
 			error: { code: 'invalid-revision-boundary' }
 		});
 		if (failure.status !== 'failed') throw new Error('Expected failed pair response.');
-		expect(failure.error.message).toContain('token 覆盖校验');
-		expect(failure.error.message).toContain('lastTokenIndex');
+		expect(failure.error.message).toContain('原子覆盖校验');
+		expect(failure.error.message).toContain('firstAtom');
 	});
 
 	it('rejects invalid requests before calling OpenAI', async () => {

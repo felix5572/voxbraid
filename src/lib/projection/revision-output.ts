@@ -1,12 +1,12 @@
-import type { SourceToken } from './revision-projection';
+import type { SourceClauseAtom } from './revision-projection';
 import {
 	REVISION_MAX_GROUP_SOURCE_CHARACTERS,
 	REVISION_MAX_OPEN_SOURCE_CHARACTERS
 } from './revision-constants';
 
 export interface RevisionModelGroup {
-	lastTokenIndex: number;
-	lastTokenText: string;
+	firstAtom: number;
+	lastAtom: number;
 	revisedSourceText: string;
 	translatedText: string;
 	paragraphBreakBefore: boolean;
@@ -17,17 +17,16 @@ export interface RevisionModelOutput {
 }
 
 export interface ValidatedRevisionGroup extends RevisionModelGroup {
-	tokenStart: number;
 	sourceStart: number;
 	sourceEnd: number;
 	rawText: string;
 	oversized: boolean;
+	endingBoundary: SourceClauseAtom['boundary'];
 }
 
 export interface ParsedRevisionModelOutput {
 	output: RevisionModelOutput;
 	groups: ValidatedRevisionGroup[];
-	whitespaceNormalizedGroupNumbers: number[];
 }
 
 export class OversizedRevisionGroupError extends TypeError {
@@ -45,7 +44,7 @@ export class OversizedRevisionGroupError extends TypeError {
 export class RevisionBoundaryError extends TypeError {
 	constructor(
 		message: string,
-		readonly returnedLastTokenIndexes: number[]
+		readonly returnedAtomRanges: Array<{ firstAtom: number; lastAtom: number }>
 	) {
 		super(message);
 		this.name = 'RevisionBoundaryError';
@@ -69,22 +68,22 @@ export const REVISION_OUTPUT_SCHEMA = Object.freeze({
 					type: 'object',
 					additionalProperties: false,
 					required: [
-						'lastTokenIndex',
-						'lastTokenText',
+						'firstAtom',
+						'lastAtom',
 						'revisedSourceText',
 						'translatedText',
 						'paragraphBreakBefore'
 					],
 					properties: {
-						lastTokenIndex: {
+						firstAtom: {
 							type: 'integer',
 							description:
-								'Copy the i value of the last input token belonging to this group. Values strictly increase across groups, never restart, and the final value equals the final input token i.'
+								'Copy the i value of the first currentAtoms item belonging to this group. The first group starts at 1 and every later group starts exactly one after the prior lastAtom.'
 						},
-						lastTokenText: {
-							type: 'string',
+						lastAtom: {
+							type: 'integer',
 							description:
-								'Copy the t value of the token selected by lastTokenIndex exactly, including leading whitespace and punctuation.'
+								'Copy the i value of the last currentAtoms item belonging to this group. It is at least firstAtom and the final group ends at the final input atom.'
 						},
 						revisedSourceText: { type: 'string' },
 						translatedText: { type: 'string' },
@@ -100,12 +99,20 @@ function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-export function revisionLastTokenIndexesFromOutput(value: string): number[] | null {
+export function revisionAtomRangesFromOutput(
+	value: string
+): Array<{ firstAtom: number; lastAtom: number }> | null {
 	try {
 		const parsed: unknown = JSON.parse(value);
 		if (!record(parsed) || !Array.isArray(parsed.groups) || parsed.groups.length === 0) return null;
-		const indexes = parsed.groups.map((group) => (record(group) ? group.lastTokenIndex : null));
-		return indexes.every((index) => Number.isSafeInteger(index)) ? (indexes as number[]) : null;
+		const ranges = parsed.groups.map((group) =>
+			record(group) && Number.isSafeInteger(group.firstAtom) && Number.isSafeInteger(group.lastAtom)
+				? { firstAtom: group.firstAtom as number, lastAtom: group.lastAtom as number }
+				: null
+		);
+		return ranges.every((range) => range !== null)
+			? (ranges as Array<{ firstAtom: number; lastAtom: number }>)
+			: null;
 	} catch {
 		return null;
 	}
@@ -113,7 +120,7 @@ export function revisionLastTokenIndexesFromOutput(value: string): number[] | nu
 
 export function parseRevisionModelOutput(
 	value: string,
-	tokens: readonly SourceToken[],
+	atoms: readonly SourceClauseAtom[],
 	options: { allowOversizedGroups?: boolean } = {}
 ): ParsedRevisionModelOutput {
 	let parsed: unknown;
@@ -128,23 +135,22 @@ export function parseRevisionModelOutput(
 	if (!record(parsed) || !Array.isArray(parsed.groups) || parsed.groups.length === 0) {
 		throw new TypeError('修订对照模型输出缺少非空 groups 数组。');
 	}
-	if (tokens.length === 0) throw new TypeError('修订对照请求没有 token。');
-	const firstSourceStart = tokens[0].start;
-	const lastSourceEnd = tokens.at(-1)!.end;
+	if (atoms.length === 0) throw new TypeError('修订对照请求没有原子。');
+	const firstSourceStart = atoms[0].start;
+	const lastSourceEnd = atoms.at(-1)!.end;
 	if (lastSourceEnd - firstSourceStart > REVISION_MAX_OPEN_SOURCE_CHARACTERS) {
 		throw new TypeError('修订对照请求超过 raw 硬上限。');
 	}
 
 	const groups: ValidatedRevisionGroup[] = [];
-	const whitespaceNormalizedGroupNumbers: number[] = [];
-	const returnedLastTokenIndexes = revisionLastTokenIndexesFromOutput(value) ?? [];
-	let previousLastTokenIndex = 0;
+	const returnedAtomRanges = revisionAtomRangesFromOutput(value) ?? [];
+	let expectedFirstAtom = 1;
 	let outputCharacters = 0;
 	for (const [index, rawGroup] of parsed.groups.entries()) {
 		if (
 			!record(rawGroup) ||
-			!Number.isSafeInteger(rawGroup.lastTokenIndex) ||
-			typeof rawGroup.lastTokenText !== 'string' ||
+			!Number.isSafeInteger(rawGroup.firstAtom) ||
+			!Number.isSafeInteger(rawGroup.lastAtom) ||
 			typeof rawGroup.revisedSourceText !== 'string' ||
 			!rawGroup.revisedSourceText.trim() ||
 			typeof rawGroup.translatedText !== 'string' ||
@@ -153,53 +159,41 @@ export function parseRevisionModelOutput(
 		) {
 			throw new TypeError(`修订对照模型第 ${index + 1} 组格式无效。`);
 		}
-		const lastTokenIndex = rawGroup.lastTokenIndex as number;
-		const lastTokenText = rawGroup.lastTokenText as string;
-		if (lastTokenIndex <= previousLastTokenIndex || lastTokenIndex > tokens.length) {
+		const firstAtom = rawGroup.firstAtom as number;
+		const lastAtom = rawGroup.lastAtom as number;
+		if (firstAtom !== expectedFirstAtom || lastAtom < firstAtom || lastAtom > atoms.length) {
 			throw new RevisionBoundaryError(
-				`修订对照模型第 ${index + 1} 组 lastTokenIndex=${lastTokenIndex} 无效；上一组结束于 ${previousLastTokenIndex}，本批最后一个 token 是 ${tokens.length}。`,
-				returnedLastTokenIndexes
+				`修订对照模型第 ${index + 1} 组原子范围 ${firstAtom}–${lastAtom} 无效；预期从原子 ${expectedFirstAtom} 开始，本批最后一个原子是 ${atoms.length}。`,
+				returnedAtomRanges
 			);
 		}
-		const first = tokens[previousLastTokenIndex];
-		const last = tokens[lastTokenIndex - 1];
-		if (lastTokenText.trim() !== last.text.trim()) {
-			const matchingIndexes = tokens
-				.filter((token) => token.text.trim() === lastTokenText.trim())
-				.map((token) => token.index);
-			throw new RevisionBoundaryError(
-				`修订对照模型第 ${index + 1} 组 lastTokenText 与 token ${lastTokenIndex} 不一致（忽略首尾空白后比较）；该文本在当前请求中的匹配位置为 ${matchingIndexes.length > 0 ? matchingIndexes.join('、') : '无'}。`,
-				returnedLastTokenIndexes
-			);
-		}
-		if (lastTokenText !== last.text) whitespaceNormalizedGroupNumbers.push(index + 1);
-		const rawText = tokens
-			.slice(previousLastTokenIndex, lastTokenIndex)
-			.map((token) => token.text)
-			.join('');
+		const groupAtoms = atoms.slice(firstAtom - 1, lastAtom);
+		const first = groupAtoms[0];
+		const last = groupAtoms.at(-1)!;
+		const rawText = groupAtoms.map((atom) => atom.text).join('');
 		const group: ValidatedRevisionGroup = {
-			tokenStart: previousLastTokenIndex + 1,
-			lastTokenIndex,
-			lastTokenText,
+			firstAtom,
+			lastAtom,
 			sourceStart: first.start,
 			sourceEnd: last.end,
 			rawText,
 			revisedSourceText: rawGroup.revisedSourceText.trim(),
 			translatedText: rawGroup.translatedText.trim(),
 			paragraphBreakBefore: rawGroup.paragraphBreakBefore as boolean,
-			oversized: last.end - first.start > REVISION_MAX_GROUP_SOURCE_CHARACTERS
+			oversized: last.end - first.start > REVISION_MAX_GROUP_SOURCE_CHARACTERS,
+			endingBoundary: last.boundary
 		};
 		outputCharacters += group.revisedSourceText.length + group.translatedText.length;
 		if (outputCharacters > REVISION_MAX_OUTPUT_CHARACTERS) {
 			throw new TypeError(`修订对照模型输出超过 ${REVISION_MAX_OUTPUT_CHARACTERS} 字符上限。`);
 		}
 		groups.push(group);
-		previousLastTokenIndex = lastTokenIndex;
+		expectedFirstAtom = lastAtom + 1;
 	}
-	if (previousLastTokenIndex !== tokens.length) {
+	if (expectedFirstAtom !== atoms.length + 1) {
 		throw new RevisionBoundaryError(
-			`修订对照模型只覆盖到 token ${previousLastTokenIndex}，预期 ${tokens.length}。`,
-			returnedLastTokenIndexes
+			`修订对照模型只覆盖到原子 ${expectedFirstAtom - 1}，预期 ${atoms.length}。`,
+			returnedAtomRanges
 		);
 	}
 	const oversizedGroupNumbers = groups
@@ -210,16 +204,17 @@ export function parseRevisionModelOutput(
 	}
 	return {
 		output: {
-			groups: groups.map(({ tokenStart, sourceStart, sourceEnd, rawText, oversized, ...group }) => {
-				void tokenStart;
-				void sourceStart;
-				void sourceEnd;
-				void rawText;
-				void oversized;
-				return group;
-			})
+			groups: groups.map(
+				({ sourceStart, sourceEnd, rawText, oversized, endingBoundary, ...group }) => {
+					void sourceStart;
+					void sourceEnd;
+					void rawText;
+					void oversized;
+					void endingBoundary;
+					return group;
+				}
+			)
 		},
-		groups,
-		whitespaceNormalizedGroupNumbers
+		groups
 	};
 }

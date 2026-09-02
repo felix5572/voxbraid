@@ -32,9 +32,9 @@
 		commitRevisionGroups,
 		revisionTextEndsNaturally,
 		revisionTrigger,
-		tokenizeRevisionSource,
+		sourceClauseAtoms,
 		type RevisionTriggerResult,
-		type SourceToken
+		type SourceClauseAtom
 	} from './revision-projection';
 	import type {
 		RevisionTrigger,
@@ -57,7 +57,7 @@
 		sourceText: string;
 		openStart: number;
 		openEnd: number;
-		tokens: SourceToken[];
+		atoms: SourceClauseAtom[];
 		trigger: RevisionTrigger;
 		finalizing: boolean;
 		triggerResult: RevisionTriggerResult;
@@ -240,11 +240,22 @@
 		return result;
 	}
 
-	function previousDraft(runId: string, start: number, end: number): SidecarRevisionDraftSegment[] {
+	function previousDraft(
+		runId: string,
+		start: number,
+		end: number,
+		atoms: readonly SourceClauseAtom[]
+	): SidecarRevisionDraftSegment[] {
+		const atomStarts = new Set(atoms.map((atom) => atom.start));
+		const atomEnds = new Set(atoms.map((atom) => atom.end));
 		return segmentsForRun(runId)
 			.filter(
 				(segment) =>
-					segment.state === 'open' && segment.sourceStart >= start && segment.sourceEnd <= end
+					segment.state === 'open' &&
+					segment.sourceStart >= start &&
+					segment.sourceEnd <= end &&
+					atomStarts.has(segment.sourceStart) &&
+					atomEnds.has(segment.sourceEnd)
 			)
 			.map((segment) => ({
 				sourceStart: segment.sourceStart,
@@ -331,7 +342,7 @@
 				translatedText: group.translatedText,
 				paragraphBreakBefore: group.paragraphBreakBefore,
 				state,
-				boundaryState: group.oversized ? 'forced-tail' : 'complete',
+				boundaryState: group.endingBoundary === 'sentence' ? 'complete' : 'forced-tail',
 				producedByBatchId: batchId,
 				sourceElapsedEndMs,
 				frozenAt: state === 'frozen' ? updatedAt : null,
@@ -398,9 +409,14 @@
 			checkpointedAt: new Date().toISOString()
 		});
 		const continuity = continuityBefore(candidate.runSequence, candidate.openStart);
-		const draft = previousDraft(candidate.runId, candidate.openStart, candidate.openEnd);
+		const draft = previousDraft(
+			candidate.runId,
+			candidate.openStart,
+			candidate.openEnd,
+			candidate.atoms
+		);
 		let oversizedGroupNumbers: number[] = [];
-		let previousInvalidLastTokenIndexes: number[] = [];
+		let previousInvalidAtomRanges: Array<{ firstAtom: number; lastAtom: number }> = [];
 		let attempt = 1;
 		let sequence = nextBatchSequence(candidate.runId);
 		if (candidate.trigger === 'periodic') {
@@ -420,16 +436,17 @@
 					kind: 'revise-pairs',
 					trigger: candidate.trigger,
 					targetLanguage: candidate.targetLanguage,
-					tokens: candidate.tokens.map((token) => ({
-						i: token.index,
-						start: token.start,
-						end: token.end,
-						t: token.text
+					atoms: candidate.atoms.map((atom) => ({
+						i: atom.index,
+						start: atom.start,
+						end: atom.end,
+						t: atom.text,
+						boundary: atom.boundary
 					})),
 					continuity,
 					previousDraft: draft,
 					oversizedGroupNumbers,
-					previousInvalidLastTokenIndexes
+					previousInvalidAtomRanges
 				},
 				context: {
 					threadId: capturedThreadId,
@@ -477,7 +494,7 @@
 			let validationError: string | null = null;
 			if (result.status === 'completed') {
 				try {
-					groups = parseRevisionModelOutput(result.outputText, candidate.tokens, {
+					groups = parseRevisionModelOutput(result.outputText, candidate.atoms, {
 						allowOversizedGroups: attempt === 2
 					}).groups;
 				} catch (error) {
@@ -487,7 +504,7 @@
 				}
 			} else if (result.error.code === 'invalid-revision-boundary' && result.outputText) {
 				try {
-					parseRevisionModelOutput(result.outputText, candidate.tokens, {
+					parseRevisionModelOutput(result.outputText, candidate.atoms, {
 						allowOversizedGroups: true
 					});
 				} catch (error) {
@@ -581,7 +598,7 @@
 				continue;
 			}
 			if (boundaryError && attempt === 1) {
-				previousInvalidLastTokenIndexes = boundaryError.returnedLastTokenIndexes;
+				previousInvalidAtomRanges = boundaryError.returnedAtomRanges;
 				attempt += 1;
 				sequence += 1;
 				continue;
@@ -693,11 +710,7 @@
 		) {
 			return null;
 		}
-		const tokens = tokenizeRevisionSource(
-			run.sourceStream.text,
-			openStart,
-			result.capturedSourceEnd
-		);
+		const atoms = sourceClauseAtoms(run.sourceStream.text, openStart, result.capturedSourceEnd);
 		return {
 			runId: run.id,
 			runSequence: run.sequence,
@@ -705,7 +718,7 @@
 			sourceText: run.sourceStream.text.slice(openStart, result.capturedSourceEnd),
 			openStart,
 			openEnd: result.capturedSourceEnd,
-			tokens,
+			atoms,
 			trigger: manual ? 'manual' : finalizing ? 'finalizing' : 'periodic',
 			finalizing,
 			triggerResult: result
@@ -823,12 +836,12 @@
 			trigger.waitingFor === 'nothing'
 				? '等待新原文'
 				: trigger.waitingFor === 'request-interval'
-					? `请求间隔 ${Math.ceil(trigger.requestIntervalRemainingMs / 1_000)} 秒`
-					: trigger.waitingFor === 'sentence-ending'
-						? '等待句末'
-						: trigger.waitingFor === 'quiet-window'
-							? '等待短暂停顿'
-							: '准备修订';
+					? diagnosticsMode
+						? `请求间隔 ${Math.ceil(trigger.requestIntervalRemainingMs / 1_000)} 秒`
+						: '等待标点或短暂停顿'
+					: trigger.waitingFor === 'punctuation-or-quiet'
+						? '等待标点或短暂停顿'
+						: '准备修订';
 		const readingStatus = `第 ${run.sequence} 段 · 冻结至约 ${courseTime(frozen?.sourceElapsedEndMs ?? null)} · ${reason}`;
 		return diagnosticsMode
 			? `${readingStatus} · 开放区 ${pending} 字 · 累计 ${totalTokens} tokens`

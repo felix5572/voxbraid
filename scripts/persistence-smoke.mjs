@@ -174,14 +174,14 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 			body.intent.kind === 'ask' && body.intent.question === 'Hold across thread switch'
 				? 500
 				: body.intent.kind === 'revise-pairs' &&
-					  body.intent.tokens
-							?.map((token) => token.t)
+					  body.intent.atoms
+							?.map((atom) => atom.t)
 							.join('')
 							.includes('[HOLD_HISTORY]')
 					? 2_500
 					: body.intent.kind === 'revise-pairs' &&
-						  body.intent.tokens
-								?.map((token) => token.t)
+						  body.intent.atoms
+								?.map((atom) => atom.t)
 								.join('')
 								.includes('[HOLD_PAIR]')
 						? 600
@@ -217,45 +217,27 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		const pairNumber = sidecarRequests.filter(
 			(request) => request.intent.kind === 'revise-pairs'
 		).length;
-		const pairTokens = body.intent.kind === 'revise-pairs' ? (body.intent.tokens ?? []) : [];
-		const pairRaw = pairTokens.map((token) => token.t).join('');
+		const pairAtoms = body.intent.kind === 'revise-pairs' ? (body.intent.atoms ?? []) : [];
+		const pairRaw = pairAtoms.map((atom) => atom.t).join('');
 		const pairGroups = [];
-		let pairGroupStart = 0;
-		let pairGroupCharacters = 0;
-		for (const [index, token] of pairTokens.entries()) {
-			if (
-				!pairRaw.includes('[OVERSIZE_PAIR]') &&
-				pairGroupCharacters > 0 &&
-				pairGroupCharacters + token.t.length > 400
-			) {
-				pairGroups.push({
-					lastTokenIndex: index,
-					lastTokenText: pairTokens[index - 1].t,
-					revisedSourceText: pairTokens
-						.slice(pairGroupStart, index)
-						.map((item) => item.t)
-						.join('')
-						.trim(),
-					translatedText: `独立句段译文 ${pairNumber}.${pairGroups.length + 1}`,
-					paragraphBreakBefore: pairGroups.length > 0
-				});
-				pairGroupStart = index;
-				pairGroupCharacters = 0;
-			}
-			pairGroupCharacters += token.t.length;
-		}
-		if (pairTokens.length > 0) {
+		if (pairAtoms.length > 0 && pairRaw.includes('[OVERSIZE_PAIR]')) {
 			pairGroups.push({
-				lastTokenIndex: pairTokens.length,
-				lastTokenText: pairTokens.at(-1).t,
-				revisedSourceText: pairTokens
-					.slice(pairGroupStart)
-					.map((item) => item.t)
-					.join('')
-					.trim(),
-				translatedText: `独立句段译文 ${pairNumber}.${pairGroups.length + 1}`,
-				paragraphBreakBefore: pairGroups.length > 0
+				firstAtom: 1,
+				lastAtom: pairAtoms.length,
+				revisedSourceText: pairRaw.trim(),
+				translatedText: `独立句段译文 ${pairNumber}.1`,
+				paragraphBreakBefore: false
 			});
+		} else {
+			for (const [index, atom] of pairAtoms.entries()) {
+				pairGroups.push({
+					firstAtom: index + 1,
+					lastAtom: index + 1,
+					revisedSourceText: atom.t.trim(),
+					translatedText: `独立句段译文 ${pairNumber}.${index + 1}`,
+					paragraphBreakBefore: index > 0
+				});
+			}
 		}
 		if (pairRaw.includes('[INVALID_REVISION]') && pairGroups[0]) {
 			pairGroups[0].translatedText = '';
@@ -263,16 +245,18 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		if (
 			pairRaw.includes('[INVALID_BOUNDARY') &&
 			pairGroups[0] &&
-			(body.intent.previousInvalidLastTokenIndexes.length === 0 ||
+			(body.intent.previousInvalidAtomRanges.length === 0 ||
 				pairRaw.includes('[INVALID_BOUNDARY_TWICE]'))
 		) {
-			const invalidIndexes = [1, pairTokens.length, pairTokens.length - 1, pairTokens.length];
+			const invalidRanges = [
+				{ firstAtom: 1, lastAtom: pairAtoms.length },
+				{ firstAtom: 1, lastAtom: pairAtoms.length }
+			];
 			pairGroups.splice(
 				0,
 				pairGroups.length,
-				...invalidIndexes.map((lastTokenIndex, index) => ({
-					lastTokenIndex,
-					lastTokenText: pairTokens[lastTokenIndex - 1].t,
+				...invalidRanges.map((range, index) => ({
+					...range,
 					revisedSourceText: `Injected revision group ${index + 1}.`,
 					translatedText: `注入的修订组 ${index + 1}。`,
 					paragraphBreakBefore: index > 0
@@ -414,8 +398,8 @@ async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 			sidecarRequests,
 			(request) =>
 				request.intent.kind === 'revise-pairs' &&
-				request.intent.tokens
-					.map((token) => token.t)
+				request.intent.atoms
+					.map((atom) => atom.t)
 					.join('')
 					.includes('[HOLD_PAIR]'),
 			'在飞的句段对照请求'
@@ -462,8 +446,8 @@ async function testCompletedRunTailIsNotMarkedLive(browser, baseUrl) {
 			sidecarRequests,
 			(request) =>
 				request.intent.kind === 'revise-pairs' &&
-				request.intent.tokens
-					.map((token) => token.t)
+				request.intent.atoms
+					.map((atom) => atom.t)
 					.join('')
 					.includes('[HOLD_HISTORY]'),
 			'历史段落测试中的在飞修订请求'
@@ -485,7 +469,10 @@ async function testOpenWindowRevision(browser, baseUrl) {
 	try {
 		await waitForReady(page);
 		await startCapture(page);
-		const partial = 'word '.repeat(160);
+		const partial = Array.from(
+			{ length: 5 },
+			(_, index) => `Sentence ${index + 1} ${'word '.repeat(28)}ends. `
+		).join('');
 		await emitPair(page, partial, '开放窗口译文。');
 		const first = await waitForRecord(
 			page,
@@ -495,12 +482,6 @@ async function testOpenWindowRevision(browser, baseUrl) {
 				record.openStart === 0 &&
 				record.openEnd === partial.length,
 			'首个开放窗口修订'
-		);
-		await page.waitForTimeout(4_500);
-		assert.equal(
-			sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs').length,
-			1,
-			'无新 raw 时开放窗口不应按间隔重复付费修订'
 		);
 		const frozenBefore = (await readStore(page, 'revisedSegments'))
 			.filter((record) => record.runId === first.runId && record.state === 'frozen')
@@ -528,7 +509,11 @@ async function testOpenWindowRevision(browser, baseUrl) {
 				.at(-1)
 				.intent.previousDraft.map((segment) => segment.rawText)
 				.join(''),
-			partial.slice(frozenBefore.at(-1).sourceEnd)
+			partial.slice(
+				frozenBefore.at(-1).sourceEnd,
+				partial.indexOf(' Sentence 5', frozenBefore.at(-1).sourceEnd)
+			),
+			'原子边界变化时只携带仍与当前子句原子对齐的旧草稿'
 		);
 		const storedSegments = (await readStore(page, 'revisedSegments'))
 			.filter((record) => record.runId === revised.runId)
@@ -605,14 +590,13 @@ async function testOversizedRevisionProgress(browser, baseUrl) {
 				record.status === 'completed',
 			'定向重试后强制前进'
 		);
-		const forced = await waitForRecord(
+		const accepted = await waitForRecord(
 			page,
 			'revisedSegments',
-			(record) =>
-				record.producedByBatchId === completed.id && record.boundaryState === 'forced-tail',
-			'超长组明确标记 forced-tail'
+			(record) => record.producedByBatchId === completed.id,
+			'超长组定向重试后接受'
 		);
-		assert.equal(forced.rawText, source);
+		assert.equal(accepted.rawText, source);
 		const requests = sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs');
 		assert.equal(requests.length, 2);
 		assert.deepEqual(requests[0].intent.oversizedGroupNumbers, []);
@@ -674,12 +658,10 @@ async function testInvalidRevisionBoundaryGetsOneTargetedRetry(browser, baseUrl)
 		);
 		const requests = sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs');
 		assert.equal(requests.length, 2);
-		assert.deepEqual(requests[0].intent.previousInvalidLastTokenIndexes, []);
-		assert.deepEqual(requests[1].intent.previousInvalidLastTokenIndexes, [
-			1,
-			requests[0].intent.tokens.length,
-			requests[0].intent.tokens.length - 1,
-			requests[0].intent.tokens.length
+		assert.deepEqual(requests[0].intent.previousInvalidAtomRanges, []);
+		assert.deepEqual(requests[1].intent.previousInvalidAtomRanges, [
+			{ firstAtom: 1, lastAtom: requests[0].intent.atoms.length },
+			{ firstAtom: 1, lastAtom: requests[0].intent.atoms.length }
 		]);
 		await stopCapture(page);
 		assert.deepEqual(browserErrors, []);

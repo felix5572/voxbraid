@@ -6,10 +6,7 @@ import type {
 	StoredRevisionBatch,
 	StoredRevisionProjection
 } from '../projection/revision-records';
-import {
-	REVISION_MAX_GROUP_SOURCE_CHARACTERS,
-	REVISION_MAX_OPEN_SOURCE_CHARACTERS
-} from '../projection/revision-constants';
+import { REVISION_MAX_OPEN_SOURCE_CHARACTERS } from '../projection/revision-constants';
 import {
 	fromRunRecord,
 	fromThreadRecord,
@@ -163,12 +160,6 @@ function validateRevisionBatchShape(input: SaveRevisionBatchInput): void {
 			throw new Error(`Revision batch ${batch.id} places frozen content after open content.`);
 		}
 		if (segment.state === 'open') sawOpen = true;
-		if (
-			segment.sourceEnd - segment.sourceStart > REVISION_MAX_GROUP_SOURCE_CHARACTERS &&
-			segment.boundaryState !== 'forced-tail'
-		) {
-			throw new Error(`Revised segment ${segment.id} exceeds the soft group limit.`);
-		}
 		expectedStart = segment.sourceEnd;
 	}
 	if (segments.length > 0 && expectedStart !== batch.openEnd) {
