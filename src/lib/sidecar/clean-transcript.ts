@@ -1,5 +1,6 @@
 import { sentenceBoundaries } from '../session/sentence-boundary';
 import type { CaptureRun } from '../session/types';
+import type { ProjectionPolicy } from '../projection/projection-worker';
 import type {
 	ModelUsage,
 	ModelUsageStatus,
@@ -78,6 +79,12 @@ export interface StoredCleanTranscriptBlock extends CleanTranscriptCursor {
 export interface CleanTranscriptCandidateOptions {
 	force: boolean;
 	allowShort: boolean;
+}
+
+export interface CleanTranscriptProgress {
+	sourceRemaining: number;
+	translationRemaining: number;
+	ready: boolean;
 }
 
 export const EMPTY_CLEAN_TRANSCRIPT_CURSOR: CleanTranscriptCursor = Object.freeze({
@@ -297,3 +304,26 @@ export function nextCleanTranscriptCandidate(
 		translationText: run.translationStream.text.slice(cursor.translationEnd, translationEnd)
 	};
 }
+
+export function cleanTranscriptProgress(
+	run: CaptureRun,
+	cursor: CleanTranscriptCursor,
+	options: CleanTranscriptCandidateOptions
+): CleanTranscriptProgress {
+	return {
+		sourceRemaining: Math.max(0, run.sourceStream.text.length - cursor.sourceEnd),
+		translationRemaining: Math.max(0, run.translationStream.text.length - cursor.translationEnd),
+		ready: nextCleanTranscriptCandidate(run, cursor, options) !== null
+	};
+}
+
+export const CLEAN_TRANSCRIPT_POLICY: ProjectionPolicy<
+	CaptureRun,
+	CleanTranscriptCursor,
+	CleanTranscriptCandidateOptions,
+	CleanTranscriptCandidate,
+	CleanTranscriptProgress
+> = Object.freeze({
+	nextCandidate: nextCleanTranscriptCandidate,
+	progress: cleanTranscriptProgress
+});

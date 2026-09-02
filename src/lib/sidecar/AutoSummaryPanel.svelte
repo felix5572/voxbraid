@@ -3,6 +3,7 @@
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { inlineErrorDetails } from '../error-details';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
+	import { ProjectionWorker } from '../projection/projection-worker';
 	import type { CaptureRun } from '../session/types';
 	import { activeCaptureRun, type TranslationSessionState } from '../session/translation-session';
 	import type { StoredAutoSummary } from './auto-summary';
@@ -11,8 +12,8 @@
 		cleanTranscriptCandidateFromBlock,
 		cleanTranscriptContinuity,
 		cleanTranscriptCursorForRun,
+		CLEAN_TRANSCRIPT_POLICY,
 		CLEAN_TRANSCRIPT_TASK_VERSION,
-		nextCleanTranscriptCandidate,
 		nextCleanTranscriptSequence,
 		type CleanTranscriptCandidate,
 		type CleanTranscriptCursor,
@@ -65,10 +66,9 @@
 	let persistenceMessage = $state('');
 	let copyStatus = $state('');
 	let loadedThreadId = $state<string | null>(null);
-	let currentRequestId: string | null = null;
+	const worker = new ProjectionWorker();
 	let activeRequest = $state<ActiveCleanRequest | null>(null);
 	let statusNowMs = $state(Date.now());
-	let loadGeneration = 0;
 	let observedThreadId: string | null = null;
 	let observedRunId: string | null = null;
 	let observedRunWasActive = false;
@@ -123,7 +123,10 @@
 		force: boolean,
 		allowShort: boolean
 	): CleanTranscriptCandidate | null {
-		return nextCleanTranscriptCandidate(run, runCursor(run, manual), { force, allowShort });
+		return CLEAN_TRANSCRIPT_POLICY.nextCandidate(run, runCursor(run, manual), {
+			force,
+			allowShort
+		});
 	}
 
 	function publishCleanTranscript(): void {
@@ -135,8 +138,8 @@
 		nextThreadId: string | null,
 		nextRepository: LocalSessionRepository | null
 	): Promise<void> {
-		const generation = ++loadGeneration;
-		currentRequestId = null;
+		const generation = worker.beginLoad();
+		worker.cancelRequest();
 		activeRequest = null;
 		onRequestingChange(false);
 		onCleanContextLoaded(null);
@@ -164,7 +167,7 @@
 				persistenceMessage = `课堂清稿记录读取失败；本页仍可继续生成。\n${inlineErrorDetails(error)}`;
 			}
 		}
-		if (generation !== loadGeneration || session?.thread.id !== nextThreadId) return;
+		if (!worker.ownsLoad(generation) || session?.thread.id !== nextThreadId) return;
 
 		legacySummary = storedLegacy;
 		blocks = storedBlocks;
@@ -273,7 +276,7 @@
 			return false;
 		}
 
-		currentRequestId = clientRequestId;
+		worker.beginRequest(clientRequestId, capturedSession.thread.id);
 		activeRequest = {
 			clientRequestId,
 			sequence: blockSequence,
@@ -294,10 +297,13 @@
 			console.error('[clean-transcript] browser request failed', error);
 			result = localFailure(clientRequestId, 'invalid-response', sidecarErrorDetails(error));
 		}
-		if (currentRequestId !== clientRequestId || session?.thread.id !== capturedSession.thread.id) {
+		if (
+			!worker.ownsRequest(clientRequestId, capturedSession.thread.id) ||
+			session?.thread.id !== capturedSession.thread.id
+		) {
 			return false;
 		}
-		currentRequestId = null;
+		worker.finishRequest(clientRequestId);
 		activeRequest = null;
 		onRequestingChange(false);
 
