@@ -532,14 +532,16 @@
 				markCheckpointDirty();
 				if (!(await flushCheckpoint())) return;
 			}
-			const importedThreadId = await repository.importThread(await file.text(), nowIso());
-			await repository.repairAbandonedRuns(importedThreadId, nowIso());
-			const stored = await repository.loadThread(importedThreadId);
-			if (!stored) throw new Error(`Imported thread not found: ${importedThreadId}.`);
+			const imported = await repository.importThread(await file.text(), nowIso());
+			await repository.repairAbandonedRuns(imported.threadId, nowIso());
+			const stored = await repository.loadThread(imported.threadId);
+			if (!stored) throw new Error(`Imported thread not found: ${imported.threadId}.`);
 			applyStoredThread(stored);
 			await refreshThreadList();
 			persistenceError = '';
-			backupMessage = '会话已恢复。重复导入同一文件不会创建副本。';
+			backupMessage = ['会话已恢复。重复导入同一文件不会创建副本。', ...imported.warnings].join(
+				'\n'
+			);
 		} catch (importError) {
 			console.error('[persistence] import failed', importError);
 			persistenceError = `会话文件无效或恢复失败，本地原有会话未被清除。\n${inlineErrorDetails(importError)}`;

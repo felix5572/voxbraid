@@ -58,6 +58,16 @@ async function waitForRecord(page, storeName, predicate, description, timeoutMs 
 	throw new Error(`等待 ${description} 超时。`);
 }
 
+async function waitForStoreCondition(page, storeName, predicate, description, timeoutMs = 4_000) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const records = await readStore(page, storeName);
+		if (predicate(records)) return records;
+		await page.waitForTimeout(50);
+	}
+	throw new Error(`等待 ${description} 超时。`);
+}
+
 async function waitForSidecarRequest(page, requests, predicate, description, timeoutMs = 4_000) {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -155,8 +165,11 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		const delayMs =
 			body.intent.kind === 'ask' && body.intent.question === 'Hold across thread switch'
 				? 500
-				: body.intent.kind === 'translate-pairs' &&
-					  body.intent.atoms?.some((atom) => atom.text.includes('[HOLD_PAIR]'))
+				: body.intent.kind === 'revise-pairs' &&
+					  body.intent.tokens
+							?.map((token) => token.t)
+							.join('')
+							.includes('[HOLD_PAIR]')
 					? 600
 					: 25;
 		await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -188,21 +201,54 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		).length;
 		const askNumber = sidecarRequests.filter((request) => request.intent.kind === 'ask').length;
 		const pairNumber = sidecarRequests.filter(
-			(request) => request.intent.kind === 'translate-pairs'
+			(request) => request.intent.kind === 'revise-pairs'
 		).length;
+		const pairTokens = body.intent.kind === 'revise-pairs' ? (body.intent.tokens ?? []) : [];
+		const pairRaw = pairTokens.map((token) => token.t).join('');
+		const pairGroups = [];
+		let pairGroupStart = 0;
+		let pairGroupCharacters = 0;
+		for (const [index, token] of pairTokens.entries()) {
+			if (
+				!pairRaw.includes('[OVERSIZE_PAIR]') &&
+				pairGroupCharacters > 0 &&
+				pairGroupCharacters + token.t.length > 400
+			) {
+				pairGroups.push({
+					tokenEnd: index,
+					revisedSourceText: pairTokens
+						.slice(pairGroupStart, index)
+						.map((item) => item.t)
+						.join('')
+						.trim(),
+					translatedText: `独立句段译文 ${pairNumber}.${pairGroups.length + 1}`,
+					paragraphBreakBefore: pairGroups.length > 0
+				});
+				pairGroupStart = index;
+				pairGroupCharacters = 0;
+			}
+			pairGroupCharacters += token.t.length;
+		}
+		if (pairTokens.length > 0) {
+			pairGroups.push({
+				tokenEnd: pairTokens.length,
+				revisedSourceText: pairTokens
+					.slice(pairGroupStart)
+					.map((item) => item.t)
+					.join('')
+					.trim(),
+				translatedText: `独立句段译文 ${pairNumber}.${pairGroups.length + 1}`,
+				paragraphBreakBefore: pairGroups.length > 0
+			});
+		}
+		if (pairRaw.includes('[INVALID_REVISION]') && pairGroups[0]) {
+			pairGroups[0].tokenEnd = pairTokens.length + 1;
+		}
 		const outputs = {
 			summarize: `课堂清稿第${cleanBlockNumber}块`,
 			retranslate: '自动重译结果',
 			ask: askNumber === 1 ? '自动问答结果' : '自动追问结果',
-			'translate-pairs': JSON.stringify({
-				groups: [
-					{
-						atomIds: body.intent.atoms?.map((atom) => atom.id) ?? [],
-						translatedText: `独立句段译文 ${pairNumber}`,
-						paragraphBreakBefore: pairNumber > 1
-					}
-				]
-			})
+			'revise-pairs': JSON.stringify({ groups: pairGroups })
 		};
 		await route.fulfill({
 			contentType: 'application/json',
@@ -273,8 +319,8 @@ async function testCleanTranscriptContinuesAfterFailure(browser, baseUrl) {
 		assert.equal(retried.failureAttempts[0].errorCode, 'upstream-failed');
 		await waitForRecord(
 			page,
-			'translationPairBatches',
-			(record) => record.status === 'completed' && record.sourceEnd === source.length,
+			'revisionBatches',
+			(record) => record.status === 'completed' && record.openEnd === source.length,
 			'长原文的句段对照队列追平'
 		);
 		assert.deepEqual(browserErrors, []);
@@ -290,12 +336,16 @@ async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 		await startCapture(page);
 		const source = '[HOLD_PAIR] The background sentence pair request is deliberately slow.';
 		await emitPair(page, source, '后台句段请求被故意放慢。');
+		await mainText(page, source).waitFor();
 		await waitForSidecarRequest(
 			page,
 			sidecarRequests,
 			(request) =>
-				request.intent.kind === 'translate-pairs' &&
-				request.intent.atoms.some((atom) => atom.text.includes('[HOLD_PAIR]')),
+				request.intent.kind === 'revise-pairs' &&
+				request.intent.tokens
+					.map((token) => token.t)
+					.join('')
+					.includes('[HOLD_PAIR]'),
 			'在飞的句段对照请求'
 		);
 		const question = page.getByLabel('字幕问题', { exact: true });
@@ -319,41 +369,154 @@ async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 	}
 }
 
-async function testProvisionalPairRevision(browser, baseUrl) {
-	const { browserErrors, context, page } = await createPage(browser, baseUrl);
+async function testOpenWindowRevision(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
 	try {
 		await waitForReady(page);
 		await startCapture(page);
 		const partial = 'word '.repeat(160);
-		await emitPair(page, partial, '暂定译文。');
-		const provisional = await waitForRecord(
+		await emitPair(page, partial, '开放窗口译文。');
+		const first = await waitForRecord(
 			page,
-			'translationPairBatches',
+			'revisionBatches',
 			(record) =>
 				record.status === 'completed' &&
-				record.projectionState === 'provisional' &&
-				record.sourceEnd === partial.length,
-			'无标点硬边界生成暂定句段'
+				record.openStart === 0 &&
+				record.openEnd === partial.length,
+			'首个开放窗口修订'
 		);
+		await page.waitForTimeout(4_500);
+		assert.equal(
+			sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs').length,
+			1,
+			'无新 raw 时开放窗口不应按间隔重复付费修订'
+		);
+		const frozenBefore = (await readStore(page, 'revisedSegments'))
+			.filter((record) => record.runId === first.runId && record.state === 'frozen')
+			.sort((left, right) => left.sourceStart - right.sourceStart);
+		assert.ok(frozenBefore.length > 0);
 
-		const ending = 'finishes.';
+		const ending = ' More context completes one thought. Another ends now.';
 		await emitPair(page, ending, '完成。');
-		const stable = await waitForRecord(
+		const revised = await waitForRecord(
 			page,
-			'translationPairBatches',
+			'revisionBatches',
 			(record) =>
-				record.id === provisional.id &&
-				record.revision === 2 &&
-				record.projectionState === 'stable' &&
-				record.sourceEnd === partial.length + ending.length,
-			'真实句末到达后原位替换暂定句段'
+				record.runId === first.runId &&
+				record.sequence > first.sequence &&
+				record.status === 'completed' &&
+				record.openEnd === partial.length + ending.length,
+			'新上下文到达后重写开放窗口'
 		);
-		const storedSegments = (await readStore(page, 'translationPairSegments')).filter(
-			(record) => record.batchId === stable.id
+		const revisionRequests = sidecarRequests.filter(
+			(request) => request.intent.kind === 'revise-pairs'
 		);
-		assert.equal(storedSegments.length, 1);
-		assert.equal(storedSegments[0].batchRevision, 2);
-		assert.equal(storedSegments[0].sourceText, partial + ending);
+		assert.ok(revisionRequests.at(-1).intent.previousDraft.length > 0);
+		assert.equal(
+			revisionRequests
+				.at(-1)
+				.intent.previousDraft.map((segment) => segment.rawText)
+				.join(''),
+			partial.slice(frozenBefore.at(-1).sourceEnd)
+		);
+		const storedSegments = (await readStore(page, 'revisedSegments'))
+			.filter((record) => record.runId === revised.runId)
+			.sort((left, right) => left.sourceStart - right.sourceStart);
+		assert.equal(storedSegments.map((record) => record.rawText).join(''), partial + ending);
+		assert.deepEqual(
+			storedSegments.filter((record) => record.sourceEnd <= frozenBefore.at(-1).sourceEnd),
+			frozenBefore,
+			'已冻结的前部在开放尾窗修订后保持逐字段不变'
+		);
+		assert.ok(
+			storedSegments
+				.filter((record) => record.sourceStart >= frozenBefore.at(-1).sourceEnd)
+				.every((record) => record.producedByBatchId === revised.id)
+		);
+		const requestCountBeforeFreeze = revisionRequests.length;
+		const locallyFrozen = await waitForStoreCondition(
+			page,
+			'revisedSegments',
+			(records) =>
+				records.some((record) => record.runId === revised.runId) &&
+				records
+					.filter((record) => record.runId === revised.runId)
+					.every((record) => record.state === 'frozen'),
+			'自然句末静默后的本地冻结'
+		);
+		assert.ok(locallyFrozen.some((record) => record.runId === revised.runId));
+		assert.equal(
+			sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs').length,
+			requestCountBeforeFreeze,
+			'本地冻结不应重复调用模型'
+		);
+		await stopCapture(page);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
+async function testOversizedRevisionProgress(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		const source = `[OVERSIZE_PAIR] ${'long '.repeat(110)}.`;
+		await emitPair(page, source, '超长句段。');
+		const failed = await waitForRecord(
+			page,
+			'revisionBatches',
+			(record) => record.status === 'failed' && record.errorCode === 'invalid-response',
+			'超长组第一次响应审计'
+		);
+		const completed = await waitForRecord(
+			page,
+			'revisionBatches',
+			(record) =>
+				record.runId === failed.runId &&
+				record.sequence > failed.sequence &&
+				record.status === 'completed',
+			'定向重试后强制前进'
+		);
+		const forced = await waitForRecord(
+			page,
+			'revisedSegments',
+			(record) =>
+				record.producedByBatchId === completed.id && record.boundaryState === 'forced-tail',
+			'超长组明确标记 forced-tail'
+		);
+		assert.equal(forced.rawText, source);
+		const requests = sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs');
+		assert.equal(requests.length, 2);
+		assert.deepEqual(requests[0].intent.oversizedGroupNumbers, []);
+		assert.deepEqual(requests[1].intent.oversizedGroupNumbers, [1]);
+		await stopCapture(page);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
+async function testInvalidRevisionDoesNotRetry(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		const source = '[INVALID_REVISION] First sentence. Second sentence.';
+		await emitPair(page, source, '无效响应测试。');
+		await waitForRecord(
+			page,
+			'revisionBatches',
+			(record) => record.status === 'failed' && record.errorCode === 'invalid-response',
+			'无效模型响应审计'
+		);
+		await page.waitForTimeout(5_000);
+		assert.equal(
+			sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs').length,
+			1,
+			'同一失败 raw 窗口不应自动重复付费请求'
+		);
 		await stopCapture(page);
 		assert.deepEqual(browserErrors, []);
 	} finally {
@@ -397,8 +560,8 @@ async function stopCapture(page) {
 async function waitForPairCoverage(page, sourceLength, label = '句段对照追平原文') {
 	return waitForRecord(
 		page,
-		'translationPairBatches',
-		(record) => record.status === 'completed' && record.sourceEnd === sourceLength,
+		'revisionBatches',
+		(record) => record.status === 'completed' && record.openEnd === sourceLength,
 		label
 	);
 }
@@ -461,35 +624,41 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		assert.equal(firstRun.endReason, 'user-paused');
 		const firstPairBatch = await waitForRecord(
 			page,
-			'translationPairBatches',
+			'revisionBatches',
 			(record) => record.threadId === firstRun.threadId && record.status === 'completed',
 			'首个句段对照批次保存'
 		);
 		const firstPairSegment = await waitForRecord(
 			page,
-			'translationPairSegments',
-			(record) => record.batchId === firstPairBatch.id,
+			'revisedSegments',
+			(record) => record.producedByBatchId === firstPairBatch.id,
 			'首个句段对照结果原子保存'
 		);
-		assert.equal(firstPairSegment.sourceText, firstSource.slice(0, firstPairBatch.sourceEnd));
-		assert.match(firstPairSegment.translatedText, /^独立句段译文 \d+$/);
+		assert.equal(firstPairSegment.rawText, firstSource.slice(0, firstPairBatch.openEnd));
+		assert.equal(firstPairSegment.revisedSourceText, firstPairSegment.rawText);
+		assert.match(firstPairSegment.translatedText, /^独立句段译文 \d+\.\d+$/);
 		await waitForRecord(
 			page,
-			'translationPairBatches',
+			'revisionBatches',
 			(record) =>
 				record.threadId === firstRun.threadId &&
 				record.runId === firstRun.id &&
 				record.status === 'completed' &&
-				record.sourceEnd === firstSource.length,
+				record.openEnd === firstSource.length,
 			'暂停后句段对照追平完整原文'
 		);
+		const finalFirstRunSegments = (await readStore(page, 'revisedSegments'))
+			.filter((record) => record.runId === firstRun.id)
+			.sort((left, right) => left.sourceStart - right.sourceStart);
+		assert.equal(finalFirstRunSegments.map((record) => record.rawText).join(''), firstSource);
+		const restoredPairTranslation = finalFirstRunSegments[0].translatedText;
 		await page.getByRole('button', { name: new RegExp(firstTitle) }).waitFor();
 
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
 		await page.getByRole('button', { name: new RegExp(firstTitle) }).waitFor();
 		await mainText(page, firstSource).waitFor();
-		await page.getByText(firstPairSegment.translatedText, { exact: true }).waitFor();
+		await page.getByText(restoredPairTranslation, { exact: true }).waitFor();
 		await page.getByText(firstTranslation.slice(0, 1).repeat(3), { exact: true }).waitFor();
 		assert.equal(await page.getByLabel('目标语言', { exact: true }).inputValue(), 'ja');
 
@@ -506,11 +675,11 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		);
 		await waitForRecord(
 			page,
-			'translationPairBatches',
+			'revisionBatches',
 			(record) =>
 				record.runId === secondRun.id &&
 				record.status === 'completed' &&
-				record.sourceEnd === secondSource.length,
+				record.openEnd === secondSource.length,
 			'刷新前第二段句段对照追平'
 		);
 		await page.reload({ waitUntil: 'networkidle' });
@@ -892,7 +1061,7 @@ async function testStorageTimeoutFallback(browser, baseUrl) {
 		await emitPair(page, 'Translation continues without storage.', '保存なしでも翻訳できます。');
 		await mainText(page, 'Translation continues without storage.').waitFor();
 		await stopCapture(page);
-		await page.getByText(/^独立句段译文 \d+$/, { exact: true }).waitFor();
+		await page.getByText(/^独立句段译文 \d+\.\d+$/, { exact: true }).waitFor();
 		const expectedError = '[persistence] restore failed';
 		assert.ok(browserErrors.some((message) => message.includes(expectedError)));
 		assert.deepEqual(
@@ -942,7 +1111,9 @@ try {
 	await testPauseResumeAndNewThread(browser, baseUrl);
 	await testInteractiveRequestDuringPairGeneration(browser, baseUrl);
 	await testCleanTranscriptContinuesAfterFailure(browser, baseUrl);
-	await testProvisionalPairRevision(browser, baseUrl);
+	await testOpenWindowRevision(browser, baseUrl);
+	await testOversizedRevisionProgress(browser, baseUrl);
+	await testInvalidRevisionDoesNotRetry(browser, baseUrl);
 	await testDegradeAndRecover(browser, baseUrl);
 	await testPeriodicAndPageHideCheckpoints(browser, baseUrl);
 	await testConnectionFailure(browser, baseUrl);

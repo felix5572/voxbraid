@@ -1,5 +1,5 @@
-export type SidecarTaskKind = 'ask' | 'summarize' | 'retranslate' | 'translate-pairs';
-export type SidecarTrigger = 'manual' | 'periodic';
+export type SidecarTaskKind = 'ask' | 'summarize' | 'retranslate' | 'revise-pairs';
+export type SidecarTrigger = 'manual' | 'periodic' | 'finalizing';
 export type SidecarContextScope = 'latest-run' | 'current-thread';
 
 export interface SidecarConversationTurn {
@@ -7,14 +7,25 @@ export interface SidecarConversationTurn {
 	answer: string;
 }
 
-export interface SidecarTranslationPairAtom {
-	id: string;
-	text: string;
+export interface SidecarRevisionToken {
+	i: number;
+	start: number;
+	end: number;
+	t: string;
 }
 
-export interface SidecarTranslationPairContinuity {
-	sourceText: string;
+export interface SidecarRevisionContextSegment {
+	revisedSourceText: string;
 	translatedText: string;
+}
+
+export interface SidecarRevisionDraftSegment {
+	sourceStart: number;
+	sourceEnd: number;
+	rawText: string;
+	revisedSourceText: string;
+	translatedText: string;
+	paragraphBreakBefore: boolean;
 }
 
 export type SidecarIntent =
@@ -36,11 +47,13 @@ export type SidecarIntent =
 			targetLanguage: string;
 	  }
 	| {
-			kind: 'translate-pairs';
+			kind: 'revise-pairs';
 			trigger: SidecarTrigger;
 			targetLanguage: string;
-			atoms: SidecarTranslationPairAtom[];
-			continuity: SidecarTranslationPairContinuity[];
+			tokens: SidecarRevisionToken[];
+			continuity: SidecarRevisionContextSegment[];
+			previousDraft: SidecarRevisionDraftSegment[];
+			oversizedGroupNumbers: number[];
 	  };
 
 export interface SidecarTranscriptRunInput {

@@ -54,7 +54,7 @@ function jsonResponse(body: unknown, status = 200, requestId?: string): Response
 afterEach(() => vi.restoreAllMocks());
 
 describe('invokeSidecar', () => {
-	it('generates and validates translation pairs with one bounded Responses call', async () => {
+	it('generates and validates revision pairs with one bounded Responses call', async () => {
 		const fetcher = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
 			async () =>
 				jsonResponse({
@@ -64,7 +64,8 @@ describe('invokeSidecar', () => {
 					output_text: JSON.stringify({
 						groups: [
 							{
-								atomIds: ['run-1:0:15', 'run-1:15:32'],
+								tokenEnd: 2,
+								revisedSourceText: 'First sentence. Second sentence.',
 								translatedText: '第一句和第二句。',
 								paragraphBreakBefore: false
 							}
@@ -77,14 +78,16 @@ describe('invokeSidecar', () => {
 			request: rawRequest({
 				clientRequestId: 'pair-request-1',
 				intent: {
-					kind: 'translate-pairs',
+					kind: 'revise-pairs',
 					trigger: 'periodic',
 					targetLanguage: 'zh',
-					atoms: [
-						{ id: 'run-1:0:15', text: 'First sentence.' },
-						{ id: 'run-1:15:32', text: ' Second sentence.' }
+					tokens: [
+						{ i: 1, start: 0, end: 15, t: 'First sentence.' },
+						{ i: 2, start: 15, end: 32, t: ' Second sentence.' }
 					],
-					continuity: []
+					continuity: [],
+					previousDraft: [],
+					oversizedGroupNumbers: []
 				},
 				context: {
 					threadId: 'thread-1',
@@ -114,14 +117,15 @@ describe('invokeSidecar', () => {
 		expect(body).toMatchObject({
 			model: 'gpt-5.6-luna',
 			reasoning: { effort: 'none' },
-			text: { format: { type: 'json_schema', name: 'translation_pair_batch', strict: true } }
+			text: { format: { type: 'json_schema', name: 'revision_pair_batch', strict: true } }
 		});
 		expect(await result(response)).toMatchObject({
 			status: 'completed',
 			outputText: JSON.stringify({
 				groups: [
 					{
-						atomIds: ['run-1:0:15', 'run-1:15:32'],
+						tokenEnd: 2,
+						revisedSourceText: 'First sentence. Second sentence.',
 						translatedText: '第一句和第二句。',
 						paragraphBreakBefore: false
 					}
@@ -130,7 +134,66 @@ describe('invokeSidecar', () => {
 		});
 	});
 
-	it('rejects completed translation pair output with invalid atom coverage', async () => {
+	it('returns an oversized revision group for the browser soft-limit policy to handle', async () => {
+		const source = 'x'.repeat(600);
+		const fetcher = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+			async () =>
+				jsonResponse({
+					id: 'resp-pair-oversized',
+					model: 'gpt-5.6-luna',
+					status: 'completed',
+					output_text: JSON.stringify({
+						groups: [
+							{
+								tokenEnd: 1,
+								revisedSourceText: source,
+								translatedText: '超长组',
+								paragraphBreakBefore: false
+							}
+						]
+					}),
+					usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 }
+				})
+		);
+		const response = await invokeSidecar({
+			request: rawRequest({
+				clientRequestId: 'pair-request-oversized',
+				intent: {
+					kind: 'revise-pairs',
+					trigger: 'periodic',
+					targetLanguage: 'zh',
+					tokens: [{ i: 1, start: 0, end: 600, t: source }],
+					continuity: [],
+					previousDraft: [],
+					oversizedGroupNumbers: []
+				},
+				context: {
+					threadId: 'thread-1',
+					scope: 'latest-run',
+					capturedAt: NOW,
+					continuityText: '',
+					cleanedTranscript: '',
+					runs: [
+						{
+							runId: 'run-1',
+							sequence: 1,
+							targetLanguage: 'zh',
+							sourceText: source,
+							translationText: ''
+						}
+					]
+				}
+			}),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW
+		});
+
+		expect(response.status).toBe(200);
+		expect(await result(response)).toMatchObject({ status: 'completed' });
+	});
+
+	it('rejects completed revision pair output with invalid token coverage', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 		const fetcher = vi.fn(async () =>
 			jsonResponse({
@@ -140,7 +203,8 @@ describe('invokeSidecar', () => {
 				output_text: JSON.stringify({
 					groups: [
 						{
-							atomIds: ['unknown'],
+							tokenEnd: 2,
+							revisedSourceText: 'First sentence.',
 							translatedText: '错误覆盖。',
 							paragraphBreakBefore: false
 						}
@@ -151,11 +215,13 @@ describe('invokeSidecar', () => {
 		const body = {
 			clientRequestId: 'pair-request-2',
 			intent: {
-				kind: 'translate-pairs',
+				kind: 'revise-pairs',
 				trigger: 'periodic',
 				targetLanguage: 'zh',
-				atoms: [{ id: 'run-1:0:15', text: 'First sentence.' }],
-				continuity: []
+				tokens: [{ i: 1, start: 0, end: 15, t: 'First sentence.' }],
+				continuity: [],
+				previousDraft: [],
+				oversizedGroupNumbers: []
 			},
 			context: {
 				threadId: 'thread-1',
@@ -183,8 +249,8 @@ describe('invokeSidecar', () => {
 		expect(response.status).toBe(502);
 		expect(failure).toMatchObject({ status: 'failed', error: { code: 'invalid-response' } });
 		if (failure.status !== 'failed') throw new Error('Expected failed pair response.');
-		expect(failure.error.message).toContain('atom 覆盖校验');
-		expect(failure.error.message).toContain('unknown');
+		expect(failure.error.message).toContain('token 覆盖校验');
+		expect(failure.error.message).toContain('tokenEnd 无效');
 	});
 
 	it('rejects invalid requests before calling OpenAI', async () => {

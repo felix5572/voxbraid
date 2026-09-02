@@ -9,14 +9,17 @@ import type {
 	TranslationThread
 } from '../session/types';
 import type {
-	StoredTranslationPairBatch,
-	StoredTranslationPairProjection,
-	StoredTranslationPairSegment,
-	TranslationPairFailureAttempt
-} from '../projection/translation-pair-records';
+	StoredRevisedSegment,
+	StoredRevisionBatch,
+	StoredRevisionProjection
+} from '../projection/revision-records';
+import {
+	REVISION_MAX_GROUP_SOURCE_CHARACTERS,
+	REVISION_MAX_OPEN_SOURCE_CHARACTERS
+} from '../projection/revision-constants';
 import type { ModelUsage, SidecarErrorCode, SidecarFailureDiagnostic } from '../sidecar/types';
 
-export const SESSION_ARCHIVE_VERSION = 2 as const;
+export const SESSION_ARCHIVE_VERSION = 3 as const;
 
 export interface SessionArchive {
 	schemaVersion: typeof SESSION_ARCHIVE_VERSION;
@@ -24,7 +27,12 @@ export interface SessionArchive {
 	thread: TranslationThread;
 	runs: CaptureRun[];
 	segments: TranscriptSegment[];
-	translationPairs: StoredTranslationPairProjection;
+	revisionProjection: StoredRevisionProjection;
+}
+
+export interface ParsedSessionArchive {
+	archive: SessionArchive;
+	warnings: string[];
 }
 
 const RUN_STATUSES = new Set<CaptureRunStatus>([
@@ -107,6 +115,12 @@ function nonnegativeNumber(value: unknown, label: string): number {
 	return result;
 }
 
+function nonnegativeInteger(value: unknown, label: string): number {
+	const result = nonnegativeNumber(value, label);
+	if (!Number.isSafeInteger(result)) throw new Error(`${label} must be an integer.`);
+	return result;
+}
+
 function nullableNonnegativeNumber(value: unknown, label: string): number | null {
 	return value === null ? null : nonnegativeNumber(value, label);
 }
@@ -161,36 +175,18 @@ function sidecarErrorCode(value: unknown, label: string): SidecarErrorCode | nul
 	return result;
 }
 
-function failureAttempt(value: unknown, label: string): TranslationPairFailureAttempt {
-	const input = record(value, label);
-	return {
-		capturedAt: timestamp(input.capturedAt, `${label}.capturedAt`),
-		failedAt: timestamp(input.failedAt, `${label}.failedAt`),
-		clientRequestId: string(input.clientRequestId, `${label}.clientRequestId`),
-		responseId: nullableString(input.responseId, `${label}.responseId`),
-		model: nullableString(input.model, `${label}.model`),
-		upstreamStatus: upstreamStatus(input.upstreamStatus, `${label}.upstreamStatus`),
-		errorCode: sidecarErrorCode(input.errorCode, `${label}.errorCode`),
-		error: string(input.error, `${label}.error`),
-		diagnostic: failureDiagnostic(input.diagnostic, `${label}.diagnostic`)
-	};
-}
-
-function translationPairBatch(value: unknown, index: number): StoredTranslationPairBatch {
-	const label = `translationPairs.batches[${index}]`;
+function revisionBatch(value: unknown, index: number): StoredRevisionBatch {
+	const label = `revisionProjection.batches[${index}]`;
 	const input = record(value, label);
 	const status = string(input.status, `${label}.status`);
-	const projectionState = string(input.projectionState, `${label}.projectionState`);
+	const trigger = string(input.trigger, `${label}.trigger`);
 	const usageStatus = string(input.usageStatus, `${label}.usageStatus`);
 	if (status !== 'completed' && status !== 'failed') throw new Error(`${label}.status is invalid.`);
-	if (projectionState !== 'stable' && projectionState !== 'provisional') {
-		throw new Error(`${label}.projectionState is invalid.`);
+	if (trigger !== 'periodic' && trigger !== 'manual' && trigger !== 'finalizing') {
+		throw new Error(`${label}.trigger is invalid.`);
 	}
 	if (usageStatus !== 'recorded' && usageStatus !== 'unavailable') {
 		throw new Error(`${label}.usageStatus is invalid.`);
-	}
-	if (!Array.isArray(input.failureAttempts)) {
-		throw new Error(`${label}.failureAttempts must be an array.`);
 	}
 	const usage = input.usage === null ? null : modelUsage(input.usage, `${label}.usage`);
 	if ((usageStatus === 'recorded') !== (usage !== null)) {
@@ -202,20 +198,15 @@ function translationPairBatch(value: unknown, index: number): StoredTranslationP
 		runId: string(input.runId, `${label}.runId`),
 		runSequence: positiveInteger(input.runSequence, `${label}.runSequence`),
 		sequence: positiveInteger(input.sequence, `${label}.sequence`),
-		revision: positiveInteger(input.revision, `${label}.revision`),
-		projectionState,
-		targetLanguage: string(input.targetLanguage, `${label}.targetLanguage`),
-		sourceStart: nonnegativeNumber(input.sourceStart, `${label}.sourceStart`),
-		sourceEnd: nonnegativeNumber(input.sourceEnd, `${label}.sourceEnd`),
-		sourceElapsedEndMs: nullableNonnegativeNumber(
-			input.sourceElapsedEndMs,
-			`${label}.sourceElapsedEndMs`
-		),
+		openStart: nonnegativeInteger(input.openStart, `${label}.openStart`),
+		openEnd: nonnegativeInteger(input.openEnd, `${label}.openEnd`),
+		tokenizerVersion: positiveInteger(input.tokenizerVersion, `${label}.tokenizerVersion`),
+		taskVersion: positiveInteger(input.taskVersion, `${label}.taskVersion`),
+		trigger,
 		status,
 		capturedAt: timestamp(input.capturedAt, `${label}.capturedAt`),
 		completedAt: nullableTimestamp(input.completedAt, `${label}.completedAt`),
 		model: nullableString(input.model, `${label}.model`),
-		taskVersion: positiveInteger(input.taskVersion, `${label}.taskVersion`),
 		clientRequestId: string(input.clientRequestId, `${label}.clientRequestId`),
 		responseId: nullableString(input.responseId, `${label}.responseId`),
 		usageStatus,
@@ -224,30 +215,39 @@ function translationPairBatch(value: unknown, index: number): StoredTranslationP
 		errorCode: sidecarErrorCode(input.errorCode, `${label}.errorCode`),
 		error: nullableString(input.error, `${label}.error`),
 		diagnostic: failureDiagnostic(input.diagnostic, `${label}.diagnostic`),
-		failureAttempts: input.failureAttempts.map((attempt, attemptIndex) =>
-			failureAttempt(attempt, `${label}.failureAttempts[${attemptIndex}]`)
-		),
 		updatedAt: timestamp(input.updatedAt, `${label}.updatedAt`)
 	};
 }
 
-function translationPairSegment(value: unknown, index: number): StoredTranslationPairSegment {
-	const label = `translationPairs.segments[${index}]`;
+function revisedSegment(value: unknown, index: number): StoredRevisedSegment {
+	const label = `revisionProjection.segments[${index}]`;
 	const input = record(value, label);
+	const state = string(input.state, `${label}.state`);
+	const boundaryState = string(input.boundaryState, `${label}.boundaryState`);
+	if (state !== 'open' && state !== 'frozen') throw new Error(`${label}.state is invalid.`);
+	if (boundaryState !== 'complete' && boundaryState !== 'forced-tail') {
+		throw new Error(`${label}.boundaryState is invalid.`);
+	}
 	return {
 		id: string(input.id, `${label}.id`),
-		batchId: string(input.batchId, `${label}.batchId`),
-		batchRevision: positiveInteger(input.batchRevision, `${label}.batchRevision`),
 		threadId: string(input.threadId, `${label}.threadId`),
 		runId: string(input.runId, `${label}.runId`),
 		runSequence: positiveInteger(input.runSequence, `${label}.runSequence`),
-		sequence: positiveInteger(input.sequence, `${label}.sequence`),
-		sourceStart: nonnegativeNumber(input.sourceStart, `${label}.sourceStart`),
-		sourceEnd: nonnegativeNumber(input.sourceEnd, `${label}.sourceEnd`),
-		sourceText: string(input.sourceText, `${label}.sourceText`),
+		sourceStart: nonnegativeInteger(input.sourceStart, `${label}.sourceStart`),
+		sourceEnd: nonnegativeInteger(input.sourceEnd, `${label}.sourceEnd`),
+		rawText: string(input.rawText, `${label}.rawText`),
+		revisedSourceText: string(input.revisedSourceText, `${label}.revisedSourceText`),
 		translatedText: string(input.translatedText, `${label}.translatedText`),
 		paragraphBreakBefore: boolean(input.paragraphBreakBefore, `${label}.paragraphBreakBefore`),
-		createdAt: timestamp(input.createdAt, `${label}.createdAt`)
+		state,
+		boundaryState,
+		producedByBatchId: string(input.producedByBatchId, `${label}.producedByBatchId`),
+		sourceElapsedEndMs: nullableNonnegativeNumber(
+			input.sourceElapsedEndMs,
+			`${label}.sourceElapsedEndMs`
+		),
+		frozenAt: nullableTimestamp(input.frozenAt, `${label}.frozenAt`),
+		updatedAt: timestamp(input.updatedAt, `${label}.updatedAt`)
 	};
 }
 
@@ -353,22 +353,20 @@ export function validateSessionArchive(archive: SessionArchive): SessionArchive 
 		'run IDs'
 	);
 	unique(
-		archive.translationPairs.batches.map((item) => item.id),
-		'translation pair batch IDs'
+		archive.revisionProjection.batches.map((item) => item.id),
+		'revision batch IDs'
 	);
 	unique(
-		archive.translationPairs.batches.map((item) => `${item.runId}:${item.sequence}`),
-		'translation pair run sequences'
+		archive.revisionProjection.batches.map((item) => `${item.runId}:${item.sequence}`),
+		'revision batch run sequences'
 	);
 	unique(
-		archive.translationPairs.segments.map((item) => item.id),
-		'translation pair segment IDs'
+		archive.revisionProjection.segments.map((item) => item.id),
+		'revised segment IDs'
 	);
 	unique(
-		archive.translationPairs.segments.map(
-			(item) => `${item.batchId}:${item.batchRevision}:${item.sequence}`
-		),
-		'translation pair batch/revision sequences'
+		archive.revisionProjection.segments.map((item) => `${item.runId}:${item.sourceStart}`),
+		'revised segment run/start coordinates'
 	);
 	unique(
 		archive.runs.map((item) => String(item.sequence)),
@@ -404,54 +402,69 @@ export function validateSessionArchive(archive: SessionArchive): SessionArchive 
 		if (!runIds.has(item.runId)) throw new Error(`Segment ${item.id} points to a missing run.`);
 	}
 	const runsById = new Map(archive.runs.map((item) => [item.id, item]));
-	const batchesById = new Map(archive.translationPairs.batches.map((item) => [item.id, item]));
-	for (const batch of archive.translationPairs.batches) {
+	const batchesById = new Map(archive.revisionProjection.batches.map((item) => [item.id, item]));
+	for (const batch of archive.revisionProjection.batches) {
 		const parentRun = runsById.get(batch.runId);
 		if (
 			batch.threadId !== archive.thread.id ||
 			!parentRun ||
 			parentRun.sequence !== batch.runSequence ||
-			batch.sourceEnd <= batch.sourceStart ||
-			batch.sourceEnd > parentRun.sourceStream.text.length
+			batch.openEnd <= batch.openStart ||
+			batch.openEnd - batch.openStart > REVISION_MAX_OPEN_SOURCE_CHARACTERS ||
+			batch.openEnd > parentRun.sourceStream.text.length
 		) {
-			throw new Error(`Translation pair batch ${batch.id} does not match its run.`);
+			throw new Error(`Revision batch ${batch.id} does not match its run.`);
 		}
-		const batchSegments = archive.translationPairs.segments
-			.filter((segment) => segment.batchId === batch.id)
-			.sort((left, right) => left.sequence - right.sequence);
-		if ((batch.status === 'completed') !== batchSegments.length > 0) {
-			throw new Error(`Translation pair batch ${batch.id} status does not match its segments.`);
-		}
-		let expectedStart = batch.sourceStart;
-		for (const segment of batchSegments) {
-			if (
-				segment.batchRevision !== batch.revision ||
-				segment.threadId !== batch.threadId ||
-				segment.runId !== batch.runId ||
-				segment.runSequence !== batch.runSequence ||
-				segment.sourceStart !== expectedStart ||
-				segment.sourceEnd <= segment.sourceStart ||
-				segment.sourceText !==
-					parentRun.sourceStream.text.slice(segment.sourceStart, segment.sourceEnd) ||
-				!segment.translatedText.trim()
-			) {
-				throw new Error(`Translation pair segment ${segment.id} changed or misaligned facts.`);
-			}
-			expectedStart = segment.sourceEnd;
-		}
-		if (batchSegments.length > 0 && expectedStart !== batch.sourceEnd) {
-			throw new Error(`Translation pair batch ${batch.id} is not completely covered.`);
+		if (
+			(batch.status === 'completed' &&
+				(batch.completedAt === null ||
+					batch.model === null ||
+					batch.responseId === null ||
+					batch.upstreamStatus !== null ||
+					batch.errorCode !== null ||
+					batch.error !== null)) ||
+			(batch.status === 'failed' &&
+				(batch.completedAt !== null || batch.errorCode === null || batch.error === null))
+		) {
+			throw new Error(`Revision batch ${batch.id} has inconsistent outcome fields.`);
 		}
 	}
-	for (const segment of archive.translationPairs.segments) {
-		if (!batchesById.has(segment.batchId)) {
-			throw new Error(`Translation pair segment ${segment.id} points to a missing batch.`);
+	for (const run of archive.runs) {
+		const revised = archive.revisionProjection.segments
+			.filter((item) => item.runId === run.id)
+			.sort((left, right) => left.sourceStart - right.sourceStart);
+		let expectedStart = 0;
+		let sawOpen = false;
+		for (const item of revised) {
+			const producer = batchesById.get(item.producedByBatchId);
+			if (
+				item.threadId !== archive.thread.id ||
+				item.runSequence !== run.sequence ||
+				!producer ||
+				producer.status !== 'completed' ||
+				producer.runId !== run.id ||
+				item.sourceStart !== expectedStart ||
+				item.sourceEnd <= item.sourceStart ||
+				item.rawText.length !== item.sourceEnd - item.sourceStart ||
+				item.rawText !== run.sourceStream.text.slice(item.sourceStart, item.sourceEnd) ||
+				!item.revisedSourceText.trim() ||
+				!item.translatedText.trim() ||
+				(item.sourceEnd - item.sourceStart > REVISION_MAX_GROUP_SOURCE_CHARACTERS &&
+					item.boundaryState !== 'forced-tail') ||
+				(item.state === 'frozen' && sawOpen) ||
+				(item.state === 'frozen' && item.frozenAt === null) ||
+				(item.state === 'open' && item.frozenAt !== null)
+			) {
+				throw new Error(`Revised segment ${item.id} changed or misaligned facts.`);
+			}
+			if (item.state === 'open') sawOpen = true;
+			expectedStart = item.sourceEnd;
 		}
 	}
 	return structuredClone(archive);
 }
 
-export function parseSessionArchive(value: string): SessionArchive {
+export function parseSessionArchive(value: string): ParsedSessionArchive {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(value);
@@ -459,33 +472,41 @@ export function parseSessionArchive(value: string): SessionArchive {
 		throw new Error('Session archive is not valid JSON.', { cause: error });
 	}
 	const input = record(parsed, 'archive');
-	if (input.schemaVersion !== 1 && input.schemaVersion !== SESSION_ARCHIVE_VERSION) {
+	if (
+		input.schemaVersion !== 1 &&
+		input.schemaVersion !== 2 &&
+		input.schemaVersion !== SESSION_ARCHIVE_VERSION
+	) {
 		throw new Error(`Unsupported session archive version: ${String(input.schemaVersion)}.`);
 	}
 	if (!Array.isArray(input.runs)) throw new Error('archive.runs must be an array.');
 	if (!Array.isArray(input.segments)) throw new Error('archive.segments must be an array.');
-	const pairInput =
-		input.schemaVersion === 1
-			? { batches: [], segments: [] }
-			: record(input.translationPairs, 'archive.translationPairs');
-	if (!Array.isArray(pairInput.batches)) {
-		throw new Error('archive.translationPairs.batches must be an array.');
+	const current = input.schemaVersion === SESSION_ARCHIVE_VERSION;
+	const revisionInput = current
+		? record(input.revisionProjection, 'archive.revisionProjection')
+		: { batches: [], segments: [] };
+	if (!Array.isArray(revisionInput.batches)) {
+		throw new Error('archive.revisionProjection.batches must be an array.');
 	}
-	if (!Array.isArray(pairInput.segments)) {
-		throw new Error('archive.translationPairs.segments must be an array.');
+	if (!Array.isArray(revisionInput.segments)) {
+		throw new Error('archive.revisionProjection.segments must be an array.');
 	}
 
-	return validateSessionArchive({
+	const archive = validateSessionArchive({
 		schemaVersion: SESSION_ARCHIVE_VERSION,
 		exportedAt: timestamp(input.exportedAt, 'archive.exportedAt'),
 		thread: thread(input.thread),
 		runs: input.runs.map(run),
 		segments: input.segments.map(segment),
-		translationPairs: {
-			batches: pairInput.batches.map(translationPairBatch),
-			segments: pairInput.segments.map(translationPairSegment)
+		revisionProjection: {
+			batches: revisionInput.batches.map(revisionBatch),
+			segments: revisionInput.segments.map(revisedSegment)
 		}
 	});
+	return {
+		archive,
+		warnings: current ? [] : ['该备份不含当前修订对照；Live 原文已恢复，修订对照将从此重新开始。']
+	};
 }
 
 export function stringifySessionArchive(archive: SessionArchive): string {

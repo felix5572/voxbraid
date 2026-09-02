@@ -1,18 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { prepareSidecarCall, parseSidecarInvokeRequest } from './sidecar-tasks';
 
-function translationPairRequest() {
+function revisionPairRequest() {
 	return {
 		clientRequestId: 'pair-request-1',
 		intent: {
-			kind: 'translate-pairs',
+			kind: 'revise-pairs',
 			trigger: 'periodic',
 			targetLanguage: 'zh',
-			atoms: [
-				{ id: 'run-1:0:15', text: 'First sentence.' },
-				{ id: 'run-1:15:32', text: ' Second sentence.' }
+			tokens: [
+				{ i: 1, start: 0, end: 15, t: 'First sentence.' },
+				{ i: 2, start: 15, end: 32, t: ' Second sentence.' }
 			],
-			continuity: [{ sourceText: 'Earlier.', translatedText: '此前。' }]
+			continuity: [{ revisedSourceText: 'Earlier.', translatedText: '此前。' }],
+			previousDraft: [],
+			oversizedGroupNumbers: [] as number[]
 		},
 		context: {
 			threadId: 'thread-1',
@@ -69,63 +71,69 @@ function request(kind: 'ask' | 'summarize' | 'retranslate') {
 
 describe('sidecar task preparation', () => {
 	it('prepares bounded Luna structured output without an input-token preflight', () => {
-		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(translationPairRequest()));
+		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(revisionPairRequest()));
 
 		expect(prepared).toMatchObject({
-			kind: 'translate-pairs',
+			kind: 'revise-pairs',
 			model: 'gpt-5.6-luna',
-			taskVersion: 1,
+			taskVersion: 2,
 			inputTokenPreflight: 'skip-bounded',
-			maxPreparedInputBytes: 32_000,
+			maxPreparedInputBytes: 64_000,
 			reasoningEffort: 'none',
-			structuredOutput: 'translation-pairs',
-			translationPairAtomIds: ['run-1:0:15', 'run-1:15:32']
+			structuredOutput: 'revision-pairs'
 		});
-		expect(prepared.inputText).toContain('currentAtoms');
+		expect(prepared.revisionTokens.map((token) => token.i)).toEqual([1, 2]);
+		expect(prepared.inputText).toContain('currentTokens');
+		expect(prepared.inputText).toContain('"i": 1');
 		expect(prepared.inputText).toContain('Earlier.');
 		expect(prepared.inputText).not.toContain('realtimeTranslation');
-		expect(prepared.instructions).toContain('exactly once');
+		expect(prepared.instructions).toContain('strictly increasing tokenEnd');
 	});
 
-	it('rejects mismatched or over-sized translation pair input before OpenAI', () => {
-		const mismatch = translationPairRequest();
+	it('rejects mismatched or over-sized revision pair input before OpenAI', () => {
+		const mismatch = revisionPairRequest();
 		mismatch.context.runs[0].sourceText = 'different source';
 		expect(() => prepareSidecarCall(parseSidecarInvokeRequest(mismatch))).toThrow(
-			'atom 文本或目标语言与 Run 事实切片不一致'
+			'token 文本或目标语言与 Run 事实切片不一致'
 		);
 
-		const oversized = translationPairRequest();
-		oversized.intent.atoms = [{ id: 'run-1:0:1601', text: 'x'.repeat(1_601) }];
+		const oversized = revisionPairRequest();
+		oversized.intent.tokens = [{ i: 1, start: 0, end: 1_601, t: 'x'.repeat(1_601) }];
 		oversized.context.runs[0].sourceText = 'x'.repeat(1_601);
-		expect(() => parseSidecarInvokeRequest(oversized)).toThrow('超过 1600 字符上限');
+		expect(() => parseSidecarInvokeRequest(oversized)).toThrow('超过 1600 字符硬上限');
 	});
 
-	it('rejects atom IDs that do not form one exact run-local character range', () => {
-		const wrongRun = translationPairRequest();
-		wrongRun.intent.atoms[0].id = 'run-other:0:15';
-		expect(() => prepareSidecarCall(parseSidecarInvokeRequest(wrongRun))).toThrow(
-			'atom ID、字符范围或连续顺序无效'
-		);
-
-		const gap = translationPairRequest();
-		gap.intent.atoms[1].id = 'run-1:16:33';
-		expect(() => prepareSidecarCall(parseSidecarInvokeRequest(gap))).toThrow(
-			'atom ID、字符范围或连续顺序无效'
-		);
+	it('rejects token indexes and ranges that are not exact and continuous', () => {
+		const gap = revisionPairRequest();
+		gap.intent.tokens[1].start = 16;
+		expect(() => parseSidecarInvokeRequest(gap)).toThrow('token 编号、字符范围或连续顺序无效');
 	});
 
 	it('keeps a maximum bounded pair input comfortably below the static byte limit', () => {
-		const value = translationPairRequest();
+		const value = revisionPairRequest();
 		const source = '原'.repeat(1_600);
-		value.intent.atoms = [{ id: 'run-1:0:1600', text: source }];
-		value.intent.continuity = [{ sourceText: '前'.repeat(750), translatedText: '译'.repeat(750) }];
+		value.intent.tokens = [{ i: 1, start: 0, end: 1_600, t: source }];
+		value.intent.continuity = [
+			{
+				revisedSourceText: '修'.repeat(750),
+				translatedText: '译'.repeat(750)
+			}
+		];
 		value.context.runs[0].sourceText = source;
 		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
 		const bytes = new TextEncoder().encode(
 			JSON.stringify({ instructions: prepared.instructions, input: prepared.inputText })
 		).byteLength;
 
-		expect(bytes).toBeLessThanOrEqual(32_000);
+		expect(bytes).toBeLessThanOrEqual(64_000);
+	});
+
+	it('adds a server-owned correction for an oversized-group retry', () => {
+		const value = revisionPairRequest();
+		value.intent.oversizedGroupNumbers = [2];
+		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
+
+		expect(prepared.inputText).toContain('groups 2 exceeded');
 	});
 
 	it('keeps both transcript channels for summaries and questions', () => {

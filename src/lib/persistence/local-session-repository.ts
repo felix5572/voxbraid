@@ -2,10 +2,14 @@ import type { CaptureRun, TranscriptSegment, TranslationThread } from '../sessio
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
 import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
 import type {
-	StoredTranslationPairBatch,
-	StoredTranslationPairProjection,
-	StoredTranslationPairSegment
-} from '../projection/translation-pair-records';
+	StoredRevisedSegment,
+	StoredRevisionBatch,
+	StoredRevisionProjection
+} from '../projection/revision-records';
+import {
+	REVISION_MAX_GROUP_SOURCE_CHARACTERS,
+	REVISION_MAX_OPEN_SOURCE_CHARACTERS
+} from '../projection/revision-constants';
 import {
 	fromRunRecord,
 	fromThreadRecord,
@@ -28,6 +32,11 @@ export interface StoredThread {
 	segments: TranscriptSegment[];
 }
 
+export interface ImportThreadResult {
+	threadId: string;
+	warnings: string[];
+}
+
 export interface SaveCheckpointInput {
 	thread: TranslationThread;
 	run: CaptureRun;
@@ -40,9 +49,9 @@ export interface ReplaceSegmentRevisionInput {
 	checkpointedAt: string;
 }
 
-export interface SaveTranslationPairBatchInput {
-	batch: StoredTranslationPairBatch;
-	segments: StoredTranslationPairSegment[];
+export interface SaveRevisionBatchInput {
+	batch: StoredRevisionBatch;
+	segments: StoredRevisedSegment[];
 	facts?: {
 		thread: TranslationThread;
 		run: CaptureRun;
@@ -108,40 +117,62 @@ function validateRevision(input: ReplaceSegmentRevisionInput): number {
 	return revision;
 }
 
-function validateTranslationPairBatchShape(input: SaveTranslationPairBatchInput): void {
+function validateRevisionBatchShape(input: SaveRevisionBatchInput): void {
 	const { batch, segments } = input;
 	if (
 		batch.sequence <= 0 ||
-		batch.revision <= 0 ||
 		batch.runSequence <= 0 ||
-		batch.sourceStart < 0 ||
-		batch.sourceEnd <= batch.sourceStart ||
+		batch.openStart < 0 ||
+		batch.openEnd <= batch.openStart ||
+		batch.openEnd - batch.openStart > REVISION_MAX_OPEN_SOURCE_CHARACTERS ||
 		(batch.status === 'completed' && segments.length === 0) ||
 		(batch.status === 'failed' && segments.length !== 0) ||
+		(batch.status === 'completed' &&
+			(batch.completedAt === null ||
+				batch.model === null ||
+				batch.responseId === null ||
+				batch.upstreamStatus !== null ||
+				batch.errorCode !== null ||
+				batch.error !== null)) ||
+		(batch.status === 'failed' &&
+			(batch.completedAt !== null || batch.errorCode === null || batch.error === null)) ||
 		(batch.usageStatus === 'recorded' && batch.usage === null) ||
 		(batch.usageStatus === 'unavailable' && batch.usage !== null)
 	) {
-		throw new Error(`Translation pair batch ${batch.id} has an invalid shape.`);
+		throw new Error(`Revision batch ${batch.id} has an invalid shape.`);
 	}
-	let expectedStart = batch.sourceStart;
-	for (const [index, segment] of segments.entries()) {
+	let expectedStart = batch.openStart;
+	let sawOpen = false;
+	for (const segment of segments) {
 		if (
-			segment.batchId !== batch.id ||
-			segment.batchRevision !== batch.revision ||
+			segment.producedByBatchId !== batch.id ||
 			segment.threadId !== batch.threadId ||
 			segment.runId !== batch.runId ||
 			segment.runSequence !== batch.runSequence ||
-			segment.sequence !== index + 1 ||
 			segment.sourceStart !== expectedStart ||
 			segment.sourceEnd <= segment.sourceStart ||
-			!segment.translatedText.trim()
+			segment.rawText.length !== segment.sourceEnd - segment.sourceStart ||
+			!segment.revisedSourceText.trim() ||
+			!segment.translatedText.trim() ||
+			(segment.state === 'frozen' && segment.frozenAt === null) ||
+			(segment.state === 'open' && segment.frozenAt !== null)
 		) {
-			throw new Error(`Translation pair segment ${segment.id} does not match batch ${batch.id}.`);
+			throw new Error(`Revised segment ${segment.id} does not match batch ${batch.id}.`);
+		}
+		if (sawOpen && segment.state === 'frozen') {
+			throw new Error(`Revision batch ${batch.id} places frozen content after open content.`);
+		}
+		if (segment.state === 'open') sawOpen = true;
+		if (
+			segment.sourceEnd - segment.sourceStart > REVISION_MAX_GROUP_SOURCE_CHARACTERS &&
+			segment.boundaryState !== 'forced-tail'
+		) {
+			throw new Error(`Revised segment ${segment.id} exceeds the soft group limit.`);
 		}
 		expectedStart = segment.sourceEnd;
 	}
-	if (segments.length > 0 && expectedStart !== batch.sourceEnd) {
-		throw new Error(`Translation pair batch ${batch.id} is not covered by its segments.`);
+	if (segments.length > 0 && expectedStart !== batch.openEnd) {
+		throw new Error(`Revision batch ${batch.id} is not covered by its segments.`);
 	}
 	if (
 		input.facts &&
@@ -149,7 +180,7 @@ function validateTranslationPairBatchShape(input: SaveTranslationPairBatchInput)
 			input.facts.run.id !== batch.runId ||
 			input.facts.run.threadId !== batch.threadId)
 	) {
-		throw new Error(`Translation pair batch ${batch.id} fact snapshot has a different identity.`);
+		throw new Error(`Revision batch ${batch.id} fact snapshot has a different identity.`);
 	}
 }
 
@@ -287,48 +318,42 @@ export class LocalSessionRepository {
 		);
 	}
 
-	async loadTranslationPairProjection(threadId: string): Promise<StoredTranslationPairProjection> {
+	async loadRevisionProjection(threadId: string): Promise<StoredRevisionProjection> {
 		return this.database.transaction(
 			'r',
-			this.database.translationPairBatches,
-			this.database.translationPairSegments,
+			this.database.revisionBatches,
+			this.database.revisedSegments,
 			async () => {
-				const batches = await this.database.translationPairBatches
+				const batches = await this.database.revisionBatches
 					.where('threadId')
 					.equals(threadId)
 					.toArray();
-				const batchIds = batches.map((batch) => batch.id);
-				const segments =
-					batchIds.length === 0
-						? []
-						: await this.database.translationPairSegments
-								.where('batchId')
-								.anyOf(batchIds)
-								.toArray();
+				const segments = await this.database.revisedSegments
+					.where('threadId')
+					.equals(threadId)
+					.toArray();
 				return {
 					batches: batches.sort(
 						(left, right) => left.runSequence - right.runSequence || left.sequence - right.sequence
 					),
 					segments: segments.sort(
 						(left, right) =>
-							left.runSequence - right.runSequence ||
-							left.sourceStart - right.sourceStart ||
-							left.sequence - right.sequence
+							left.runSequence - right.runSequence || left.sourceStart - right.sourceStart
 					)
 				};
 			}
 		);
 	}
 
-	async saveTranslationPairBatch(input: SaveTranslationPairBatchInput): Promise<void> {
-		validateTranslationPairBatchShape(input);
+	async saveRevisionBatch(input: SaveRevisionBatchInput): Promise<void> {
+		validateRevisionBatchShape(input);
 		const { batch, segments } = input;
 		await this.database.transaction(
 			'rw',
 			this.database.threads,
 			this.database.runs,
-			this.database.translationPairBatches,
-			this.database.translationPairSegments,
+			this.database.revisionBatches,
+			this.database.revisedSegments,
 			async () => {
 				let [thread, run] = await Promise.all([
 					this.database.threads.get(batch.threadId),
@@ -341,56 +366,98 @@ export class LocalSessionRepository {
 				if (!run && input.facts) {
 					run = toRunRecord(input.facts.run, input.facts.checkpointedAt);
 					await this.database.runs.put(run);
-				} else if (
-					run &&
-					input.facts &&
-					(run.sourceStream.text.length < input.facts.run.sourceStream.text.length ||
-						run.translationStream.text.length < input.facts.run.translationStream.text.length)
-				) {
-					run = extendRunFacts(run, input.facts.run);
-					await this.database.runs.put(run);
+				} else if (run && input.facts) {
+					const extended = extendRunFacts(run, input.facts.run);
+					if (
+						extended.sourceStream !== run.sourceStream ||
+						extended.translationStream !== run.translationStream
+					) {
+						run = extended;
+						await this.database.runs.put(run);
+					}
 				}
 				if (!thread) throw new Error(`Thread not found: ${batch.threadId}.`);
 				if (!run) throw new Error(`Run not found: ${batch.runId}.`);
 				if (
 					run.threadId !== batch.threadId ||
 					run.sequence !== batch.runSequence ||
-					batch.sourceEnd > run.sourceStream.text.length
+					batch.openEnd > run.sourceStream.text.length
 				) {
-					throw new Error(`Translation pair batch ${batch.id} does not match its run.`);
+					throw new Error(`Revision batch ${batch.id} does not match its run.`);
 				}
 				for (const segment of segments) {
 					if (
-						segment.sourceText !==
-						run.sourceStream.text.slice(segment.sourceStart, segment.sourceEnd)
+						segment.rawText !== run.sourceStream.text.slice(segment.sourceStart, segment.sourceEnd)
 					) {
-						throw new Error(`Translation pair segment ${segment.id} changed source facts.`);
+						throw new Error(`Revised segment ${segment.id} changed source facts.`);
 					}
 				}
-				await this.database.translationPairSegments.where('batchId').equals(batch.id).delete();
-				await this.database.translationPairBatches.put(batch);
-				if (segments.length > 0) await this.database.translationPairSegments.bulkPut(segments);
+				if (batch.status === 'completed') {
+					const existing = await this.database.revisedSegments
+						.where('runId')
+						.equals(batch.runId)
+						.toArray();
+					const frozen = existing
+						.filter((segment) => segment.state === 'frozen')
+						.sort((left, right) => left.sourceStart - right.sourceStart);
+					const frozenEnd = frozen.at(-1)?.sourceEnd ?? 0;
+					if (frozenEnd !== batch.openStart) {
+						throw new Error(
+							`Revision batch ${batch.id} starts at ${batch.openStart}, expected frozen end ${frozenEnd}.`
+						);
+					}
+					await this.database.revisedSegments
+						.where('runId')
+						.equals(batch.runId)
+						.filter((segment) => segment.state === 'open')
+						.delete();
+					await this.database.revisedSegments.bulkPut(segments);
+				}
+				await this.database.revisionBatches.put(batch);
 			}
 		);
 	}
 
-	async clearTranslationPairProjection(threadId: string): Promise<void> {
+	async freezeRevisionOpenSegments(
+		threadId: string,
+		runId: string,
+		frozenAt: string
+	): Promise<StoredRevisedSegment[]> {
+		return this.database.transaction(
+			'rw',
+			this.database.runs,
+			this.database.revisedSegments,
+			async () => {
+				const run = await this.database.runs.get(runId);
+				if (!run || run.threadId !== threadId) throw new Error(`Run not found: ${runId}.`);
+				const stored = (
+					await this.database.revisedSegments.where('runId').equals(runId).toArray()
+				).sort((left, right) => left.sourceStart - right.sourceStart);
+				const next = stored.map((segment) =>
+					segment.state === 'open'
+						? { ...segment, state: 'frozen' as const, frozenAt, updatedAt: frozenAt }
+						: segment
+				);
+				if (next.some((segment, index) => segment !== stored[index])) {
+					await this.database.revisedSegments.bulkPut(next);
+				}
+				return next;
+			}
+		);
+	}
+
+	async clearRevisionProjection(threadId: string): Promise<void> {
 		await this.database.transaction(
 			'rw',
 			this.database.threads,
-			this.database.translationPairBatches,
-			this.database.translationPairSegments,
+			this.database.revisionBatches,
+			this.database.revisedSegments,
 			async () => {
 				if (!(await this.database.threads.get(threadId))) {
 					throw new Error(`Thread not found: ${threadId}.`);
 				}
-				const batchIds = (
-					await this.database.translationPairBatches.where('threadId').equals(threadId).toArray()
-				).map((batch) => batch.id);
-				if (batchIds.length > 0) {
-					await this.database.translationPairSegments.where('batchId').anyOf(batchIds).delete();
-				}
-				await this.database.translationPairBatches.where('threadId').equals(threadId).delete();
+				await this.database.revisedSegments.where('threadId').equals(threadId).delete();
+				await this.database.revisionBatches.where('threadId').equals(threadId).delete();
 			}
 		);
 	}
@@ -444,21 +511,22 @@ export class LocalSessionRepository {
 	}
 
 	async exportThread(threadId: string, exportedAt: string): Promise<string> {
-		const [stored, translationPairs] = await Promise.all([
+		const [stored, revisionProjection] = await Promise.all([
 			this.loadThread(threadId),
-			this.loadTranslationPairProjection(threadId)
+			this.loadRevisionProjection(threadId)
 		]);
 		if (!stored) throw new Error(`Thread not found: ${threadId}.`);
 		return stringifySessionArchive({
 			schemaVersion: SESSION_ARCHIVE_VERSION,
 			exportedAt,
 			...stored,
-			translationPairs
+			revisionProjection
 		});
 	}
 
-	async importThread(value: string, checkpointedAt: string): Promise<string> {
-		const archive = parseSessionArchive(value);
+	async importThread(value: string, checkpointedAt: string): Promise<ImportThreadResult> {
+		const parsed = parseSessionArchive(value);
+		const { archive } = parsed;
 		await this.database.transaction(
 			'rw',
 			[
@@ -467,8 +535,8 @@ export class LocalSessionRepository {
 				this.database.segments,
 				this.database.autoSummaries,
 				this.database.cleanTranscriptBlocks,
-				this.database.translationPairBatches,
-				this.database.translationPairSegments
+				this.database.revisionBatches,
+				this.database.revisedSegments
 			],
 			async () => {
 				const existingRuns = await this.database.runs
@@ -497,25 +565,25 @@ export class LocalSessionRepository {
 				) {
 					throw new Error('Imported segment ID already belongs to another thread.');
 				}
-				const importedPairBatchCollisions = await this.database.translationPairBatches.bulkGet(
-					archive.translationPairs.batches.map((batch) => batch.id)
+				const importedRevisionBatchCollisions = await this.database.revisionBatches.bulkGet(
+					archive.revisionProjection.batches.map((batch) => batch.id)
 				);
 				if (
-					importedPairBatchCollisions.some(
+					importedRevisionBatchCollisions.some(
 						(batch) => batch !== undefined && batch.threadId !== archive.thread.id
 					)
 				) {
-					throw new Error('Imported translation pair batch ID belongs to another thread.');
+					throw new Error('Imported revision batch ID belongs to another thread.');
 				}
-				const importedPairSegmentCollisions = await this.database.translationPairSegments.bulkGet(
-					archive.translationPairs.segments.map((segment) => segment.id)
+				const importedRevisedSegmentCollisions = await this.database.revisedSegments.bulkGet(
+					archive.revisionProjection.segments.map((segment) => segment.id)
 				);
 				if (
-					importedPairSegmentCollisions.some(
+					importedRevisedSegmentCollisions.some(
 						(segment) => segment !== undefined && segment.threadId !== archive.thread.id
 					)
 				) {
-					throw new Error('Imported translation pair segment ID belongs to another thread.');
+					throw new Error('Imported revised segment ID belongs to another thread.');
 				}
 
 				if (existingRunIds.length > 0) {
@@ -526,30 +594,19 @@ export class LocalSessionRepository {
 					.where('threadId')
 					.equals(archive.thread.id)
 					.delete();
-				const pairBatchIds = (
-					await this.database.translationPairBatches
-						.where('threadId')
-						.equals(archive.thread.id)
-						.toArray()
-				).map((batch) => batch.id);
-				if (pairBatchIds.length > 0) {
-					await this.database.translationPairSegments.where('batchId').anyOf(pairBatchIds).delete();
-				}
-				await this.database.translationPairBatches
-					.where('threadId')
-					.equals(archive.thread.id)
-					.delete();
+				await this.database.revisedSegments.where('threadId').equals(archive.thread.id).delete();
+				await this.database.revisionBatches.where('threadId').equals(archive.thread.id).delete();
 				await this.database.runs.where('threadId').equals(archive.thread.id).delete();
 				await this.database.threads.put(toThreadRecord(archive.thread, checkpointedAt));
 				await this.database.runs.bulkPut(
 					archive.runs.map((run) => toRunRecord(run, checkpointedAt))
 				);
 				await this.database.segments.bulkPut(archive.segments);
-				await this.database.translationPairBatches.bulkPut(archive.translationPairs.batches);
-				await this.database.translationPairSegments.bulkPut(archive.translationPairs.segments);
+				await this.database.revisionBatches.bulkPut(archive.revisionProjection.batches);
+				await this.database.revisedSegments.bulkPut(archive.revisionProjection.segments);
 			}
 		);
-		return archive.thread.id;
+		return { threadId: archive.thread.id, warnings: parsed.warnings };
 	}
 
 	close(): void {

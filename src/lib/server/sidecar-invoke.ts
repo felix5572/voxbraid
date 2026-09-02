@@ -1,9 +1,6 @@
 import type { ModelUsage, SidecarErrorCode, SidecarInvokeResult } from '../sidecar/types';
 import { errorDetails } from '../error-details';
-import {
-	parseTranslationPairModelOutput,
-	TRANSLATION_PAIR_OUTPUT_SCHEMA
-} from '../projection/translation-pair-output';
+import { parseRevisionModelOutput, REVISION_OUTPUT_SCHEMA } from '../projection/revision-output';
 import { json } from '@sveltejs/kit';
 import {
 	parseSidecarInvokeRequest,
@@ -334,8 +331,8 @@ export async function invokeSidecar({
 				store: false,
 				stream: false,
 				...(prepared.reasoningEffort ? { reasoning: { effort: prepared.reasoningEffort } } : {}),
-				...(prepared.structuredOutput === 'translation-pairs'
-					? { text: { format: TRANSLATION_PAIR_OUTPUT_SCHEMA } }
+				...(prepared.structuredOutput === 'revision-pairs'
+					? { text: { format: REVISION_OUTPUT_SCHEMA } }
 					: {})
 			},
 			{ fetcher, apiKey, timeoutMs }
@@ -391,14 +388,25 @@ export async function invokeSidecar({
 	let outputText = extractOutputText(body);
 	const usage = extractUsage(body);
 	if (body.status === 'completed' && responseId) {
-		if (prepared.structuredOutput === 'translation-pairs') {
+		if (prepared.structuredOutput === 'revision-pairs') {
 			try {
 				outputText = JSON.stringify(
-					parseTranslationPairModelOutput(outputText, prepared.translationPairAtomIds)
+					parseRevisionModelOutput(
+						outputText,
+						prepared.revisionTokens.map((token) => ({
+							index: token.i,
+							start: token.start,
+							end: token.end,
+							text: token.t
+						})),
+						// The server owns hard token coverage and range validation. The browser owns
+						// the 480-character product preference and its targeted retry/fallback.
+						{ allowOversizedGroups: true }
+					).output
 				);
 			} catch (error) {
 				const details = errorDetails(error);
-				console.error('[sidecar] translation pair output validation failed', {
+				console.error('[sidecar] revision pair output validation failed', {
 					clientRequestId: prepared.clientRequestId,
 					responseId,
 					requestId: upstreamRequestId,
@@ -410,7 +418,7 @@ export async function invokeSidecar({
 						prepared.clientRequestId,
 						now,
 						'invalid-response',
-						`OpenAI 句段对照输出没有通过 atom 覆盖校验${requestIdSuffix(upstreamRequestId)}。\n原始错误：\n${details}\n原始模型输出：\n${boundedResponseBody(outputText)}`,
+						`OpenAI 修订对照输出没有通过 token 覆盖校验${requestIdSuffix(upstreamRequestId)}。\n原始错误：\n${details}\n原始模型输出：\n${boundedResponseBody(outputText)}`,
 						{ responseId, model, outputText: outputText || null, usage }
 					),
 					{ status: 502, headers: noStoreHeaders() }

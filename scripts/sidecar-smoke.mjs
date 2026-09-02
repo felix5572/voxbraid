@@ -61,20 +61,24 @@ try {
 			intent: { kind: 'retranslate', trigger: 'manual', targetLanguage: '中文 (zh)' }
 		},
 		{
-			kind: 'translate-pairs',
+			kind: 'revise-pairs',
 			expectedModel: 'gpt-5.6-luna',
 			intent: {
-				kind: 'translate-pairs',
+				kind: 'revise-pairs',
 				trigger: 'manual',
 				targetLanguage: 'zh',
-				atoms: [
-					{ id: 'paid-smoke-run:0:34', text: 'The speaker visited a public park.' },
+				tokens: [
+					{ i: 1, start: 0, end: 34, t: 'The speaker visited a public park.' },
 					{
-						id: 'paid-smoke-run:34:97',
-						text: ' They walked beside a lake and took the train home after lunch.'
+						i: 2,
+						start: 34,
+						end: 97,
+						t: ' They walked beside a lake and took the train home after lunch.'
 					}
 				],
-				continuity: []
+				continuity: [],
+				previousDraft: [],
+				oversizedGroupNumbers: []
 			}
 		}
 	];
@@ -99,8 +103,8 @@ try {
 							sequence: 1,
 							targetLanguage: 'zh',
 							sourceText:
-								testCase.kind === 'translate-pairs'
-									? testCase.intent.atoms.map((atom) => atom.text).join('')
+								testCase.kind === 'revise-pairs'
+									? testCase.intent.tokens.map((token) => token.t).join('')
 									: 'The speaker visited a public park, walked beside a lake, and took the train home after lunch.',
 							translationText: '讲者去了公园，在湖边散步，午饭后乘火车回家。'
 						}
@@ -118,12 +122,10 @@ try {
 		assert.equal(typeof body.responseId, 'string');
 		assert.equal(body.model, testCase.expectedModel);
 		assert.ok(body.outputText?.trim(), `${testCase.kind} 没有返回文本。`);
-		if (testCase.kind === 'translate-pairs') {
+		if (testCase.kind === 'revise-pairs') {
 			const output = JSON.parse(body.outputText);
-			assert.deepEqual(
-				output.groups.flatMap((group) => group.atomIds),
-				testCase.intent.atoms.map((atom) => atom.id)
-			);
+			assert.equal(output.groups.at(-1)?.tokenEnd, testCase.intent.tokens.length);
+			assert.ok(output.groups.every((group) => group.revisedSourceText?.trim()));
 		}
 		assert.ok(
 			(body.usageStatus === 'recorded' && body.usage?.totalTokens >= 0) ||
