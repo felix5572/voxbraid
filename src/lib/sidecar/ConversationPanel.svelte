@@ -16,6 +16,7 @@
 		outputLanguage: string;
 		cleanedTranscript: string;
 		disabled?: boolean;
+		diagnosticsMode?: boolean;
 		onRequestingChange?: (requesting: boolean) => void;
 	}
 
@@ -24,6 +25,7 @@
 		outputLanguage,
 		cleanedTranscript,
 		disabled = false,
+		diagnosticsMode = false,
 		onRequestingChange = () => undefined
 	}: Props = $props();
 	let question = $state('');
@@ -72,6 +74,10 @@
 			}
 			return [{ question: invocation.intent.question, answer: invocation.result.outputText }];
 		});
+	}
+
+	function failureSummary(message: string): string {
+		return message.split('\n', 1)[0].slice(0, 180);
 	}
 
 	async function followTail(): Promise<void> {
@@ -247,23 +253,29 @@
 						{#if invocation.state === 'requesting'}
 							<p class="pending">正在读取当前字幕与清稿、计算预算并回答…</p>
 						{:else if invocation.result?.status === 'failed'}
-							<p class="error" role="alert">
-								{invocation.result.error.code}：{invocation.result.error.message}
-							</p>
+							<details class="error" role="alert" open={diagnosticsMode}>
+								<summary>
+									{invocation.result.error.code}：{failureSummary(invocation.result.error.message)}
+								</summary>
+								<pre>{invocation.result.error.message}</pre>
+							</details>
 						{:else if invocation.result?.outputText}
 							<div class="answer-text">{invocation.result.outputText}</div>
 						{/if}
 					</div>
-					<footer class="turn-meta">
+					<footer class="turn-meta" class:reading-meta={!diagnosticsMode}>
 						<div>
-							<span>{invocation.context.runCount} 段</span>
-							<span>原文 {invocation.context.sourceCharacters} 字</span>
-							<span>译文 {invocation.context.translationCharacters} 字</span>
-							<span>清稿 {invocation.context.cleanedTranscriptCharacters} 字</span>
-							<span>历史 {invocation.context.historyTurns} 轮</span>
-							{#if invocation.result?.model}<span>{invocation.result.model}</span>{/if}
-							{#if invocation.result?.usage}<span>{invocation.result.usage.totalTokens} tokens</span
-								>{/if}
+							{#if diagnosticsMode}
+								<span>{invocation.context.runCount} 段</span>
+								<span>原文 {invocation.context.sourceCharacters} 字</span>
+								<span>译文 {invocation.context.translationCharacters} 字</span>
+								<span>清稿 {invocation.context.cleanedTranscriptCharacters} 字</span>
+								<span>历史 {invocation.context.historyTurns} 轮</span>
+								{#if invocation.result?.model}<span>{invocation.result.model}</span>{/if}
+								{#if invocation.result?.usage}<span
+										>{invocation.result.usage.totalTokens} tokens</span
+									>{/if}
+							{/if}
 							<span
 								>捕获于 {CAPTURED_AT_FORMATTER.format(
 									new Date(invocation.context.capturedAt)
@@ -420,6 +432,16 @@
 		color: #efaaa0;
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+
+	.error summary {
+		cursor: pointer;
+	}
+
+	.error pre {
+		margin: 7px 0 0;
+		font: inherit;
+		white-space: pre-wrap;
 	}
 
 	.turn-meta {

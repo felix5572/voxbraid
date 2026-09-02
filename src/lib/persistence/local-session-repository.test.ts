@@ -526,7 +526,7 @@ describe('LocalSessionRepository', () => {
 
 		const result = await repository.freezeRevisionOpenSegments(thread.id, open.runId, frozenAt);
 
-		expect(result).toEqual([{ ...open, state: 'frozen', frozenAt, updatedAt: frozenAt }]);
+		expect(result).toEqual([{ ...open, state: 'frozen', frozenAt }]);
 		await expect(repository.loadRevisionProjection(thread.id)).resolves.toEqual({
 			batches: [batch],
 			segments: result

@@ -129,6 +129,7 @@
 	const RESTORE_TIMEOUT_MS = 5_000;
 	const DIAGNOSTIC_EVENT_LIMIT = 500;
 	const CAPTION_FONT_SIZE_STORAGE_KEY = 'voxbraid-caption-font-size';
+	const DIAGNOSTICS_MODE_STORAGE_KEY = 'voxbraid-diagnostics-mode';
 	const DEFAULT_CAPTION_FONT_SIZE_PX = 22;
 	const MIN_CAPTION_FONT_SIZE_PX = 16;
 	const MAX_CAPTION_FONT_SIZE_PX = 30;
@@ -159,6 +160,7 @@
 	let officialUsagePhase = $state<OfficialUsagePhase>('loading');
 	let officialUsageRequest = 0;
 	let captionFontSizePx = $state(DEFAULT_CAPTION_FONT_SIZE_PX);
+	let diagnosticsMode = $state(false);
 	let captureRunDurationLimitMs = $state(CAPTURE_RUN_DURATION_LIMIT_MS);
 	let durationLimitNotice = $state('');
 	let client: TranslationClient | null = null;
@@ -258,6 +260,15 @@
 			localStorage.setItem(CAPTION_FONT_SIZE_STORAGE_KEY, String(captionFontSizePx));
 		} catch (storageError) {
 			console.warn('[caption-font-size] preference could not be saved', storageError);
+		}
+	}
+
+	function updateDiagnosticsMode(enabled: boolean): void {
+		diagnosticsMode = enabled;
+		try {
+			localStorage.setItem(DIAGNOSTICS_MODE_STORAGE_KEY, String(enabled));
+		} catch (storageError) {
+			console.warn('[diagnostics-mode] preference could not be saved', storageError);
 		}
 	}
 
@@ -734,8 +745,9 @@
 			if (storedCaptionFontSize !== null) {
 				captionFontSizePx = normalizedCaptionFontSize(Number(storedCaptionFontSize));
 			}
+			diagnosticsMode = localStorage.getItem(DIAGNOSTICS_MODE_STORAGE_KEY) === 'true';
 		} catch (storageError) {
-			console.warn('[caption-font-size] preference could not be loaded', storageError);
+			console.warn('[display-preferences] preferences could not be loaded', storageError);
 		}
 		const search = new URLSearchParams(location.search);
 		if (import.meta.env.DEV) {
@@ -1339,8 +1351,10 @@
 		<SidecarPanel
 			{session}
 			{repository}
+			{diagnosticsMode}
 			outputLanguage={`${languageLabel(targetLanguage)} (${targetLanguage})`}
 			disabled={persistencePhase === 'restoring' || sessionSwitching}
+			onDiagnosticsModeChange={updateDiagnosticsMode}
 		/>
 
 		<footer>

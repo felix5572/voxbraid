@@ -12,9 +12,18 @@
 		outputLanguage: string;
 		repository: LocalSessionRepository | null;
 		disabled?: boolean;
+		diagnosticsMode?: boolean;
+		onDiagnosticsModeChange?: (enabled: boolean) => void;
 	}
 
-	let { session, outputLanguage, repository, disabled = false }: Props = $props();
+	let {
+		session,
+		outputLanguage,
+		repository,
+		disabled = false,
+		diagnosticsMode = false,
+		onDiagnosticsModeChange = () => undefined
+	}: Props = $props();
 	let summaryRequesting = $state(false);
 	let conversationRequesting = $state(false);
 	let pairRequesting = $state(false);
@@ -45,17 +54,28 @@
 
 <section class="workspace" aria-labelledby="sidecar-title">
 	<header class="workspace-heading">
-		<div>
+		<div class="workspace-title">
 			<p class="eyebrow">SIDECAR</p>
 			<h2 id="sidecar-title">字幕旁路</h2>
 		</div>
-		<p>清稿持续整理当前会话；对话每轮读取完整字幕、当前清稿与此前问答。</p>
+		<div class="workspace-tools">
+			<p>清稿持续整理当前会话；对话每轮读取完整字幕、当前清稿与此前问答。</p>
+			<button
+				type="button"
+				class:active={diagnosticsMode}
+				aria-pressed={diagnosticsMode}
+				onclick={() => onDiagnosticsModeChange(!diagnosticsMode)}
+			>
+				诊断模式 {diagnosticsMode ? '开' : '关'}
+			</button>
+		</div>
 	</header>
 
 	<div class="workspace-stack">
 		<TranslationPairPanel
 			{session}
 			{repository}
+			{diagnosticsMode}
 			disabled={disabled || !canStartProjection('background-pairs', inFlightLanes)}
 			onRequestingChange={(value) => (pairRequesting = value)}
 		/>
@@ -63,6 +83,7 @@
 			{session}
 			{outputLanguage}
 			{repository}
+			{diagnosticsMode}
 			disabled={disabled || !canStartProjection('background-clean', inFlightLanes)}
 			onRequestingChange={(value) => (summaryRequesting = value)}
 			onCleanTranscriptChange={handleCleanTranscriptChange}
@@ -72,6 +93,7 @@
 			{session}
 			{outputLanguage}
 			cleanedTranscript={currentCleanedTranscript}
+			{diagnosticsMode}
 			disabled={disabled || !canStartProjection('interactive', inFlightLanes) || !cleanContextReady}
 			onRequestingChange={(value) => (conversationRequesting = value)}
 		/>
@@ -87,7 +109,7 @@
 	}
 
 	.workspace-heading,
-	.workspace-heading > div {
+	.workspace-title {
 		display: flex;
 	}
 
@@ -98,7 +120,7 @@
 		margin-bottom: 14px;
 	}
 
-	.workspace-heading > div {
+	.workspace-title {
 		flex-direction: column;
 	}
 
@@ -115,10 +137,35 @@
 		font-size: 20px;
 	}
 
-	.workspace-heading > p {
+	.workspace-tools > p {
 		margin: 0;
 		color: #7f8a84;
 		font-size: 12px;
+	}
+
+	.workspace-tools {
+		display: flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 12px;
+	}
+
+	.workspace-tools button {
+		flex: none;
+		padding: 6px 9px;
+		border: 1px solid #35413c;
+		border-radius: 8px;
+		background: transparent;
+		color: #8f9c96;
+		font: inherit;
+		font-size: 11px;
+		cursor: pointer;
+	}
+
+	.workspace-tools button.active {
+		border-color: #5e8d7b;
+		background: #13221b;
+		color: #bde7d6;
 	}
 
 	.workspace-stack {
@@ -136,6 +183,12 @@
 			align-items: flex-start;
 			flex-direction: column;
 			gap: 5px;
+		}
+
+		.workspace-tools {
+			width: 100%;
+			align-items: flex-start;
+			justify-content: space-between;
 		}
 	}
 </style>

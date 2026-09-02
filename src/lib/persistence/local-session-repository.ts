@@ -434,9 +434,7 @@ export class LocalSessionRepository {
 					await this.database.revisedSegments.where('runId').equals(runId).toArray()
 				).sort((left, right) => left.sourceStart - right.sourceStart);
 				const next = stored.map((segment) =>
-					segment.state === 'open'
-						? { ...segment, state: 'frozen' as const, frozenAt, updatedAt: frozenAt }
-						: segment
+					segment.state === 'open' ? { ...segment, state: 'frozen' as const, frozenAt } : segment
 				);
 				if (next.some((segment, index) => segment !== stored[index])) {
 					await this.database.revisedSegments.bulkPut(next);

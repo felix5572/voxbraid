@@ -15,6 +15,7 @@
 		SidecarRevisionDraftSegment
 	} from '../sidecar/types';
 	import { ProjectionWorker } from './projection-worker';
+	import { reconcileRevisionSegmentPresentation } from './revision-display';
 	import {
 		REVISION_MAX_CONTINUITY_CHARACTERS,
 		REVISION_QUIET_WINDOW_MS,
@@ -45,6 +46,7 @@
 		session: TranslationSessionState | null;
 		repository: LocalSessionRepository | null;
 		disabled?: boolean;
+		diagnosticsMode?: boolean;
 		onRequestingChange?: (requesting: boolean) => void;
 	}
 
@@ -69,6 +71,7 @@
 		openStart: number;
 		openEnd: number;
 		attempt: number;
+		sourceElapsedEndMs: number | null;
 	}
 
 	type RevisionDisplayRow =
@@ -94,6 +97,7 @@
 		session,
 		repository,
 		disabled = false,
+		diagnosticsMode = false,
 		onRequestingChange = () => undefined
 	}: Props = $props();
 	let batches = $state<StoredRevisionBatch[]>([]);
@@ -113,6 +117,9 @@
 	const lastAutomaticRequestAt = new SvelteMap<string, number>();
 	const threadId = $derived(session?.thread.id ?? null);
 	const failedBatches = $derived(batches.filter((batch) => batch.status === 'failed'));
+	const footerErrorMessage = $derived(
+		failedBatches.at(-1)?.error === errorMessage ? '' : errorMessage
+	);
 	const totalTokens = $derived(
 		batches.reduce((total, batch) => total + (batch.usage?.totalTokens ?? 0), 0)
 	);
@@ -449,7 +456,8 @@
 				capturedAt,
 				openStart: candidate.openStart,
 				openEnd: candidate.openEnd,
-				attempt
+				attempt,
+				sourceElapsedEndMs: capturedRun.sourceStream.lastElapsedMs
 			};
 			let result: SidecarInvokeResult;
 			try {
@@ -488,13 +496,16 @@
 			}
 
 			if (groups && result.status === 'completed') {
-				const nextSegments = completedSegments(
-					candidate,
-					batchId,
-					groups,
-					updatedAt,
-					capturedRun.sourceStream.lastElapsedMs
-				).map((segment) => ({ ...segment, threadId: capturedThreadId }));
+				const nextSegments = reconcileRevisionSegmentPresentation(
+					segmentsForRun(candidate.runId).filter((segment) => segment.state === 'open'),
+					completedSegments(
+						candidate,
+						batchId,
+						groups,
+						updatedAt,
+						capturedRun.sourceStream.lastElapsedMs
+					).map((segment) => ({ ...segment, threadId: capturedThreadId }))
+				);
 				const batch: StoredRevisionBatch = {
 					id: batchId,
 					threadId: capturedThreadId,
@@ -631,8 +642,7 @@
 							? {
 									...segment,
 									state: 'frozen' as const,
-									frozenAt,
-									updatedAt: frozenAt
+									frozenAt
 								}
 							: segment
 					);
@@ -819,7 +829,19 @@
 						: trigger.waitingFor === 'quiet-window'
 							? '等待短暂停顿'
 							: '准备修订';
-		return `第 ${run.sequence} 段 · 冻结至约 ${courseTime(frozen?.sourceElapsedEndMs ?? null)} · 开放区 ${pending} 字 · ${reason} · 累计 ${totalTokens} tokens`;
+		const readingStatus = `第 ${run.sequence} 段 · 冻结至约 ${courseTime(frozen?.sourceElapsedEndMs ?? null)} · ${reason}`;
+		return diagnosticsMode
+			? `${readingStatus} · 开放区 ${pending} 字 · 累计 ${totalTokens} tokens`
+			: readingStatus;
+	}
+
+	function failureSummary(error: string | null): string {
+		return (error?.split('\n', 1)[0] ?? '未知错误').slice(0, 180);
+	}
+
+	function recentlyChanged(timestamp: string): boolean {
+		const changedAt = Date.parse(timestamp);
+		return Number.isFinite(changedAt) && statusNowMs - changedAt < 2_000;
 	}
 
 	$effect(() => {
@@ -893,11 +915,15 @@
 		{#if phase === 'loading'}
 			正在读取本地修订对照…
 		{:else if phase === 'requesting' && activeRequest}
-			正在修订第 {activeRequest.runSequence} 段 / 第 {activeRequest.batchSequence} 批 · 第
-			{activeRequest.attempt} 次 · {requestTime(activeRequest.capturedAt)} 发起 · 已等待 {Math.max(
+			正在修订第 {activeRequest.runSequence} 段 · 课程约 {courseTime(
+				activeRequest.sourceElapsedEndMs
+			)} · 已等待 {Math.max(
 				0,
 				Math.floor((statusNowMs - Date.parse(activeRequest.capturedAt)) / 1_000)
-			)} 秒 · 此前累计 {totalTokens} tokens
+			)} 秒{#if diagnosticsMode}
+				· 第 {activeRequest.batchSequence} 批 · 第
+				{activeRequest.attempt} 次 · {requestTime(activeRequest.capturedAt)} 发起 · raw
+				{activeRequest.openStart}–{activeRequest.openEnd} · 此前累计 {totalTokens} tokens{/if}
 		{:else if phase === 'freezing'}
 			正在本地冻结已完成的开放段（不会调用模型）…
 		{:else if phase === 'paused'}
@@ -914,19 +940,28 @@
 		{/if}
 		{#each displayRows as row (row.id)}
 			{#if row.kind === 'revised'}
-				<div class:paragraph-break={row.segment.paragraphBreakBefore} class="pair-row">
-					<div class="source">{row.segment.revisedSourceText}</div>
-					<div class="translation">{row.segment.translatedText}</div>
-					<details class="raw-evidence">
-						<summary>
-							Live 原文片段 · raw {row.segment.sourceStart}–{row.segment.sourceEnd}
-						</summary>
-						<code>{row.segment.rawText}</code>
-					</details>
-					{#if row.segment.state === 'open'}<span class="open-badge">修订中</span>{/if}
-					{#if row.segment.boundaryState === 'forced-tail'}<span class="forced-badge">强制切分</span
-						>{/if}
-				</div>
+				{#key row.segment.updatedAt}
+					<div
+						class:paragraph-break={row.segment.paragraphBreakBefore}
+						class:recently-changed={recentlyChanged(row.segment.updatedAt)}
+						class="pair-row revision-row"
+					>
+						<div class="source">{row.segment.revisedSourceText}</div>
+						<div class="translation">{row.segment.translatedText}</div>
+						<details class="raw-evidence" open={diagnosticsMode}>
+							<summary aria-label="查看 Live 原文片段" title="查看 Live 原文片段">
+								<span class="evidence-icon" aria-hidden="true">↳</span>
+								{#if diagnosticsMode}
+									<span>Live 原文片段 · raw {row.segment.sourceStart}–{row.segment.sourceEnd}</span>
+								{/if}
+							</summary>
+							<code>{row.segment.rawText}</code>
+						</details>
+						{#if row.segment.state === 'open'}<span class="open-badge">修订中</span>{/if}
+						{#if row.segment.boundaryState === 'forced-tail'}<span class="forced-badge">句未完</span
+							>{/if}
+					</div>
+				{/key}
 			{:else}
 				<div
 					class="pair-row"
@@ -945,13 +980,16 @@
 					>
 						{row.status === 'live' ? '实时' : '未修订'}
 					</span>
-					<span class="raw-range">raw {row.sourceStart}–{row.sourceEnd}</span>
+					{#if diagnosticsMode}<span class="raw-range">raw {row.sourceStart}–{row.sourceEnd}</span
+						>{/if}
 				</div>
 			{/if}
 		{/each}
 		{#each failedBatches as batch (batch.id)}
-			<details class="failed">
-				<summary>第 {batch.runSequence} 段 / 第 {batch.sequence} 批未修订成功</summary>
+			<details class="failed" open={diagnosticsMode}>
+				<summary>
+					第 {batch.runSequence} 段未修订成功 · {failureSummary(batch.error)}
+				</summary>
 				<span>raw {batch.openStart}–{batch.openEnd} · request {batch.clientRequestId}</span>
 				{#if batch.diagnostic}
 					<span>
@@ -968,7 +1006,12 @@
 
 	<footer>
 		<div>
-			{#if errorMessage}<span class="error" role="alert">{errorMessage}</span>{/if}
+			{#if footerErrorMessage}
+				<details class="error" role="alert" open={diagnosticsMode}>
+					<summary>{failureSummary(footerErrorMessage)}</summary>
+					<code>{footerErrorMessage}</code>
+				</details>
+			{/if}
 			{#if persistenceMessage}<span class="warning">{persistenceMessage}</span>{/if}
 		</div>
 		{#if !following}<button type="button" class="secondary" onclick={resumeFollowing}
@@ -1057,7 +1100,7 @@
 	.pair-row {
 		position: relative;
 		flex-wrap: wrap;
-		padding: 13px 12px;
+		padding: 10px 12px;
 		border-top: 1px solid #181f1c;
 		font-size: 16px;
 		line-height: 1.55;
@@ -1066,8 +1109,19 @@
 		border-top: 0;
 	}
 	.pair-row.paragraph-break {
-		margin-top: 9px;
+		margin-top: 3px;
 		border-top-color: #3a4942;
+	}
+	.revision-row.recently-changed {
+		animation: revision-changed 1.8s ease-out;
+	}
+	@keyframes revision-changed {
+		from {
+			background: rgb(114 179 158 / 15%);
+		}
+		to {
+			background: transparent;
+		}
 	}
 	.translation {
 		color: #c9e8dd;
@@ -1089,10 +1143,33 @@
 		color: #718078;
 	}
 	.raw-evidence {
-		flex: 0 0 100%;
-		margin-top: 7px;
+		position: absolute;
+		right: 8px;
+		bottom: 4px;
 		color: #718078;
 		font-size: 10px;
+	}
+	.raw-evidence[open] {
+		position: static;
+		flex: 0 0 100%;
+		margin-top: 3px;
+	}
+	.raw-evidence summary {
+		width: fit-content;
+		cursor: pointer;
+		list-style: none;
+	}
+	.raw-evidence summary::-webkit-details-marker {
+		display: none;
+	}
+	.evidence-icon {
+		display: inline-grid;
+		width: 18px;
+		height: 18px;
+		place-items: center;
+		border: 1px solid #2b3732;
+		border-radius: 50%;
+		color: #75827c;
 	}
 	.raw-evidence code {
 		display: block;
@@ -1123,6 +1200,7 @@
 	}
 	.forced-badge {
 		bottom: 4px;
+		right: 34px;
 		color: #c6a56f;
 	}
 	.raw-range {
@@ -1141,6 +1219,10 @@
 		border-radius: 8px;
 		color: #d8a99c;
 		font-size: 11px;
+	}
+	.failed summary {
+		cursor: pointer;
+		font-weight: 700;
 	}
 	.failed span,
 	.failed code {
@@ -1165,6 +1247,14 @@
 	.error {
 		color: #e2a090;
 	}
+	.error summary {
+		cursor: pointer;
+	}
+	.error code {
+		display: block;
+		margin-top: 5px;
+		white-space: pre-wrap;
+	}
 	.warning {
 		color: #cdb17d;
 	}
@@ -1183,6 +1273,11 @@
 			margin-left: 0;
 			padding-top: 8px;
 			border-top: 1px solid #1c2823;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.revision-row.recently-changed {
+			animation: none;
 		}
 	}
 </style>

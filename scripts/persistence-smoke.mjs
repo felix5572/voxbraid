@@ -364,6 +364,43 @@ async function testCleanTranscriptContinuesAfterFailure(browser, baseUrl) {
 	}
 }
 
+async function testDiagnosticsModePreference(browser, baseUrl) {
+	const { browserErrors, context, page } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		await emitPair(
+			page,
+			'Diagnostics stay out of reading mode. A second sentence triggers revision.',
+			'诊断信息默认不干扰阅读。第二句话触发修订。'
+		);
+		const evidence = page.locator('.raw-evidence').first();
+		await evidence.waitFor();
+		assert.equal(await evidence.getAttribute('open'), null);
+		assert.equal(await page.getByText(/Live 原文片段 · raw/u).count(), 0);
+
+		await page.getByRole('button', { name: '诊断模式 关', exact: true }).click();
+		await page.getByRole('button', { name: '诊断模式 开', exact: true }).waitFor();
+		await page
+			.getByText(/Live 原文片段 · raw/u)
+			.first()
+			.waitFor();
+		assert.notEqual(await evidence.getAttribute('open'), null);
+		assert.equal(
+			await page.evaluate(() => localStorage.getItem('voxbraid-diagnostics-mode')),
+			'true'
+		);
+
+		await stopCapture(page);
+		await page.reload({ waitUntil: 'networkidle' });
+		await waitForReady(page);
+		await page.getByRole('button', { name: '诊断模式 开', exact: true }).waitFor();
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
 async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
 	try {
@@ -507,6 +544,11 @@ async function testOpenWindowRevision(browser, baseUrl) {
 				.filter((record) => record.sourceStart >= frozenBefore.at(-1).sourceEnd)
 				.every((record) => record.producedByBatchId === revised.id)
 		);
+		const openUpdatedAtBeforeFreeze = new Map(
+			storedSegments
+				.filter((record) => record.state === 'open')
+				.map((record) => [record.id, record.updatedAt])
+		);
 		const requestCountBeforeFreeze = revisionRequests.length;
 		const locallyFrozen = await waitForStoreCondition(
 			page,
@@ -519,6 +561,16 @@ async function testOpenWindowRevision(browser, baseUrl) {
 			'自然句末静默后的本地冻结'
 		);
 		assert.ok(locallyFrozen.some((record) => record.runId === revised.runId));
+		for (const record of locallyFrozen.filter((candidate) => candidate.runId === revised.runId)) {
+			const previousUpdatedAt = openUpdatedAtBeforeFreeze.get(record.id);
+			if (previousUpdatedAt) {
+				assert.equal(
+					record.updatedAt,
+					previousUpdatedAt,
+					'open → frozen 只改变状态，不应触发文本变化动画'
+				);
+			}
+		}
 		assert.equal(
 			sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs').length,
 			requestCountBeforeFreeze,
@@ -1248,6 +1300,7 @@ try {
 	}
 
 	await testPauseResumeAndNewThread(browser, baseUrl);
+	await testDiagnosticsModePreference(browser, baseUrl);
 	await testInteractiveRequestDuringPairGeneration(browser, baseUrl);
 	await testCompletedRunTailIsNotMarkedLive(browser, baseUrl);
 	await testCleanTranscriptContinuesAfterFailure(browser, baseUrl);

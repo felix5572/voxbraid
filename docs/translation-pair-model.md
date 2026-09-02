@@ -54,11 +54,13 @@ Live 原文在上方事实区和修订区的 `live tail` 中随 delta 即时显�
 
 展示纪律：
 
+- 页面默认处于阅读态，只保留课程时间、等待原因、`实时` / `修订中` / `句未完` 等阅读状态；raw 坐标、batch/request ID、attempt 和 token 计数统一由页面级“诊断模式”控制。诊断偏好保存在本设备，三个旁路面板共用，失败摘要始终可见且可展开原始错误。
 - 每个 run 只有一段连续 open 尾窗。open segments 显示「整理中」，允许随着新 raw 到来整体替换；它前面的 frozen segments 不因自动结果继续跳动。
 - “是否仍在 open 尾窗”和“raw 边界是否自然完整”是两个维度：完整句也可以暂时保持 open 等待后文；被硬切的 `forced-tail` 即使冻结，仍保留边界不完整标记。
 - 请求成功后一次性替换全部 open 行并滑动冻结前部；请求失败时保留最后一次成功草稿和失败诊断，不能让已可读内容消失。
 - Responses API 的 token 流不直接渲染；整批结构化结果校验成功后一次性追加。
 - 尚未进入 open 尾窗的 raw 尾部作为 `live tail` 在左栏即时追加，右栏留空并标记「实时」；本地句末只产生确定性的软换行。末尾追加允许纵向增长，但不回写已经显示的词。完整结构化结果到达后 open segments 原子替换已捕获范围，响应期间新到的 delta 仍留在 live tail。
+- 修订原文或对照译文确实改变时，该行以低对比主题色短暂淡出；分组与文本均未变化的段保留展示时间戳，不重复闪动，open → frozen 也不触发动画。`prefers-reduced-motion` 下完全禁用瞬时动画。Live 原文证据在阅读态收为行尾入口，按需展开；诊断态默认展开。
 - 新批次追加时可以产生纵向滚动；自动跟随底部沿用现有“用户向上滚动后暂停跟随”的规则，并提供「回到最新」。
 - run 切换时显示稳定分隔条；每个 run 使用自己创建时的目标语言，不能用页面当前选择覆盖历史标签。
 - iPad 横屏保持双列；窄屏允许一条句段内部上下堆叠，但不能把所有原文和所有译文拆成两个失去对应关系的大区块。
@@ -90,7 +92,7 @@ tokenizer 是项目内的纯函数并带 `TOKENIZER_VERSION`：空格语言按�
 ]
 ```
 
-模型不需要自行数 JSON 数组位置，只需把某组最后一个 token 旁的 `i` 和 `t` 原样抄为 `lastTokenIndex` / `lastTokenText`。schema description 与服务端提示词都把它定义为整批累计坐标：组间严格递增、段落切换时不能重新计数，最后一组必须指向输入末尾。应用由前一组结尾推导该组 raw 范围，并交叉验证 `tokens[lastTokenIndex - 1].t === lastTokenText`。这样正确边界是最省力的输出路径，同时保留结构化输入和精确词边界。第二版不保留“裸字符串数组”实验开关。
+模型不需要自行数 JSON 数组位置，只需把某组最后一个 token 旁的 `i` 和 `t` 原样抄为 `lastTokenIndex` / `lastTokenText`。schema description 与服务端提示词都把它定义为整批累计坐标：组间严格递增、段落切换时不能重新计数，最后一组必须指向输入末尾。应用由前一组结尾推导该组 raw 范围，并交叉验证 `tokens[lastTokenIndex - 1].t` 与 `lastTokenText`；校验只容忍首尾空白差异并记录发生组号，正文和标点仍须一致。这样正确边界是最省力的输出路径，同时保留结构化输入和精确词边界。第二版不保留“裸字符串数组”实验开关。
 
 每个 run 的展示投影由三部分组成：
 
@@ -179,7 +181,7 @@ interface RevisionModelOutput {
 
 服务端必须验证：
 
-1. `lastTokenIndex` 是整数、严格递增，首个至少为 1，最后一个恰好等于输入 token 数；`lastTokenText` 必须逐字等于该编号 token 的 `t`；
+1. `lastTokenIndex` 是整数、严格递增，首个至少为 1，最后一个恰好等于输入 token 数；`lastTokenText` 忽略首尾空白后必须等于该编号 token 的 `t`，仅空白不同需要记录观测，正文或标点不同仍按边界错误拒绝；
 2. 由相邻 `lastTokenIndex` 推导的每组 raw 范围连续、无空洞、无重叠；服务端只强制整批 1,600 字符硬上限，单组 480 字符软上限由浏览器按第三节的“一次定向重试、再次违规则 forced-tail 接受”处理；
 3. `revisedSourceText` 和 `translatedText` 均非空且总输出处于产品上限内；
 4. 应用从 token 绝对范围自行拼出不可修改的 `rawText`，模型返回的 `revisedSourceText` 只能作为派生字段保存；

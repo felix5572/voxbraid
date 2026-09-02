@@ -45,6 +45,7 @@
 		outputLanguage: string;
 		repository: LocalSessionRepository | null;
 		disabled?: boolean;
+		diagnosticsMode?: boolean;
 		onRequestingChange?: (requesting: boolean) => void;
 		onCleanTranscriptChange?: (threadId: string, text: string) => void;
 		onCleanContextLoaded?: (threadId: string | null) => void;
@@ -55,6 +56,7 @@
 		outputLanguage,
 		repository,
 		disabled = false,
+		diagnosticsMode = false,
 		onRequestingChange = () => undefined,
 		onCleanTranscriptChange = () => undefined,
 		onCleanContextLoaded = () => undefined
@@ -536,19 +538,22 @@
 			正在读取本地清稿…
 		{:else if phase === 'requesting'}
 			{#if activeRequest}
-				正在整理第 {activeRequest.sequence} 块 · {timeLabel(activeRequest.capturedAt)} 发起 · 第
-				{activeRequest.runSequence} 段 · 原文
-				{activeRequest.sourceEnd - activeRequest.sourceStart} 字 / 译文
-				{activeRequest.translationEnd - activeRequest.translationStart} 字 · 请求
-				{activeRequest.clientRequestId.slice(0, 8)} · 已等待
+				正在整理第 {activeRequest.sequence} 块 · 第 {activeRequest.runSequence} 段 · 已等待
 				{Math.max(0, Math.floor((statusNowMs - Date.parse(activeRequest.capturedAt)) / 1_000))} 秒 · 等待预算检查与模型生成
+				{#if diagnosticsMode}
+					· {timeLabel(activeRequest.capturedAt)} 发起 · 原文
+					{activeRequest.sourceEnd - activeRequest.sourceStart} 字 / 译文
+					{activeRequest.translationEnd - activeRequest.translationStart} 字 · 请求
+					{activeRequest.clientRequestId.slice(0, 8)}
+				{/if}
 			{:else}
 				正在准备重新整理全部…
 			{/if}
 		{:else if failedBlocks.length > 0}
 			有 {failedBlocks.length} 个块失败；后续内容不会覆盖它，可手动重试。
 		{:else if cleanText}
-			已整理 {completedBlocks.length} 个新块 · {latestModel}
+			已整理 {completedBlocks.length} 个新块{#if diagnosticsMode}
+				· {latestModel}{/if}
 		{:else}
 			每约 5,000 个原文字符自动追加一块；暂停时会尝试收尾。
 		{/if}
@@ -562,31 +567,33 @@
 			{#if block.status === 'completed'}
 				<div class="summary-text block">{block.text}</div>
 			{:else}
-				<div class="failed-block" role="alert">
-					<strong>第 {block.sequence} 块未整理成功</strong>
+				<details class="failed-block" role="alert" open={diagnosticsMode}>
+					<summary>第 {block.sequence} 块未整理成功 · {block.error?.split('\n', 1)[0]}</summary>
 					<span class="failure-meta">
 						{timeLabel(block.capturedAt)} 发起 · {timeLabel(block.updatedAt)} 失败 · 第
 						{block.runSequence} 段
 					</span>
-					<span class="failure-meta">
-						原文字符 {block.sourceStart}–{block.sourceEnd} · 译文字符
-						{block.translationStart}–{block.translationEnd} · {block.model ?? '模型未确认'}
-					</span>
-					{#if block.diagnostic}
-						<span class="failure-meta diagnostic-id">
-							耗时 {block.diagnostic.durationMs ?? '未知'} ms · 页面
-							{block.diagnostic.visibilityState ?? '未知'} · online
-							{String(block.diagnostic.online ?? '未知')} · HTTP
-							{block.diagnostic.httpStatus ?? '未收到'} · 请求
-							{block.diagnostic.requestBytes ?? '未知'} bytes
+					{#if diagnosticsMode}
+						<span class="failure-meta">
+							原文字符 {block.sourceStart}–{block.sourceEnd} · 译文字符
+							{block.translationStart}–{block.translationEnd} · {block.model ?? '模型未确认'}
 						</span>
-					{/if}
-					{#if block.clientRequestId}
-						<span class="failure-meta diagnostic-id">
-							client request {block.clientRequestId}{#if block.responseId}
-								· OpenAI response {block.responseId}
-							{/if}
-						</span>
+						{#if block.diagnostic}
+							<span class="failure-meta diagnostic-id">
+								耗时 {block.diagnostic.durationMs ?? '未知'} ms · 页面
+								{block.diagnostic.visibilityState ?? '未知'} · online
+								{String(block.diagnostic.online ?? '未知')} · HTTP
+								{block.diagnostic.httpStatus ?? '未收到'} · 请求
+								{block.diagnostic.requestBytes ?? '未知'} bytes
+							</span>
+						{/if}
+						{#if block.clientRequestId}
+							<span class="failure-meta diagnostic-id">
+								client request {block.clientRequestId}{#if block.responseId}
+									· OpenAI response {block.responseId}
+								{/if}
+							</span>
+						{/if}
 					{/if}
 					<code>{block.error}</code>
 					{#if (block.failureAttempts?.length ?? 0) > 1}
@@ -600,7 +607,7 @@
 						</details>
 					{/if}
 					{#if block.text.trim()}<div class="partial">{block.text}</div>{/if}
-				</div>
+				</details>
 			{/if}
 		{/each}
 		{#if !cleanText && failedBlocks.length === 0}
@@ -610,9 +617,14 @@
 
 	<footer>
 		<div class="messages">
-			{#if errorMessage}<span class="error" role="alert">{errorMessage}</span>{/if}
+			{#if errorMessage}
+				<details class="error" role="alert" open={diagnosticsMode}>
+					<summary>{errorMessage.split('\n', 1)[0]}</summary>
+					<code>{errorMessage}</code>
+				</details>
+			{/if}
 			{#if persistenceMessage}<span class="warning">{persistenceMessage}</span>{/if}
-			{#if totalTokens > 0}<span>累计 {totalTokens} tokens</span>{/if}
+			{#if diagnosticsMode && totalTokens > 0}<span>累计 {totalTokens} tokens</span>{/if}
 		</div>
 		{#if cleanText}
 			<button type="button" class="copy" onclick={() => void copyTranscript()}>
@@ -720,8 +732,8 @@
 
 	.summary-text.block,
 	.failed-block {
-		margin-top: 16px;
-		padding-top: 16px;
+		margin-top: 9px;
+		padding-top: 9px;
 		border-top: 1px solid #223029;
 	}
 
@@ -751,6 +763,11 @@
 		font-size: 12px;
 	}
 
+	.failed-block summary {
+		cursor: pointer;
+		font-weight: 750;
+	}
+
 	.partial {
 		margin-top: 8px;
 		color: #c9d2cd;
@@ -778,6 +795,17 @@
 
 	.error {
 		color: #efaaa0;
+		white-space: pre-wrap;
+	}
+
+	.error summary {
+		cursor: pointer;
+	}
+
+	.error code {
+		display: block;
+		margin-top: 5px;
+		font: inherit;
 		white-space: pre-wrap;
 	}
 
