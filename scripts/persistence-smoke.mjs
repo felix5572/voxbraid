@@ -177,9 +177,15 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 					  body.intent.tokens
 							?.map((token) => token.t)
 							.join('')
-							.includes('[HOLD_PAIR]')
-					? 600
-					: 25;
+							.includes('[HOLD_HISTORY]')
+					? 2_500
+					: body.intent.kind === 'revise-pairs' &&
+						  body.intent.tokens
+								?.map((token) => token.t)
+								.join('')
+								.includes('[HOLD_PAIR]')
+						? 600
+						: 25;
 		await new Promise((resolve) => setTimeout(resolve, delayMs));
 		if (
 			body.intent.kind === 'summarize' &&
@@ -380,6 +386,36 @@ async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 		await page.getByText(/自动(?:问答|追问)结果/u).waitFor();
 		await stopCapture(page);
 		await waitForPairCoverage(page, source.length + continuation.length);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
+async function testCompletedRunTailIsNotMarkedLive(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		const source = '[HOLD_HISTORY] This raw sentence is waiting for revision.';
+		await emitPair(page, source, '这段原文正在等待修订。');
+		await waitForSidecarRequest(
+			page,
+			sidecarRequests,
+			(request) =>
+				request.intent.kind === 'revise-pairs' &&
+				request.intent.tokens
+					.map((token) => token.t)
+					.join('')
+					.includes('[HOLD_HISTORY]'),
+			'历史段落测试中的在飞修订请求'
+		);
+		await waitForLiveRevisionTail(page, source);
+		await stopCapture(page);
+		const historicalTail = page.locator('[data-unrevised-source-tail]');
+		await historicalTail.getByText(source, { exact: true }).waitFor();
+		await historicalTail.getByText('未修订', { exact: true }).waitFor();
+		assert.equal(await page.locator('[data-live-source-tail]').count(), 0);
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -1127,6 +1163,7 @@ try {
 
 	await testPauseResumeAndNewThread(browser, baseUrl);
 	await testInteractiveRequestDuringPairGeneration(browser, baseUrl);
+	await testCompletedRunTailIsNotMarkedLive(browser, baseUrl);
 	await testCleanTranscriptContinuesAfterFailure(browser, baseUrl);
 	await testOpenWindowRevision(browser, baseUrl);
 	await testOversizedRevisionProgress(browser, baseUrl);

@@ -79,13 +79,14 @@
 				segment: StoredRevisedSegment;
 		  }
 		| {
-				kind: 'live';
+				kind: 'raw';
 				id: string;
 				runId: string;
 				runSequence: number;
 				sourceStart: number;
 				sourceEnd: number;
 				rawText: string;
+				status: 'live' | 'unrevised';
 		  };
 
 	let {
@@ -122,6 +123,7 @@
 	const displayRows = $derived.by(() => {
 		const currentSegments =
 			loadedThreadId === session?.thread.id ? orderedSegments : ([] as StoredRevisedSegment[]);
+		const activeRunId = session ? activeCaptureRun(session)?.id : null;
 		const rows: RevisionDisplayRow[] = currentSegments.map((segment) => ({
 			kind: 'revised',
 			id: segment.id,
@@ -135,13 +137,14 @@
 				.reduce((maximum, segment) => Math.max(maximum, segment.sourceEnd), 0);
 			if (sourceStart >= run.sourceStream.text.length) continue;
 			rows.push({
-				kind: 'live',
-				id: `live:${run.id}`,
+				kind: 'raw',
+				id: `raw:${run.id}`,
 				runId: run.id,
 				runSequence: run.sequence,
 				sourceStart,
 				sourceEnd: run.sourceStream.text.length,
-				rawText: run.sourceStream.text.slice(sourceStart)
+				rawText: run.sourceStream.text.slice(sourceStart),
+				status: run.id === activeRunId ? 'live' : 'unrevised'
 			});
 		}
 		return rows.sort(
@@ -829,7 +832,7 @@
 	$effect(() => {
 		const latest = displayRows.at(-1);
 		const latestRevision =
-			latest?.kind === 'live'
+			latest?.kind === 'raw'
 				? `${latest.id}:${latest.sourceEnd}`
 				: latest
 					? `${latest.id}:${latest.segment.updatedAt}`
@@ -899,12 +902,23 @@
 						>{/if}
 				</div>
 			{:else}
-				<div class="pair-row live-row" data-live-source-tail={row.runId}>
+				<div
+					class="pair-row"
+					class:live-row={row.status === 'live'}
+					class:unrevised-row={row.status === 'unrevised'}
+					data-live-source-tail={row.status === 'live' ? row.runId : undefined}
+					data-unrevised-source-tail={row.status === 'unrevised' ? row.runId : undefined}
+				>
 					<div class="source live-source">
 						{#each liveTailLines(row.rawText) as line, index (index)}<span>{line}</span>{/each}
 					</div>
 					<div class="translation live-translation" aria-label="等待修订译文"></div>
-					<span class="live-badge">实时</span>
+					<span
+						class:live-badge={row.status === 'live'}
+						class:unrevised-badge={row.status === 'unrevised'}
+					>
+						{row.status === 'live' ? '实时' : '未修订'}
+					</span>
 					<span class="raw-range">raw {row.sourceStart}–{row.sourceEnd}</span>
 				</div>
 			{/if}
@@ -1035,6 +1049,9 @@
 	.live-row {
 		background: #0d1411;
 	}
+	.unrevised-row {
+		background: #101210;
+	}
 	.live-source {
 		color: #aebbb5;
 	}
@@ -1060,6 +1077,7 @@
 	.open-badge,
 	.forced-badge,
 	.live-badge,
+	.unrevised-badge,
 	.raw-range {
 		position: absolute;
 		right: 8px;
@@ -1067,11 +1085,15 @@
 		color: #819088;
 	}
 	.open-badge,
-	.live-badge {
+	.live-badge,
+	.unrevised-badge {
 		top: 4px;
 	}
 	.live-badge {
 		color: #72b39e;
+	}
+	.unrevised-badge {
+		color: #b7a77d;
 	}
 	.forced-badge {
 		bottom: 4px;
