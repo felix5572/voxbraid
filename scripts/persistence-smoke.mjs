@@ -95,6 +95,7 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		permissions: ['clipboard-read', 'clipboard-write']
 	});
 	const sidecarRequests = [];
+	let injectedCleanFailuresRemaining = 1;
 	await context.addInitScript(() => {
 		const stats = { releases: 0, requests: 0 };
 		const storageStats = { persistedChecks: 0, persistRequests: 0 };
@@ -154,7 +155,8 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		await new Promise((resolve) => setTimeout(resolve, 25));
 		if (
 			body.intent.kind === 'summarize' &&
-			body.context.runs[0]?.sourceText.includes('[FAIL_CLEAN_BLOCK]')
+			body.context.runs[0]?.sourceText.includes('[FAIL_CLEAN_BLOCK]') &&
+			injectedCleanFailuresRemaining-- > 0
 		) {
 			await route.fulfill({
 				contentType: 'application/json',
@@ -167,6 +169,7 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 					upstreamStatus: 'failed',
 					usageStatus: 'unavailable',
 					usage: null,
+					diagnostic: null,
 					error: { code: 'upstream-failed', message: 'Injected block failure.' },
 					failedAt: '2026-09-01T12:00:00.000Z'
 				})
@@ -237,6 +240,17 @@ async function testCleanTranscriptContinuesAfterFailure(browser, baseUrl) {
 		assert.equal(completed.sequence, 2);
 		assert.ok(sidecarRequests.filter((request) => request.intent.kind === 'summarize').length >= 2);
 		await stopCapture(page);
+		await page.getByRole('button', { name: '重试失败块', exact: true }).click();
+		const retried = await waitForRecord(
+			page,
+			'cleanTranscriptBlocks',
+			(record) =>
+				record.sequence === failed.sequence &&
+				record.status === 'completed' &&
+				record.failureAttempts?.length === 1,
+			'重试成功后保留第一次失败诊断'
+		);
+		assert.equal(retried.failureAttempts[0].errorCode, 'upstream-failed');
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -649,9 +663,8 @@ async function testStorageTimeoutFallback(browser, baseUrl) {
 		const start = page.getByRole('button', { name: '开始翻译' });
 		await start.waitFor({ state: 'visible' });
 		assert.equal(await start.isDisabled(), true);
-		await page
-			.getByText('本地历史记录不可用；实时翻译仍可继续。', { exact: true })
-			.waitFor({ timeout: 7_000 });
+		await page.getByText(/本地历史记录不可用；实时翻译仍可继续。/).waitFor({ timeout: 7_000 });
+		await page.getByText(/Error: Local session restore timed out after 5000 ms/).waitFor();
 		await page.waitForFunction(() => window.__voxbraidBrowserTest !== undefined);
 		assert.equal(await start.isEnabled(), true);
 

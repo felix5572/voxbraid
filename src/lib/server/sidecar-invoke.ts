@@ -1,4 +1,5 @@
 import type { ModelUsage, SidecarErrorCode, SidecarInvokeResult } from '../sidecar/types';
+import { errorDetails } from '../error-details';
 import { json } from '@sveltejs/kit';
 import {
 	parseSidecarInvokeRequest,
@@ -38,9 +39,48 @@ function stringField(value: unknown, key: string): string | null {
 	return isRecord(value) && typeof value[key] === 'string' ? value[key] : null;
 }
 
-function upstreamErrorMessage(value: unknown): string | null {
-	return isRecord(value) && isRecord(value.error) && typeof value.error.message === 'string'
-		? value.error.message
+function boundedResponseBody(value: string): string {
+	const limit = 4_096;
+	if (!value) return '[上游响应体为空]';
+	return value.length > limit
+		? `[上游响应共 ${value.length} 字符；以下为前 ${limit} 字符]\n${value.slice(0, limit)}\n[上游响应已截断]`
+		: `[上游响应共 ${value.length} 字符]\n${value}`;
+}
+
+async function readUpstreamBody(response: Response): Promise<{ raw: string; parsed: unknown }> {
+	let raw: string;
+	try {
+		raw = await response.text();
+	} catch (error) {
+		raw = `[读取上游响应体失败]\n${errorDetails(error)}`;
+	}
+	let parsed: unknown = null;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		// Non-JSON proxy, CDN and overload responses remain available through raw.
+	}
+	return { raw, parsed };
+}
+
+function upstreamErrorDetails(value: unknown): string | null {
+	if (!isRecord(value) || !isRecord(value.error)) return null;
+	const error = value.error;
+	const message = typeof error.message === 'string' ? error.message : null;
+	const fields = [
+		typeof error.type === 'string' ? `type=${error.type}` : null,
+		typeof error.code === 'string' ? `code=${error.code}` : null,
+		typeof error.param === 'string' ? `param=${error.param}` : null
+	].filter((field): field is string => field !== null);
+	if (!message && fields.length === 0) return null;
+	return `${message ?? 'OpenAI 返回错误'}${fields.length > 0 ? `（${fields.join('，')}）` : ''}`;
+}
+
+function incompleteReason(value: unknown): string | null {
+	return isRecord(value) &&
+		isRecord(value.incomplete_details) &&
+		typeof value.incomplete_details.reason === 'string'
+		? value.incomplete_details.reason
 		: null;
 }
 
@@ -75,6 +115,7 @@ function failure(
 		upstreamStatus: options.upstreamStatus ?? null,
 		usageStatus: usage ? 'recorded' : 'unavailable',
 		usage,
+		diagnostic: null,
 		error: { code, message },
 		failedAt: now()
 	};
@@ -185,6 +226,12 @@ export async function invokeSidecar({
 			headers: noStoreHeaders()
 		});
 	}
+	console.info('[sidecar] request started', {
+		clientRequestId: prepared.clientRequestId,
+		kind: prepared.kind,
+		taskVersion: prepared.taskVersion,
+		model: prepared.model
+	});
 
 	let countResponse: Response;
 	try {
@@ -194,16 +241,17 @@ export async function invokeSidecar({
 			timeoutMs
 		});
 	} catch (error) {
+		const details = errorDetails(error);
 		console.error('[sidecar] input token count failed', {
-			name: error instanceof Error ? error.name : 'UnknownError',
-			message: error instanceof Error ? error.message : 'Unknown failure'
+			clientRequestId: prepared.clientRequestId,
+			error: details
 		});
 		return json(
 			failure(
 				prepared.clientRequestId,
 				now,
 				'budget-check-failed',
-				`输入 token 计数请求失败：${error instanceof Error ? error.message : '未知错误'}`,
+				`输入 token 计数请求失败。原始错误：\n${details}`,
 				{ model: prepared.model }
 			),
 			{ status: 502, headers: noStoreHeaders() }
@@ -211,20 +259,24 @@ export async function invokeSidecar({
 	}
 
 	const countRequestId = requestId(countResponse);
-	const countBody: unknown = await countResponse.json().catch(() => null);
+	const countResult = await readUpstreamBody(countResponse);
+	const countBody = countResult.parsed;
 	if (!countResponse.ok || !isRecord(countBody) || !nonNegativeNumber(countBody.input_tokens)) {
-		const upstreamMessage = upstreamErrorMessage(countBody);
+		const upstreamDetails = upstreamErrorDetails(countBody);
+		const rawUpstream = boundedResponseBody(countResult.raw);
 		console.error('[sidecar] input token count rejected', {
+			clientRequestId: prepared.clientRequestId,
 			status: countResponse.status,
 			requestId: countRequestId,
-			code: stringField(isRecord(countBody) ? countBody.error : null, 'code')
+			code: stringField(isRecord(countBody) ? countBody.error : null, 'code'),
+			body: rawUpstream
 		});
 		return json(
 			failure(
 				prepared.clientRequestId,
 				now,
 				'budget-check-failed',
-				`OpenAI 输入 token 计数失败（HTTP ${countResponse.status}${requestIdSuffix(countRequestId)}）${upstreamMessage ? `：${upstreamMessage}` : '。'}`,
+				`OpenAI 输入 token 计数失败（HTTP ${countResponse.status}${requestIdSuffix(countRequestId)}）${upstreamDetails ? `：${upstreamDetails}` : '。'}\n原始响应：\n${rawUpstream}`,
 				{ model: prepared.model }
 			),
 			{ status: 502, headers: noStoreHeaders() }
@@ -258,9 +310,10 @@ export async function invokeSidecar({
 		);
 	} catch (error) {
 		const timedOut = error instanceof Error && error.name === 'AbortError';
+		const details = errorDetails(error);
 		console.error('[sidecar] response request failed', {
-			name: error instanceof Error ? error.name : 'UnknownError',
-			message: error instanceof Error ? error.message : 'Unknown failure'
+			clientRequestId: prepared.clientRequestId,
+			error: details
 		});
 		return json(
 			failure(
@@ -268,8 +321,8 @@ export async function invokeSidecar({
 				now,
 				timedOut ? 'request-timeout' : 'upstream-failed',
 				timedOut
-					? `模型调用在 ${timeoutMs} ms 后超时；上游可能已经产生费用。`
-					: `模型调用失败：${error instanceof Error ? error.message : '未知错误'}`,
+					? `模型调用在 ${timeoutMs} ms 后超时；上游可能已经产生费用。原始错误：\n${details}`
+					: `模型调用失败。原始错误：\n${details}`,
 				{ model: prepared.model }
 			),
 			{ status: timedOut ? 504 : 502, headers: noStoreHeaders() }
@@ -277,20 +330,24 @@ export async function invokeSidecar({
 	}
 
 	const upstreamRequestId = requestId(upstream);
-	const body: unknown = await upstream.json().catch(() => null);
+	const upstreamResult = await readUpstreamBody(upstream);
+	const body = upstreamResult.parsed;
 	if (!upstream.ok || !isRecord(body)) {
-		const upstreamMessage = upstreamErrorMessage(body);
+		const upstreamDetails = upstreamErrorDetails(body);
+		const rawUpstream = boundedResponseBody(upstreamResult.raw);
 		console.error('[sidecar] response rejected', {
+			clientRequestId: prepared.clientRequestId,
 			status: upstream.status,
 			requestId: upstreamRequestId,
-			code: stringField(isRecord(body) ? body.error : null, 'code')
+			code: stringField(isRecord(body) ? body.error : null, 'code'),
+			body: rawUpstream
 		});
 		return json(
 			failure(
 				prepared.clientRequestId,
 				now,
 				'upstream-failed',
-				`OpenAI 模型调用失败（HTTP ${upstream.status}${requestIdSuffix(upstreamRequestId)}）${upstreamMessage ? `：${upstreamMessage}` : '。'}`,
+				`OpenAI 模型调用失败（HTTP ${upstream.status}${requestIdSuffix(upstreamRequestId)}）${upstreamDetails ? `：${upstreamDetails}` : '。'}\n原始响应：\n${rawUpstream}`,
 				{ model: prepared.model }
 			),
 			{ status: 502, headers: noStoreHeaders() }
@@ -302,6 +359,12 @@ export async function invokeSidecar({
 	const outputText = extractOutputText(body);
 	const usage = extractUsage(body);
 	if (body.status === 'completed' && responseId) {
+		console.info('[sidecar] request completed', {
+			clientRequestId: prepared.clientRequestId,
+			responseId,
+			requestId: upstreamRequestId,
+			model
+		});
 		const result: SidecarInvokeResult = {
 			status: 'completed',
 			clientRequestId: prepared.clientRequestId,
@@ -316,12 +379,21 @@ export async function invokeSidecar({
 	}
 
 	const status = terminalStatus(body.status);
+	const reason = incompleteReason(body);
+	const terminalBody = boundedResponseBody(upstreamResult.raw);
+	console.error('[sidecar] response reached a non-completed terminal state', {
+		clientRequestId: prepared.clientRequestId,
+		status: body.status,
+		reason,
+		requestId: upstreamRequestId,
+		body: terminalBody
+	});
 	return json(
 		failure(
 			prepared.clientRequestId,
 			now,
 			status === 'incomplete' ? 'upstream-incomplete' : 'upstream-failed',
-			`OpenAI 返回终态 ${String(body.status ?? 'unknown')}${requestIdSuffix(upstreamRequestId)}。`,
+			`OpenAI 返回终态 ${String(body.status ?? 'unknown')}${requestIdSuffix(upstreamRequestId)}${reason ? `，incomplete_details.reason=${reason}` : ''}。\n原始响应：\n${terminalBody}`,
 			{
 				responseId,
 				model,

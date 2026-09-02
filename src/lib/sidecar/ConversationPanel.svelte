@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { TranslationSessionState } from '../session/translation-session';
-	import { sendSidecarRequest, sidecarLocalFailure } from './client';
+	import { sendSidecarRequest, sidecarErrorDetails, sidecarLocalFailure } from './client';
 	import { captureSidecarContext, sidecarRequestFits } from './context';
 	import type { SidecarInvocationView, SidecarInvokeRequest, SidecarInvokeResult } from './types';
 
@@ -34,10 +34,6 @@
 		)
 	);
 	const requesting = $derived(invocation?.state === 'requesting');
-
-	function failure(clientRequestId: string, message: string): SidecarInvokeResult {
-		return sidecarLocalFailure(clientRequestId, 'upstream-failed', message);
-	}
 
 	async function ask(): Promise<void> {
 		const capturedSession = session;
@@ -104,10 +100,7 @@
 			result = await sendSidecarRequest(request);
 		} catch (error) {
 			console.error('[sidecar-conversation] browser request failed', error);
-			result = failure(
-				clientRequestId,
-				error instanceof Error ? error.message : '字幕问答请求失败。'
-			);
+			result = sidecarLocalFailure(clientRequestId, 'invalid-response', sidecarErrorDetails(error));
 		}
 		if (invocation?.id !== clientRequestId) return;
 		onRequestingChange(false);
@@ -295,6 +288,8 @@
 
 	.error {
 		color: #efaaa0;
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 
 	.composer {

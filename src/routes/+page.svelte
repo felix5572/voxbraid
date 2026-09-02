@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { inlineErrorDetails } from '$lib/error-details';
 	import { CheckpointWriter } from '$lib/persistence/checkpoint-writer';
 	import {
 		requestStoragePersistence,
@@ -472,7 +473,7 @@
 			threads = await repository.listThreads();
 		} catch (listError) {
 			console.error('[persistence] thread list failed', listError);
-			persistenceError = '会话列表刷新失败，请稍后重试。';
+			persistenceError = `会话列表刷新失败，请稍后重试。\n${inlineErrorDetails(listError)}`;
 		}
 	}
 
@@ -494,7 +495,7 @@
 			return true;
 		} catch (saveError) {
 			console.error('[persistence] checkpoint failed', saveError);
-			persistenceError = '字幕仍保留在当前页面中，系统会继续尝试保存。';
+			persistenceError = `字幕仍保留在当前页面中，系统会继续尝试保存。\n${inlineErrorDetails(saveError)}`;
 			return false;
 		}
 	}
@@ -518,7 +519,7 @@
 			backupMessage = '当前会话已导出。';
 		} catch (exportError) {
 			console.error('[persistence] export failed', exportError);
-			persistenceError = '会话导出失败，请稍后重试。';
+			persistenceError = `会话导出失败，请稍后重试。\n${inlineErrorDetails(exportError)}`;
 		}
 	}
 
@@ -541,7 +542,7 @@
 			backupMessage = '会话已恢复。重复导入同一文件不会创建副本。';
 		} catch (importError) {
 			console.error('[persistence] import failed', importError);
-			persistenceError = '会话文件无效或恢复失败，本地原有会话未被清除。';
+			persistenceError = `会话文件无效或恢复失败，本地原有会话未被清除。\n${inlineErrorDetails(importError)}`;
 		} finally {
 			sessionSwitching = false;
 			if (backupInput) backupInput.value = '';
@@ -594,7 +595,7 @@
 			await refreshThreadList();
 		} catch (switchError) {
 			console.error('[persistence] thread switch failed', switchError);
-			persistenceError = '会话切换失败，请稍后重试。';
+			persistenceError = `会话切换失败，请稍后重试。\n${inlineErrorDetails(switchError)}`;
 		} finally {
 			sessionSwitching = false;
 		}
@@ -939,7 +940,7 @@
 				checkpointWriter = null;
 				persistencePhase = 'unavailable';
 				storageDurability = 'best-effort';
-				persistenceError = '本地历史记录不可用；实时翻译仍可继续。';
+				persistenceError = `本地历史记录不可用；实时翻译仍可继续。\n${inlineErrorDetails(restoreError)}`;
 			})
 			.finally(() => {
 				if (restoreTimer !== null) clearTimeout(restoreTimer);
@@ -1873,6 +1874,11 @@
 	}
 	.warning strong {
 		color: #f0e8bc;
+	}
+	.error span,
+	.warning span {
+		overflow-wrap: anywhere;
+		white-space: pre-wrap;
 	}
 	.export {
 		min-width: 0;

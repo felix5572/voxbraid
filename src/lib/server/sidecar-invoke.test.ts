@@ -90,7 +90,20 @@ describe('invokeSidecar', () => {
 
 	it('fails closed when input token counting fails', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
-		const fetcher = vi.fn(async () => jsonResponse({ error: { code: 'temporary' } }, 503));
+		const fetcher = vi.fn(async () =>
+			jsonResponse(
+				{
+					error: {
+						message: 'temporary failure',
+						type: 'server_error',
+						code: 'temporary',
+						param: 'input'
+					}
+				},
+				503,
+				'count-request-1'
+			)
+		);
 		const response = await invokeSidecar({
 			request: request(),
 			fetcher,
@@ -100,10 +113,18 @@ describe('invokeSidecar', () => {
 
 		expect(response.status).toBe(502);
 		expect(fetcher).toHaveBeenCalledTimes(1);
-		expect(await result(response)).toMatchObject({
+		const failure = await result(response);
+		expect(failure).toMatchObject({
 			status: 'failed',
 			error: { code: 'budget-check-failed' }
 		});
+		if (failure.status === 'failed') {
+			expect(failure.error.message).toContain('type=server_error');
+			expect(failure.error.message).toContain('code=temporary');
+			expect(failure.error.message).toContain('param=input');
+			expect(failure.error.message).toContain('count-request-1');
+			expect(failure.error.message).toContain('"message":"temporary failure"');
+		}
 	});
 
 	it('rejects an over-budget context without calling generation', async () => {
@@ -121,6 +142,73 @@ describe('invokeSidecar', () => {
 			status: 'failed',
 			error: { code: 'context-too-large' }
 		});
+	});
+
+	it('preserves structured and raw OpenAI generation errors', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const fetcher = vi
+			.fn()
+			.mockResolvedValueOnce(jsonResponse({ input_tokens: 42 }))
+			.mockResolvedValueOnce(
+				jsonResponse(
+					{
+						error: {
+							message: 'rate limit reached',
+							type: 'rate_limit_error',
+							code: 'rate_limit_exceeded',
+							param: 'model'
+						}
+					},
+					429,
+					'generation-request-1'
+				)
+			);
+
+		const response = await invokeSidecar({
+			request: request(),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW
+		});
+		const failure = await result(response);
+
+		expect(response.status).toBe(502);
+		expect(failure).toMatchObject({ status: 'failed', error: { code: 'upstream-failed' } });
+		if (failure.status === 'failed') {
+			expect(failure.error.message).toContain('type=rate_limit_error');
+			expect(failure.error.message).toContain('code=rate_limit_exceeded');
+			expect(failure.error.message).toContain('param=model');
+			expect(failure.error.message).toContain('generation-request-1');
+			expect(failure.error.message).toContain('"message":"rate limit reached"');
+		}
+	});
+
+	it('preserves a non-JSON upstream response body', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const fetcher = vi
+			.fn()
+			.mockResolvedValueOnce(jsonResponse({ input_tokens: 42 }))
+			.mockResolvedValueOnce(
+				new Response('<html><h1>upstream unavailable</h1></html>', {
+					status: 502,
+					statusText: 'Bad Gateway',
+					headers: { 'Content-Type': 'text/html', 'x-request-id': 'proxy-request-1' }
+				})
+			);
+
+		const response = await invokeSidecar({
+			request: request(),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW
+		});
+		const failure = await result(response);
+
+		expect(response.status).toBe(502);
+		if (failure.status !== 'failed') throw new Error('Expected sidecar failure.');
+		expect(failure.error.message).toContain('proxy-request-1');
+		expect(failure.error.message).toContain('<html><h1>upstream unavailable</h1></html>');
+		expect(failure.error.message).not.toContain('[上游响应共 4 字符]\nnull');
 	});
 
 	it('counts and generates from the exact same prepared text', async () => {
@@ -189,6 +277,7 @@ describe('invokeSidecar', () => {
 					id: 'resp-incomplete',
 					model: 'gpt-5.6-luna',
 					status: 'incomplete',
+					incomplete_details: { reason: 'max_output_tokens' },
 					output: [
 						{
 							content: [{ type: 'output_text', text: '部分结果' }]
@@ -205,7 +294,8 @@ describe('invokeSidecar', () => {
 		});
 
 		expect(response.status).toBe(502);
-		expect(await result(response)).toMatchObject({
+		const failure = await result(response);
+		expect(failure).toMatchObject({
 			status: 'failed',
 			responseId: 'resp-incomplete',
 			outputText: '部分结果',
@@ -213,6 +303,9 @@ describe('invokeSidecar', () => {
 			usageStatus: 'recorded',
 			error: { code: 'upstream-incomplete' }
 		});
+		if (failure.status === 'failed') {
+			expect(failure.error.message).toContain('incomplete_details.reason=max_output_tokens');
+		}
 	});
 
 	it('reports generation timeouts as possibly billable failures', async () => {

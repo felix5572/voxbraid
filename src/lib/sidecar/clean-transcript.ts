@@ -1,6 +1,11 @@
 import { sentenceBoundaries } from '../session/sentence-boundary';
 import type { CaptureRun } from '../session/types';
-import type { ModelUsage, ModelUsageStatus } from './types';
+import type {
+	ModelUsage,
+	ModelUsageStatus,
+	SidecarErrorCode,
+	SidecarFailureDiagnostic
+} from './types';
 
 export const CLEAN_TRANSCRIPT_TARGET_SOURCE_CHARACTERS = 5_000;
 export const CLEAN_TRANSCRIPT_HARD_SOURCE_CHARACTERS = 8_000;
@@ -14,6 +19,18 @@ export const CLEAN_TRANSCRIPT_CONTINUITY_CHARACTERS = 1_000;
 export const CLEAN_TRANSCRIPT_TASK_VERSION = 5;
 
 export type CleanTranscriptBlockStatus = 'completed' | 'failed';
+
+export interface CleanTranscriptFailureAttempt {
+	capturedAt: string;
+	failedAt: string;
+	clientRequestId: string;
+	responseId: string | null;
+	model: string | null;
+	upstreamStatus: 'failed' | 'incomplete' | 'cancelled' | null;
+	errorCode: SidecarErrorCode | null;
+	error: string;
+	diagnostic: SidecarFailureDiagnostic | null;
+}
 
 export interface CleanTranscriptCursor {
 	sourceEnd: number;
@@ -48,6 +65,12 @@ export interface StoredCleanTranscriptBlock extends CleanTranscriptCursor {
 	taskVersion: number;
 	usageStatus: ModelUsageStatus;
 	usage: ModelUsage | null;
+	clientRequestId?: string;
+	responseId?: string | null;
+	upstreamStatus?: 'failed' | 'incomplete' | 'cancelled' | null;
+	errorCode?: SidecarErrorCode | null;
+	diagnostic?: SidecarFailureDiagnostic | null;
+	failureAttempts?: CleanTranscriptFailureAttempt[];
 	error: string | null;
 	updatedAt: string;
 }

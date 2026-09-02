@@ -189,7 +189,11 @@ describe('RealtimeTranslationClient', () => {
 		await vi.advanceTimersByTimeAsync(10);
 
 		expect(harness.client.currentStatus).toBe('failed');
-		expect(harness.onConnectionFailure).toHaveBeenCalledWith('网络连接长时间未恢复，请重新开始。');
+		expect(harness.onConnectionFailure).toHaveBeenCalledWith(
+			expect.stringContaining(
+				'网络连接长时间未恢复，请重新开始。诊断：connectionState=disconnected'
+			)
+		);
 		expect(harness.onError).not.toHaveBeenCalled();
 		expect(harness.peerConnection.close).toHaveBeenCalledOnce();
 	});
@@ -203,7 +207,7 @@ describe('RealtimeTranslationClient', () => {
 
 		expect(harness.client.currentStatus).toBe('failed');
 		expect(harness.onConnectionFailure).toHaveBeenCalledWith(
-			'实时连接建立超时，请检查网络后重新开始。'
+			expect.stringContaining('实时连接建立超时，请检查网络后重新开始。诊断：connectionState=new')
 		);
 		expect(harness.onError).not.toHaveBeenCalled();
 		expect(harness.media.stop).toHaveBeenCalled();

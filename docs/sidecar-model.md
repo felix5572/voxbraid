@@ -162,10 +162,20 @@ interface ModelUsage {
 
 type ModelUsageStatus = 'recorded' | 'unavailable';
 
+interface SidecarFailureDiagnostic {
+	durationMs: number | null;
+	visibilityState: string | null;
+	online: boolean | null;
+	requestBytes: number | null;
+	httpStatus: number | null;
+}
+
 type SidecarErrorCode =
 	| 'invalid-request'
 	| 'empty-context'
 	| 'context-too-large'
+	| 'browser-network-failed'
+	| 'invalid-response'
 	| 'budget-check-failed'
 	| 'request-timeout'
 	| 'upstream-failed'
@@ -191,10 +201,17 @@ type SidecarInvokeResult =
 			upstreamStatus: 'failed' | 'incomplete' | 'cancelled' | null;
 			usageStatus: ModelUsageStatus;
 			usage: ModelUsage | null;
+			diagnostic?: SidecarFailureDiagnostic | null;
 			error: { code: SidecarErrorCode; message: string };
 			failedAt: string;
 	  };
 ```
+
+`browser-network-failed` 表示浏览器没有收到 VoxBraid 旁路端点的 HTTP 响应，不能归类为 OpenAI 上游失败；`invalid-response` 表示端点已经响应，但 HTTP 响应体无法解析为旁路协议。页面必须保留浏览器错误的 name、message、stack/cause、请求耗时、在线状态、页面可见性和请求字节数，或 HTTP 状态、响应头与有界原始响应体摘录。OpenAI 拒绝必须保留 type、code、param、request ID 与有界原始响应；非 completed 终态还要保留 `incomplete_details.reason`。`upstream-failed` 只用于 VoxBraid 服务端已经收到并识别的 OpenAI 上游失败。
+
+课堂清稿失败块还应显示请求与失败时间、run 序号、原文和译文字符范围、已确认的模型及 client request ID，服务端旁路日志必须带同一 ID，避免只展示一个无法与部署日志对应的错误短句。重试同一块时，新的结果可以替换块的当前展示，但必须把此前每次失败的时间、ID、错误和结构化诊断保存在 `failureAttempts`，不能抹除用于排查偶发网络问题的唯一证据。
+
+统一错误展示纪律：固定产品文案只能作为原始错误的前缀，不能替代错误；用户可见的 catch 至少追加 `error.name: error.message`，完整 Error 对象同时写入控制台。HTTP 和 OpenAI 错误按上一段保留结构化信息。目标设备是 iPad，因此“只写 console”不算完成用户可见的错误暴露。
 
 只有上游 `completed` 映射为 `completed`。`failed`、`incomplete` 和 `cancelled` 都映射为旁路 `failed`，但保留原始 `upstreamStatus`、响应中已经存在的文本和 usage；失败且没有任何文本时 `outputText` 为 `null`，不使用空字符串冒充一段输出。官方响应 schema 将 usage 定义为可选，因此 `recorded` 要求 usage 非空且 token 字段完整，`unavailable` 要求 usage 为空；不能因调用完成就假定 usage 一定存在。解析文本时优先使用 API 客户端提供的 `output_text` 聚合结果；若直接解析原始响应，则聚合全部 `output_text` content item，不假设 `output[0]` 一定是最终消息。
 

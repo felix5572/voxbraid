@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+	import { inlineErrorDetails } from '../error-details';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
 	import type { CaptureRun } from '../session/types';
 	import { activeCaptureRun, type TranslationSessionState } from '../session/translation-session';
@@ -14,11 +15,28 @@
 		nextCleanTranscriptSequence,
 		type CleanTranscriptCandidate,
 		type CleanTranscriptCursor,
+		type CleanTranscriptFailureAttempt,
 		type StoredCleanTranscriptBlock
 	} from './clean-transcript';
-	import { sendSidecarRequest, sidecarLocalFailure } from './client';
-	import { captureSidecarBlockContext, sidecarRequestFits } from './context';
-	import type { SidecarInvokeRequest, SidecarInvokeResult, SidecarTrigger } from './types';
+	import { sendSidecarRequest, sidecarErrorDetails, sidecarLocalFailure } from './client';
+	import { captureSidecarBlockContext, serializedUtf8Bytes, sidecarRequestFits } from './context';
+	import type {
+		SidecarErrorCode,
+		SidecarInvokeRequest,
+		SidecarInvokeResult,
+		SidecarTrigger
+	} from './types';
+
+	interface ActiveCleanRequest {
+		clientRequestId: string;
+		sequence: number;
+		runSequence: number;
+		capturedAt: string;
+		sourceStart: number;
+		sourceEnd: number;
+		translationStart: number;
+		translationEnd: number;
+	}
 
 	interface Props {
 		session: TranslationSessionState | null;
@@ -43,12 +61,19 @@
 	let copyStatus = $state('');
 	let loadedThreadId = $state<string | null>(null);
 	let currentRequestId: string | null = null;
+	let activeRequest = $state<ActiveCleanRequest | null>(null);
+	let statusNowMs = $state(Date.now());
 	let loadGeneration = 0;
 	let observedThreadId: string | null = null;
 	let observedRunId: string | null = null;
 	let observedRunWasActive = false;
 	const automaticBaselines = new SvelteMap<string, CleanTranscriptCursor>();
 	const pendingRunEnds = new SvelteSet<string>();
+	const REQUEST_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+		hour: '2-digit',
+		minute: '2-digit',
+		second: '2-digit'
+	});
 
 	const threadId = $derived(session?.thread.id ?? null);
 	const hasTranscript = $derived(
@@ -96,6 +121,7 @@
 	): Promise<void> {
 		const generation = ++loadGeneration;
 		currentRequestId = null;
+		activeRequest = null;
 		onRequestingChange(false);
 		legacySummary = null;
 		blocks = [];
@@ -118,7 +144,7 @@
 				]);
 			} catch (error) {
 				console.error('[clean-transcript] restore failed', error);
-				persistenceMessage = '课堂清稿记录读取失败；本页仍可继续生成。';
+				persistenceMessage = `课堂清稿记录读取失败；本页仍可继续生成。\n${inlineErrorDetails(error)}`;
 			}
 		}
 		if (generation !== loadGeneration || session?.thread.id !== nextThreadId) return;
@@ -138,8 +164,17 @@
 		phase = 'idle';
 	}
 
-	function localFailure(clientRequestId: string, message: string): SidecarInvokeResult {
-		return sidecarLocalFailure(clientRequestId, 'upstream-failed', message);
+	function localFailure(
+		clientRequestId: string,
+		code: SidecarErrorCode,
+		message: string
+	): SidecarInvokeResult {
+		return sidecarLocalFailure(clientRequestId, code, message);
+	}
+
+	function timeLabel(timestamp: string): string {
+		const parsed = new Date(timestamp);
+		return Number.isNaN(parsed.getTime()) ? timestamp : REQUEST_TIME_FORMATTER.format(parsed);
 	}
 
 	function replaceBlock(block: StoredCleanTranscriptBlock): void {
@@ -148,16 +183,37 @@
 		);
 	}
 
+	function previousFailureAttempts(
+		retry: StoredCleanTranscriptBlock | null
+	): CleanTranscriptFailureAttempt[] {
+		if (!retry) return [];
+		if (retry.failureAttempts?.length) return retry.failureAttempts;
+		if (retry.status !== 'failed' || !retry.error) return [];
+		return [
+			{
+				capturedAt: retry.capturedAt,
+				failedAt: retry.updatedAt,
+				clientRequestId: retry.clientRequestId ?? '[旧记录未保存]',
+				responseId: retry.responseId ?? null,
+				model: retry.model,
+				upstreamStatus: retry.upstreamStatus ?? null,
+				errorCode: retry.errorCode ?? null,
+				error: retry.error,
+				diagnostic: retry.diagnostic ?? null
+			}
+		];
+	}
+
 	async function persistBlock(block: StoredCleanTranscriptBlock): Promise<void> {
 		if (!repository) {
 			persistenceMessage = '本地存储不可用；这份清稿只保留到页面关闭。';
 			return;
 		}
 		try {
-			await repository.saveCleanTranscriptBlock(block);
+			await repository.saveCleanTranscriptBlock($state.snapshot(block));
 		} catch (error) {
 			console.error('[clean-transcript] save failed', error);
-			persistenceMessage = '清稿已生成，但保存到本设备失败。';
+			persistenceMessage = `清稿已生成，但保存到本设备失败。\n${inlineErrorDetails(error)}`;
 		}
 	}
 
@@ -191,12 +247,23 @@
 		copyStatus = '';
 		persistenceMessage = '';
 		if (!sidecarRequestFits(request)) {
-			errorMessage = '当前清稿块超过 1.5 MB 请求上限。';
+			const requestBytes = serializedUtf8Bytes(request);
+			errorMessage = `当前清稿块为 ${requestBytes.toLocaleString()} 字节，超过 1,500,000 字节请求上限。`;
 			phase = 'failed';
 			return false;
 		}
 
 		currentRequestId = clientRequestId;
+		activeRequest = {
+			clientRequestId,
+			sequence: blockSequence,
+			runSequence: candidate.runSequence,
+			capturedAt,
+			sourceStart: candidate.sourceStart,
+			sourceEnd: candidate.sourceEnd,
+			translationStart: candidate.translationStart,
+			translationEnd: candidate.translationEnd
+		};
 		phase = 'requesting';
 		errorMessage = '';
 		onRequestingChange(true);
@@ -205,19 +272,32 @@
 			result = await sendSidecarRequest(request);
 		} catch (error) {
 			console.error('[clean-transcript] browser request failed', error);
-			result = localFailure(
-				clientRequestId,
-				error instanceof Error ? error.message : '课堂清稿请求失败。'
-			);
+			result = localFailure(clientRequestId, 'invalid-response', sidecarErrorDetails(error));
 		}
 		if (currentRequestId !== clientRequestId || session?.thread.id !== capturedSession.thread.id) {
 			return false;
 		}
 		currentRequestId = null;
+		activeRequest = null;
 		onRequestingChange(false);
 
 		const updatedAt = new Date().toISOString();
 		const completed = result.status === 'completed' && result.outputText.trim().length > 0;
+		const priorAttempts = previousFailureAttempts(retry);
+		const failureAttempt: CleanTranscriptFailureAttempt | null =
+			result.status === 'failed'
+				? {
+						capturedAt,
+						failedAt: result.failedAt,
+						clientRequestId,
+						responseId: result.responseId,
+						model: result.model,
+						upstreamStatus: result.upstreamStatus,
+						errorCode: result.error.code,
+						error: `${result.error.code}：${result.error.message}`,
+						diagnostic: result.diagnostic ?? null
+					}
+				: null;
 		const block: StoredCleanTranscriptBlock = {
 			id: retry?.id ?? crypto.randomUUID(),
 			threadId: capturedSession.thread.id,
@@ -238,6 +318,12 @@
 			taskVersion: CLEAN_TRANSCRIPT_TASK_VERSION,
 			usageStatus: result.usageStatus,
 			usage: result.usage,
+			clientRequestId,
+			responseId: result.responseId,
+			upstreamStatus: result.status === 'failed' ? result.upstreamStatus : null,
+			errorCode: result.status === 'failed' ? result.error.code : null,
+			diagnostic: result.status === 'failed' ? (result.diagnostic ?? null) : null,
+			failureAttempts: failureAttempt ? [...priorAttempts, failureAttempt] : priorAttempts,
 			error: completed
 				? null
 				: result.status === 'failed'
@@ -301,6 +387,7 @@
 			return;
 		}
 		phase = 'requesting';
+		activeRequest = null;
 		errorMessage = '';
 		persistenceMessage = '';
 		copyStatus = '';
@@ -311,7 +398,7 @@
 			} catch (error) {
 				console.error('[clean-transcript] clear failed', error);
 				phase = 'failed';
-				errorMessage = '无法清除旧清稿；原字幕和现有清稿均未改变。';
+				errorMessage = `无法清除旧清稿；原字幕和现有清稿均未改变。\n${inlineErrorDetails(error)}`;
 				onRequestingChange(false);
 				return;
 			}
@@ -339,6 +426,15 @@
 
 	$effect(() => {
 		void loadTranscript(threadId, repository);
+	});
+
+	$effect(() => {
+		if (phase !== 'requesting' || !activeRequest) return;
+		statusNowMs = Date.now();
+		const timer = window.setInterval(() => {
+			statusNowMs = Date.now();
+		}, 1_000);
+		return () => window.clearInterval(timer);
 	});
 
 	$effect(() => {
@@ -408,7 +504,16 @@
 		{#if phase === 'loading'}
 			正在读取本地清稿…
 		{:else if phase === 'requesting'}
-			正在整理下一块；已有内容仍可阅读。
+			{#if activeRequest}
+				正在整理第 {activeRequest.sequence} 块 · {timeLabel(activeRequest.capturedAt)} 发起 · 第
+				{activeRequest.runSequence} 段 · 原文
+				{activeRequest.sourceEnd - activeRequest.sourceStart} 字 / 译文
+				{activeRequest.translationEnd - activeRequest.translationStart} 字 · 请求
+				{activeRequest.clientRequestId.slice(0, 8)} · 已等待
+				{Math.max(0, Math.floor((statusNowMs - Date.parse(activeRequest.capturedAt)) / 1_000))} 秒 · 等待预算检查与模型生成
+			{:else}
+				正在准备重新整理全部…
+			{/if}
 		{:else if failedBlocks.length > 0}
 			有 {failedBlocks.length} 个块失败；后续内容不会覆盖它，可手动重试。
 		{:else if cleanText}
@@ -428,7 +533,41 @@
 			{:else}
 				<div class="failed-block" role="alert">
 					<strong>第 {block.sequence} 块未整理成功</strong>
-					<span>{block.error}</span>
+					<span class="failure-meta">
+						{timeLabel(block.capturedAt)} 发起 · {timeLabel(block.updatedAt)} 失败 · 第
+						{block.runSequence} 段
+					</span>
+					<span class="failure-meta">
+						原文字符 {block.sourceStart}–{block.sourceEnd} · 译文字符
+						{block.translationStart}–{block.translationEnd} · {block.model ?? '模型未确认'}
+					</span>
+					{#if block.diagnostic}
+						<span class="failure-meta diagnostic-id">
+							耗时 {block.diagnostic.durationMs ?? '未知'} ms · 页面
+							{block.diagnostic.visibilityState ?? '未知'} · online
+							{String(block.diagnostic.online ?? '未知')} · HTTP
+							{block.diagnostic.httpStatus ?? '未收到'} · 请求
+							{block.diagnostic.requestBytes ?? '未知'} bytes
+						</span>
+					{/if}
+					{#if block.clientRequestId}
+						<span class="failure-meta diagnostic-id">
+							client request {block.clientRequestId}{#if block.responseId}
+								· OpenAI response {block.responseId}
+							{/if}
+						</span>
+					{/if}
+					<code>{block.error}</code>
+					{#if (block.failureAttempts?.length ?? 0) > 1}
+						<details>
+							<summary>查看之前 {block.failureAttempts!.length - 1} 次失败</summary>
+							{#each block.failureAttempts!.slice(0, -1) as attempt (attempt.clientRequestId)}
+								<code>
+									{timeLabel(attempt.capturedAt)} · {attempt.clientRequestId} · {attempt.error}
+								</code>
+							{/each}
+						</details>
+					{/if}
 					{#if block.text.trim()}<div class="partial">{block.text}</div>{/if}
 				</div>
 			{/if}
@@ -555,6 +694,25 @@
 		border-top: 1px solid #223029;
 	}
 
+	.failure-meta {
+		color: #89968f;
+	}
+
+	.diagnostic-id {
+		overflow-wrap: anywhere;
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		font-size: 10px;
+	}
+
+	.failed-block code {
+		overflow-wrap: anywhere;
+		color: #efaaa0;
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		font-size: 11px;
+		line-height: 1.5;
+		white-space: pre-wrap;
+	}
+
 	.failed-block {
 		display: grid;
 		gap: 5px;
@@ -589,10 +747,12 @@
 
 	.error {
 		color: #efaaa0;
+		white-space: pre-wrap;
 	}
 
 	.warning {
 		color: #d7ba78;
+		white-space: pre-wrap;
 	}
 
 	.copy {

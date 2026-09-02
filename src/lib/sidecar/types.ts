@@ -52,10 +52,20 @@ export interface ModelUsage {
 
 export type ModelUsageStatus = 'recorded' | 'unavailable';
 
+export interface SidecarFailureDiagnostic {
+	durationMs: number | null;
+	visibilityState: string | null;
+	online: boolean | null;
+	requestBytes: number | null;
+	httpStatus: number | null;
+}
+
 export type SidecarErrorCode =
 	| 'invalid-request'
 	| 'empty-context'
 	| 'context-too-large'
+	| 'browser-network-failed'
+	| 'invalid-response'
 	| 'budget-check-failed'
 	| 'request-timeout'
 	| 'upstream-failed'
@@ -81,6 +91,7 @@ export type SidecarInvokeResult =
 			upstreamStatus: 'failed' | 'incomplete' | 'cancelled' | null;
 			usageStatus: ModelUsageStatus;
 			usage: ModelUsage | null;
+			diagnostic?: SidecarFailureDiagnostic | null;
 			error: { code: SidecarErrorCode; message: string };
 			failedAt: string;
 	  };
@@ -124,6 +135,17 @@ function isModelUsage(value: unknown): value is ModelUsage {
 	);
 }
 
+function isSidecarFailureDiagnostic(value: unknown): value is SidecarFailureDiagnostic {
+	return (
+		isRecord(value) &&
+		isNullableNumber(value.durationMs) &&
+		(value.visibilityState === null || typeof value.visibilityState === 'string') &&
+		(value.online === null || typeof value.online === 'boolean') &&
+		isNullableNumber(value.requestBytes) &&
+		isNullableNumber(value.httpStatus)
+	);
+}
+
 export function isSidecarInvokeResult(value: unknown): value is SidecarInvokeResult {
 	if (!isRecord(value) || (value.status !== 'completed' && value.status !== 'failed')) return false;
 	if (
@@ -151,6 +173,9 @@ export function isSidecarInvokeResult(value: unknown): value is SidecarInvokeRes
 			value.upstreamStatus === 'failed' ||
 			value.upstreamStatus === 'incomplete' ||
 			value.upstreamStatus === 'cancelled') &&
+		(value.diagnostic === undefined ||
+			value.diagnostic === null ||
+			isSidecarFailureDiagnostic(value.diagnostic)) &&
 		isRecord(value.error) &&
 		typeof value.error.code === 'string' &&
 		typeof value.error.message === 'string' &&

@@ -71,10 +71,10 @@ const DEFAULT_DEPENDENCIES: RealtimeTranslationClientDependencies = {
 
 export function realtimeErrorMessage(error: unknown): string {
 	if (error instanceof DOMException && error.name === 'NotAllowedError') {
-		return '没有获得麦克风权限。请允许访问麦克风后重试。';
+		return `没有获得麦克风权限。请允许访问麦克风后重试。诊断：${error.name}: ${error.message}`;
 	}
-	if (error instanceof Error && error.message) return error.message;
-	return '实时翻译连接失败，请稍后重试。';
+	if (error instanceof Error) return `${error.name}: ${error.message}`;
+	return `实时翻译连接失败，请稍后重试。thrown value: ${String(error)}`;
 }
 
 function stopTracks(stream: MediaStream | null): void {
@@ -286,7 +286,10 @@ export class RealtimeTranslationClient implements TranslationClient {
 			}
 
 			if (peerConnection.connectionState === 'failed') {
-				this.failConnection(runId, '实时连接已中断，请重新开始。');
+				this.failConnection(
+					runId,
+					`实时连接已中断，请重新开始。诊断：${this.connectionDiagnostics(peerConnection, null)}`
+				);
 			}
 		});
 	}
@@ -300,7 +303,10 @@ export class RealtimeTranslationClient implements TranslationClient {
 				this.peerConnection === peerConnection &&
 				this.status === 'connecting'
 			) {
-				this.failConnection(runId, '实时连接建立超时，请检查网络后重新开始。');
+				this.failConnection(
+					runId,
+					`实时连接建立超时，请检查网络后重新开始。诊断：${this.connectionDiagnostics(peerConnection, this.dependencies.connectionTimeoutMs)}`
+				);
 			}
 		}, this.dependencies.connectionTimeoutMs);
 	}
@@ -314,9 +320,24 @@ export class RealtimeTranslationClient implements TranslationClient {
 				this.peerConnection === peerConnection &&
 				this.status === 'connection-degraded'
 			) {
-				this.failConnection(runId, '网络连接长时间未恢复，请重新开始。');
+				this.failConnection(
+					runId,
+					`网络连接长时间未恢复，请重新开始。诊断：${this.connectionDiagnostics(peerConnection, this.dependencies.recoveryGraceMs)}`
+				);
 			}
 		}, this.dependencies.recoveryGraceMs);
+	}
+
+	private connectionDiagnostics(
+		peerConnection: RTCPeerConnection,
+		waitedMs: number | null
+	): string {
+		return [
+			`connectionState=${peerConnection.connectionState}`,
+			`iceConnectionState=${peerConnection.iceConnectionState ?? 'unknown'}`,
+			`dataChannel.readyState=${this.dataChannel?.readyState ?? 'none'}`,
+			`waitedMs=${waitedMs ?? 'unknown'}`
+		].join('，');
 	}
 
 	private failConnection(runId: number, message: string): void {
