@@ -9,6 +9,7 @@
 
 	let { entries, diagnosticsMode = false, onClear = () => undefined }: Props = $props();
 	let copyStatus = $state('');
+	let panelOpen = $state(false);
 	const activeErrors = $derived(
 		entries.filter((entry) => entry.severity === 'error' && entry.state === 'active').length
 	);
@@ -57,7 +58,7 @@
 </script>
 
 <section class="operational-log" aria-labelledby="operational-log-title">
-	<details open={diagnosticsMode && entries.length > 0}>
+	<details bind:open={panelOpen}>
 		<summary>
 			<span>
 				<span class="eyebrow">WARN / ERROR</span>

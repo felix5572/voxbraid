@@ -475,6 +475,45 @@ async function testCreditBalanceCalibration(browser, baseUrl) {
 	}
 }
 
+async function testOperationalLogPanelKeepsUserOpenState(browser, baseUrl) {
+	const { browserErrors, context, page } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		const recordIssue = () =>
+			page.evaluate(() => {
+				window.dispatchEvent(
+					new CustomEvent('voxbraid:operational-log', {
+						detail: {
+							action: 'record',
+							input: {
+								severity: 'warning',
+								source: 'system',
+								code: 'panel-open-test',
+								summary: '运行问题展开状态测试。',
+								details: '日志更新不得收起用户已经展开的面板。'
+							}
+						}
+					})
+				);
+			});
+		await recordIssue();
+		const panel = page.locator('.operational-log > details');
+		await panel.locator(':scope > summary').click();
+		assert.notEqual(await panel.getAttribute('open'), null);
+
+		await recordIssue();
+		await page.getByText('×2', { exact: true }).waitFor();
+		assert.notEqual(await panel.getAttribute('open'), null);
+
+		await page.getByRole('button', { name: '清空记录', exact: true }).click();
+		await page.getByText('目前没有运行问题', { exact: true }).waitFor();
+		assert.notEqual(await panel.getAttribute('open'), null);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
 async function testHiddenPageContinuesRevision(browser, baseUrl) {
 	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
 	try {
@@ -1480,6 +1519,7 @@ try {
 	await testPauseResumeAndNewThread(browser, baseUrl);
 	await testDiagnosticsModePreference(browser, baseUrl);
 	await testCreditBalanceCalibration(browser, baseUrl);
+	await testOperationalLogPanelKeepsUserOpenState(browser, baseUrl);
 	await testHiddenPageContinuesRevision(browser, baseUrl);
 	await testInteractiveRequestDuringPairGeneration(browser, baseUrl);
 	await testCompletedRunTailIsNotMarkedLive(browser, baseUrl);

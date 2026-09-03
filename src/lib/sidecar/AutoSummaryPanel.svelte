@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
+	import { diagnosticsDisclosure } from '../diagnostics-disclosure';
 	import { inlineErrorDetails } from '../error-details';
 	import { emitOperationalLog, resolveOperationalIssue } from '../operational-log';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
@@ -641,7 +642,7 @@
 			{#if block.status === 'completed'}
 				<div class="summary-text block">{block.text}</div>
 			{:else}
-				<details class="failed-block" role="alert" open={diagnosticsMode}>
+				<details class="failed-block" role="alert" use:diagnosticsDisclosure={diagnosticsMode}>
 					<summary>第 {block.sequence} 块未整理成功 · {block.error?.split('\n', 1)[0]}</summary>
 					<span class="failure-meta">
 						{timeLabel(block.capturedAt)} 发起 · {timeLabel(block.updatedAt)} 失败 · 第
@@ -692,7 +693,7 @@
 	<footer>
 		<div class="messages">
 			{#if errorMessage}
-				<details class="error" role="alert" open={diagnosticsMode}>
+				<details class="error" role="alert" use:diagnosticsDisclosure={diagnosticsMode}>
 					<summary>{errorMessage.split('\n', 1)[0]}</summary>
 					<code>{errorMessage}</code>
 				</details>

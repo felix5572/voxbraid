@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
+	import { diagnosticsDisclosure } from '../diagnostics-disclosure';
 	import { safeMarkdownHtml } from '../markdown';
 	import { emitOperationalLog } from '../operational-log';
 	import type { TranslationSessionState } from '../session/translation-session';
@@ -266,7 +267,7 @@
 						{#if invocation.state === 'requesting'}
 							<p class="pending">正在读取当前字幕与清稿、计算预算并回答…</p>
 						{:else if invocation.result?.status === 'failed'}
-							<details class="error" role="alert" open={diagnosticsMode}>
+							<details class="error" role="alert" use:diagnosticsDisclosure={diagnosticsMode}>
 								<summary>
 									{invocation.result.error.code}：{failureSummary(invocation.result.error.message)}
 								</summary>

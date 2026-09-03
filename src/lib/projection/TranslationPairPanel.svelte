@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { tick, untrack } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
+	import { diagnosticsDisclosure } from '../diagnostics-disclosure';
 	import { inlineErrorDetails } from '../error-details';
 	import { emitOperationalLog, resolveOperationalIssue } from '../operational-log';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
@@ -1243,7 +1244,7 @@
 					>
 						<div class="source">{row.segment.revisedSourceText}</div>
 						<div class="translation">{row.segment.translatedText}</div>
-						<details class="raw-evidence" open={diagnosticsMode}>
+						<details class="raw-evidence" use:diagnosticsDisclosure={diagnosticsMode}>
 							<summary aria-label="查看 Live 原文片段" title="查看 Live 原文片段">
 								<span class="evidence-icon" aria-hidden="true">↳</span>
 								{#if diagnosticsMode}
@@ -1302,7 +1303,7 @@
 			<details
 				class="failed"
 				class:corrected={supersededFailureIds.has(batch.id)}
-				open={diagnosticsMode}
+				use:diagnosticsDisclosure={diagnosticsMode}
 			>
 				<summary>
 					{#if supersededFailureIds.has(batch.id)}
@@ -1340,7 +1341,7 @@
 	<footer>
 		<div>
 			{#if footerErrorMessage}
-				<details class="error" role="alert" open={diagnosticsMode}>
+				<details class="error" role="alert" use:diagnosticsDisclosure={diagnosticsMode}>
 					<summary>{failureSummary(footerErrorMessage)}</summary>
 					<code>{footerErrorMessage}</code>
 				</details>
