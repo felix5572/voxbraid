@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { reconcileRevisionSegmentPresentation, revisionSegmentDisplayId } from './revision-display';
-import type { StoredRevisedSegment } from './revision-records';
+import {
+	reconcileRevisionSegmentPresentation,
+	revisionLongGroupSummary,
+	revisionSegmentDisplayId,
+	supersededFailedBatches
+} from './revision-display';
+import type { StoredRevisedSegment, StoredRevisionBatch } from './revision-records';
 
 function segment(overrides: Partial<StoredRevisedSegment> = {}): StoredRevisedSegment {
 	return {
@@ -20,6 +25,40 @@ function segment(overrides: Partial<StoredRevisedSegment> = {}): StoredRevisedSe
 		sourceElapsedEndMs: 1_000,
 		frozenAt: null,
 		updatedAt: '2026-09-02T10:00:00.000Z',
+		...overrides
+	};
+}
+
+function batch(
+	sequence: number,
+	status: StoredRevisionBatch['status'],
+	overrides: Partial<StoredRevisionBatch> = {}
+): StoredRevisionBatch {
+	return {
+		id: `batch-${sequence}`,
+		threadId: 'thread-1',
+		runId: 'run-1',
+		runSequence: 1,
+		sequence,
+		openStart: 100,
+		openEnd: 300,
+		tokenizerVersion: 2,
+		taskVersion: 4,
+		trigger: 'periodic',
+		status,
+		capturedAt: '2026-09-02T10:00:00.000Z',
+		completedAt: status === 'completed' ? '2026-09-02T10:00:01.000Z' : null,
+		clientRequestId: `request-${sequence}`,
+		responseId: status === 'completed' ? `response-${sequence}` : null,
+		model: 'gpt-5.6-luna',
+		usageStatus: 'unavailable',
+		usage: null,
+		upstreamStatus: status === 'failed' ? 'failed' : null,
+		errorCode: status === 'failed' ? 'invalid-revision-boundary' : null,
+		error: status === 'failed' ? 'failed' : null,
+		diagnostic: null,
+		transportDiagnostic: null,
+		updatedAt: '2026-09-02T10:00:01.000Z',
 		...overrides
 	};
 }
@@ -60,5 +99,25 @@ describe('revision segment presentation', () => {
 		expect(reconciled.id).toBe('run-1:10:24');
 		expect(reconciled.id).not.toBe(revisionSegmentDisplayId(previous));
 		expect(reconciled.updatedAt).toBe(next.updatedAt);
+	});
+
+	it('marks a failed batch superseded only when a later success fully covers its range', () => {
+		const failed = batch(1, 'failed');
+		const covered = batch(2, 'completed', { openStart: 80, openEnd: 320 });
+		const partial = batch(3, 'completed', { openStart: 120, openEnd: 320 });
+		const laterFailure = batch(4, 'failed', { openStart: 80, openEnd: 320 });
+
+		expect(supersededFailedBatches([failed, covered]).map((item) => item.id)).toEqual([failed.id]);
+		expect(supersededFailedBatches([failed, partial])).toEqual([]);
+		expect(supersededFailedBatches([failed, laterFailure])).toEqual([]);
+	});
+
+	it('counts groups longer than the observation threshold without rejecting them', () => {
+		expect(
+			revisionLongGroupSummary([
+				segment({ sourceStart: 0, sourceEnd: 480 }),
+				segment({ sourceStart: 480, sourceEnd: 961 })
+			])
+		).toEqual({ long: 1, total: 2 });
 	});
 });

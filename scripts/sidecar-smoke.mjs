@@ -102,7 +102,6 @@ try {
 				atoms: revisionAtoms,
 				continuity: [],
 				previousDraft: [],
-				oversizedGroupNumbers: [],
 				previousInvalidAtomRanges: []
 			}
 		},
@@ -116,7 +115,6 @@ try {
 				atoms: revisionAtomsContinued,
 				continuity: [],
 				previousDraft: [],
-				oversizedGroupNumbers: [],
 				previousInvalidAtomRanges: []
 			}
 		}

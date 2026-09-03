@@ -66,7 +66,6 @@ function pairRequestBody(): unknown {
 			atoms: [{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' }],
 			continuity: [],
 			previousDraft: [],
-			oversizedGroupNumbers: [],
 			previousInvalidAtomRanges: []
 		},
 		context: {
@@ -241,7 +240,6 @@ describe('invokeSidecar', () => {
 					],
 					continuity: [],
 					previousDraft: [],
-					oversizedGroupNumbers: [],
 					previousInvalidAtomRanges: []
 				},
 				context: {
@@ -290,7 +288,7 @@ describe('invokeSidecar', () => {
 		});
 	});
 
-	it('returns an oversized revision group for the browser soft-limit policy to handle', async () => {
+	it('accepts a long revision group without a correction retry', async () => {
 		const source = 'x'.repeat(600);
 		const fetcher = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
 			async () =>
@@ -326,7 +324,6 @@ describe('invokeSidecar', () => {
 					],
 					continuity: [],
 					previousDraft: [],
-					oversizedGroupNumbers: [],
 					previousInvalidAtomRanges: []
 				},
 				context: {
@@ -384,7 +381,6 @@ describe('invokeSidecar', () => {
 				atoms: [{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' }],
 				continuity: [],
 				previousDraft: [],
-				oversizedGroupNumbers: [],
 				previousInvalidAtomRanges: []
 			},
 			context: {

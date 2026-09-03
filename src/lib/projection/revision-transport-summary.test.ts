@@ -83,6 +83,7 @@ describe('revisionTransportSummary', () => {
 			rebuilt: 0,
 			chainHitRate: 2 / 3,
 			averageCompletedMs: 2_000,
+			correctedFailures: 0,
 			failures: [{ code: 'websocket-outcome-unknown', count: 1 }]
 		});
 		expect(summary.turnBuckets).toEqual([

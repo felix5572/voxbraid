@@ -18,7 +18,6 @@ function revisionPairRequest(): SidecarInvokeRequest & { intent: RevisionPairInt
 			],
 			continuity: [{ revisedSourceText: 'Earlier.', translatedText: '此前。' }],
 			previousDraft: [],
-			oversizedGroupNumbers: [] as number[],
 			previousInvalidAtomRanges: [] as Array<{ firstAtom: number; lastAtom: number }>
 		},
 		context: {
@@ -185,14 +184,6 @@ describe('sidecar task preparation', () => {
 		).byteLength;
 
 		expect(bytes).toBeLessThanOrEqual(64_000);
-	});
-
-	it('adds a server-owned correction for an oversized-group retry', () => {
-		const value = revisionPairRequest();
-		value.intent.oversizedGroupNumbers = [2];
-		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
-
-		expect(prepared.inputText).toContain('groups 2 exceeded');
 	});
 
 	it('keeps both transcript channels for summaries and questions', () => {

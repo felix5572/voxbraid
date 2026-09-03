@@ -1,4 +1,5 @@
 import type { StoredRevisionBatch } from './revision-records';
+import { supersededFailedBatches } from './revision-display';
 
 export interface RevisionTransportBucket {
 	label: 'turn 1' | 'turn 2–10' | 'turn 11+';
@@ -18,6 +19,7 @@ export interface RevisionTransportSummary {
 	chainHitRate: number | null;
 	averageCompletedMs: number | null;
 	turnBuckets: RevisionTransportBucket[];
+	correctedFailures: number;
 	failures: Array<{ code: string; count: number }>;
 }
 
@@ -43,9 +45,10 @@ export function revisionTransportSummary(
 	const continued = websocket.filter(
 		(batch) => batch.transportDiagnostic?.chainAction === 'continued'
 	).length;
+	const correctedFailureIds = new Set(supersededFailedBatches(batches).map((batch) => batch.id));
 	const failureCounts = new Map<string, number>();
 	for (const batch of batches) {
-		if (batch.status !== 'failed') continue;
+		if (batch.status !== 'failed' || correctedFailureIds.has(batch.id)) continue;
 		const code = batch.errorCode ?? 'unknown';
 		failureCounts.set(code, (failureCounts.get(code) ?? 0) + 1);
 	}
@@ -69,6 +72,7 @@ export function revisionTransportSummary(
 				return value === null || value === undefined ? [] : [value];
 			})
 		),
+		correctedFailures: correctedFailureIds.size,
 		turnBuckets: labels.map((label) => {
 			const matching = websocket.filter(
 				(batch) => turnBucket(batch.transportDiagnostic?.chainTurn ?? null) === label

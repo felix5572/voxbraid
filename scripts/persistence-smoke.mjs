@@ -220,7 +220,7 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		const pairAtoms = body.intent.kind === 'revise-pairs' ? (body.intent.atoms ?? []) : [];
 		const pairRaw = pairAtoms.map((atom) => atom.t).join('');
 		const pairGroups = [];
-		if (pairAtoms.length > 0 && pairRaw.includes('[OVERSIZE_PAIR]')) {
+		if (pairAtoms.length > 0 && pairRaw.includes('[LONG_PAIR]')) {
 			pairGroups.push({
 				firstAtom: 1,
 				lastAtom: pairAtoms.length,
@@ -568,39 +568,34 @@ async function testOpenWindowRevision(browser, baseUrl) {
 	}
 }
 
-async function testOversizedRevisionProgress(browser, baseUrl) {
+async function testLongRevisionGroupIsAccepted(browser, baseUrl) {
 	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
 	try {
 		await waitForReady(page);
 		await startCapture(page);
-		const source = `[OVERSIZE_PAIR] ${'long '.repeat(110)}.`;
+		const source = `[LONG_PAIR] ${'long '.repeat(110)}.`;
 		await emitPair(page, source, '超长句段。');
-		const failed = await waitForRecord(
-			page,
-			'revisionBatches',
-			(record) => record.status === 'failed' && record.errorCode === 'invalid-response',
-			'超长组第一次响应审计'
-		);
 		const completed = await waitForRecord(
 			page,
 			'revisionBatches',
-			(record) =>
-				record.runId === failed.runId &&
-				record.sequence > failed.sequence &&
-				record.status === 'completed',
-			'定向重试后强制前进'
+			(record) => record.status === 'completed' && record.openEnd - record.openStart > 480,
+			'长段首次接受'
 		);
 		const accepted = await waitForRecord(
 			page,
 			'revisedSegments',
 			(record) => record.producedByBatchId === completed.id,
-			'超长组定向重试后接受'
+			'长段一次接受'
 		);
 		assert.equal(accepted.rawText, source);
 		const requests = sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs');
-		assert.equal(requests.length, 2);
-		assert.deepEqual(requests[0].intent.oversizedGroupNumbers, []);
-		assert.deepEqual(requests[1].intent.oversizedGroupNumbers, [1]);
+		assert.equal(requests.length, 1);
+		await page.getByText('长段', { exact: true }).waitFor();
+		assert.equal(
+			(await readStore(page, 'revisionBatches')).filter((record) => record.status === 'failed')
+				.length,
+			0
+		);
 		await stopCapture(page);
 		assert.deepEqual(browserErrors, []);
 	} finally {
@@ -663,6 +658,13 @@ async function testInvalidRevisionBoundaryGetsOneTargetedRetry(browser, baseUrl)
 			{ firstAtom: 1, lastAtom: requests[0].intent.atoms.length },
 			{ firstAtom: 1, lastAtom: requests[0].intent.atoms.length }
 		]);
+		assert.equal(
+			await page.locator('.failed').count(),
+			0,
+			'已被后续成功批次覆盖的失败不应出现在阅读态'
+		);
+		await page.getByRole('button', { name: '诊断模式 关', exact: true }).click();
+		await page.getByText('第 1 段的早期尝试已纠正', { exact: false }).waitFor();
 		await stopCapture(page);
 		assert.deepEqual(browserErrors, []);
 	} finally {
@@ -1287,7 +1289,7 @@ try {
 	await testCompletedRunTailIsNotMarkedLive(browser, baseUrl);
 	await testCleanTranscriptContinuesAfterFailure(browser, baseUrl);
 	await testOpenWindowRevision(browser, baseUrl);
-	await testOversizedRevisionProgress(browser, baseUrl);
+	await testLongRevisionGroupIsAccepted(browser, baseUrl);
 	await testInvalidRevisionDoesNotRetry(browser, baseUrl);
 	await testInvalidRevisionBoundaryGetsOneTargetedRetry(browser, baseUrl);
 	await testRepeatedInvalidRevisionBoundaryStopsAfterCorrection(browser, baseUrl);

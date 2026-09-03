@@ -116,7 +116,7 @@ describe('revision projection', () => {
 			requestStart: 0,
 			requestEnd: 1_600,
 			rawText,
-			groups: [{ sourceStart: 0, sourceEnd: 1_600, oversized: true, endingBoundary: 'forced' }],
+			groups: [{ sourceStart: 0, sourceEnd: 1_600, endingBoundary: 'forced' }],
 			finalizing: false,
 			quietForMs: 0
 		});
@@ -129,10 +129,10 @@ describe('revision projection', () => {
 			requestEnd: 40,
 			rawText: 'a'.repeat(40),
 			groups: [
-				{ sourceStart: 0, sourceEnd: 10, oversized: false, endingBoundary: 'sentence' },
-				{ sourceStart: 10, sourceEnd: 20, oversized: false, endingBoundary: 'clause' },
-				{ sourceStart: 20, sourceEnd: 30, oversized: false, endingBoundary: 'sentence' },
-				{ sourceStart: 30, sourceEnd: 40, oversized: false, endingBoundary: 'sentence' }
+				{ sourceStart: 0, sourceEnd: 10, endingBoundary: 'sentence' },
+				{ sourceStart: 10, sourceEnd: 20, endingBoundary: 'clause' },
+				{ sourceStart: 20, sourceEnd: 30, endingBoundary: 'sentence' },
+				{ sourceStart: 30, sourceEnd: 40, endingBoundary: 'sentence' }
 			],
 			finalizing: false,
 			quietForMs: 0
@@ -148,8 +148,8 @@ describe('revision projection', () => {
 				requestEnd: 30,
 				rawText: 'a'.repeat(20),
 				groups: [
-					{ sourceStart: 10, sourceEnd: 20, oversized: false, endingBoundary: 'clause' },
-					{ sourceStart: 20, sourceEnd: 30, oversized: false, endingBoundary: 'open' }
+					{ sourceStart: 10, sourceEnd: 20, endingBoundary: 'clause' },
+					{ sourceStart: 20, sourceEnd: 30, endingBoundary: 'open' }
 				],
 				finalizing: true,
 				quietForMs: 0
@@ -163,7 +163,7 @@ describe('revision projection', () => {
 				requestStart: 0,
 				requestEnd: 16,
 				rawText: 'First sentence. ',
-				groups: [{ sourceStart: 0, sourceEnd: 16, oversized: false, endingBoundary: 'sentence' }],
+				groups: [{ sourceStart: 0, sourceEnd: 16, endingBoundary: 'sentence' }],
 				finalizing: false,
 				quietForMs: 1_200
 			})

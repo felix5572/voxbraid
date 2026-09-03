@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-	OversizedRevisionGroupError,
-	parseRevisionModelOutput,
-	RevisionBoundaryError
-} from './revision-output';
+import { parseRevisionModelOutput, RevisionBoundaryError } from './revision-output';
 import { sourceClauseAtoms } from './revision-projection';
 
 describe('revision model output', () => {
@@ -37,7 +33,7 @@ describe('revision model output', () => {
 		expect(parsed.groups.at(-1)?.sourceEnd).toBe(text.length);
 	});
 
-	it('reports an oversized-only response and can accept it on the second attempt', () => {
+	it('accepts a long group because length is a reading preference', () => {
 		const text = `${'one clause, '.repeat(24)}done.`;
 		const atoms = sourceClauseAtoms(text, 0, text.length, 'en');
 		const output = JSON.stringify({
@@ -52,10 +48,10 @@ describe('revision model output', () => {
 			]
 		});
 
-		expect(() => parseRevisionModelOutput(output, atoms)).toThrow(OversizedRevisionGroupError);
-		expect(
-			parseRevisionModelOutput(output, atoms, { allowOversizedGroups: true }).groups[0]
-		).toMatchObject({ oversized: true, sourceStart: 0, sourceEnd: text.length });
+		expect(parseRevisionModelOutput(output, atoms).groups[0]).toMatchObject({
+			sourceStart: 0,
+			sourceEnd: text.length
+		});
 	});
 
 	it('rejects missing atom coverage', () => {
@@ -122,6 +118,6 @@ describe('revision model output', () => {
 		);
 
 		expect(parsed.groups).toHaveLength(1);
-		expect(parsed.groups[0].oversized).toBe(false);
+		expect(parsed.groups[0].sourceEnd - parsed.groups[0].sourceStart).toBe(text.length);
 	});
 });

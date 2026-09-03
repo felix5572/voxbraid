@@ -1,8 +1,5 @@
 import type { SourceClauseAtom } from './revision-projection';
-import {
-	REVISION_MAX_GROUP_SOURCE_CHARACTERS,
-	REVISION_MAX_OPEN_SOURCE_CHARACTERS
-} from './revision-constants';
+import { REVISION_MAX_OPEN_SOURCE_CHARACTERS } from './revision-constants';
 
 export interface RevisionModelGroup {
 	firstAtom: number;
@@ -20,25 +17,12 @@ export interface ValidatedRevisionGroup extends RevisionModelGroup {
 	sourceStart: number;
 	sourceEnd: number;
 	rawText: string;
-	oversized: boolean;
 	endingBoundary: SourceClauseAtom['boundary'];
 }
 
 export interface ParsedRevisionModelOutput {
 	output: RevisionModelOutput;
 	groups: ValidatedRevisionGroup[];
-}
-
-export class OversizedRevisionGroupError extends TypeError {
-	constructor(
-		readonly groups: ValidatedRevisionGroup[],
-		readonly oversizedGroupNumbers: number[]
-	) {
-		super(
-			`修订对照第 ${oversizedGroupNumbers.join('、')} 组超过 ${REVISION_MAX_GROUP_SOURCE_CHARACTERS} 字符软上限。`
-		);
-		this.name = 'OversizedRevisionGroupError';
-	}
 }
 
 export class RevisionBoundaryError extends TypeError {
@@ -120,8 +104,7 @@ export function revisionAtomRangesFromOutput(
 
 export function parseRevisionModelOutput(
 	value: string,
-	atoms: readonly SourceClauseAtom[],
-	options: { allowOversizedGroups?: boolean } = {}
+	atoms: readonly SourceClauseAtom[]
 ): ParsedRevisionModelOutput {
 	let parsed: unknown;
 	try {
@@ -180,7 +163,6 @@ export function parseRevisionModelOutput(
 			revisedSourceText: rawGroup.revisedSourceText.trim(),
 			translatedText: rawGroup.translatedText.trim(),
 			paragraphBreakBefore: rawGroup.paragraphBreakBefore as boolean,
-			oversized: last.end - first.start > REVISION_MAX_GROUP_SOURCE_CHARACTERS,
 			endingBoundary: last.boundary
 		};
 		outputCharacters += group.revisedSourceText.length + group.translatedText.length;
@@ -196,24 +178,15 @@ export function parseRevisionModelOutput(
 			returnedAtomRanges
 		);
 	}
-	const oversizedGroupNumbers = groups
-		.map((group, index) => (group.oversized ? index + 1 : 0))
-		.filter(Boolean);
-	if (oversizedGroupNumbers.length > 0 && !options.allowOversizedGroups) {
-		throw new OversizedRevisionGroupError(groups, oversizedGroupNumbers);
-	}
 	return {
 		output: {
-			groups: groups.map(
-				({ sourceStart, sourceEnd, rawText, oversized, endingBoundary, ...group }) => {
-					void sourceStart;
-					void sourceEnd;
-					void rawText;
-					void oversized;
-					void endingBoundary;
-					return group;
-				}
-			)
+			groups: groups.map(({ sourceStart, sourceEnd, rawText, endingBoundary, ...group }) => {
+				void sourceStart;
+				void sourceEnd;
+				void rawText;
+				void endingBoundary;
+				return group;
+			})
 		},
 		groups
 	};

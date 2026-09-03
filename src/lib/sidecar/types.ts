@@ -59,7 +59,6 @@ export type SidecarIntent =
 			atoms: SidecarRevisionAtom[];
 			continuity: SidecarRevisionContextSegment[];
 			previousDraft: SidecarRevisionDraftSegment[];
-			oversizedGroupNumbers: number[];
 			previousInvalidAtomRanges: SidecarInvalidAtomRange[];
 	  };
 

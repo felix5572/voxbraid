@@ -93,7 +93,6 @@ function preparedPair(texts: string[], threadId = 'thread-1') {
 			atoms: revisionAtoms,
 			continuity: [],
 			previousDraft: [],
-			oversizedGroupNumbers: [],
 			previousInvalidAtomRanges: []
 		},
 		context: {

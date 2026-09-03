@@ -15,16 +15,20 @@
 		SidecarRevisionDraftSegment
 	} from '../sidecar/types';
 	import { ProjectionWorker } from './projection-worker';
-	import { reconcileRevisionSegmentPresentation } from './revision-display';
+	import {
+		reconcileRevisionSegmentPresentation,
+		revisionLongGroupSummary,
+		supersededFailedBatches
+	} from './revision-display';
 	import { revisionTransportSummary } from './revision-transport-summary';
 	import {
+		REVISION_LONG_GROUP_CHARACTERS,
 		REVISION_MAX_CONTINUITY_CHARACTERS,
 		REVISION_QUIET_WINDOW_MS,
 		REVISION_TASK_VERSION,
 		REVISION_TOKENIZER_VERSION
 	} from './revision-constants';
 	import {
-		OversizedRevisionGroupError,
 		parseRevisionModelOutput,
 		RevisionBoundaryError,
 		type ValidatedRevisionGroup
@@ -117,7 +121,14 @@
 	const pendingSince = new SvelteMap<string, number>();
 	const lastAutomaticRequestAt = new SvelteMap<string, number>();
 	const threadId = $derived(session?.thread.id ?? null);
-	const failedBatches = $derived(batches.filter((batch) => batch.status === 'failed'));
+	const allFailedBatches = $derived(batches.filter((batch) => batch.status === 'failed'));
+	const supersededFailureIds = $derived(
+		new Set(supersededFailedBatches(batches).map((batch) => batch.id))
+	);
+	const failedBatches = $derived(
+		allFailedBatches.filter((batch) => !supersededFailureIds.has(batch.id))
+	);
+	const visibleFailedBatches = $derived(diagnosticsMode ? allFailedBatches : failedBatches);
 	const footerErrorMessage = $derived(
 		failedBatches.at(-1)?.error === errorMessage ? '' : errorMessage
 	);
@@ -125,6 +136,7 @@
 		batches.reduce((total, batch) => total + (batch.usage?.totalTokens ?? 0), 0)
 	);
 	const transportSummary = $derived(revisionTransportSummary(batches));
+	const longGroupSummary = $derived(revisionLongGroupSummary(segments));
 	const orderedSegments = $derived(
 		[...segments].sort(
 			(left, right) => left.runSequence - right.runSequence || left.sourceStart - right.sourceStart
@@ -419,7 +431,6 @@
 			candidate.openEnd,
 			candidate.atoms
 		);
-		let oversizedGroupNumbers: number[] = [];
 		let previousInvalidAtomRanges: Array<{ firstAtom: number; lastAtom: number }> = [];
 		let attempt = 1;
 		let sequence = nextBatchSequence(candidate.runId);
@@ -449,7 +460,6 @@
 					})),
 					continuity,
 					previousDraft: draft,
-					oversizedGroupNumbers,
 					previousInvalidAtomRanges
 				},
 				context: {
@@ -493,24 +503,18 @@
 			}
 			const updatedAt = new Date().toISOString();
 			let groups: ValidatedRevisionGroup[] | null = null;
-			let oversizedError: OversizedRevisionGroupError | null = null;
 			let boundaryError: RevisionBoundaryError | null = null;
 			let validationError: string | null = null;
 			if (result.status === 'completed') {
 				try {
-					groups = parseRevisionModelOutput(result.outputText, candidate.atoms, {
-						allowOversizedGroups: attempt === 2
-					}).groups;
+					groups = parseRevisionModelOutput(result.outputText, candidate.atoms).groups;
 				} catch (error) {
-					if (error instanceof OversizedRevisionGroupError) oversizedError = error;
-					else if (error instanceof RevisionBoundaryError) boundaryError = error;
+					if (error instanceof RevisionBoundaryError) boundaryError = error;
 					else validationError = inlineErrorDetails(error);
 				}
 			} else if (result.error.code === 'invalid-revision-boundary' && result.outputText) {
 				try {
-					parseRevisionModelOutput(result.outputText, candidate.atoms, {
-						allowOversizedGroups: true
-					});
+					parseRevisionModelOutput(result.outputText, candidate.atoms);
 				} catch (error) {
 					if (error instanceof RevisionBoundaryError) boundaryError = error;
 				}
@@ -567,9 +571,8 @@
 				return true;
 			}
 
-			const error = oversizedError
-				? `invalid-response：${oversizedError.name}: ${oversizedError.message}`
-				: boundaryError && result.status === 'completed'
+			const error =
+				boundaryError && result.status === 'completed'
 					? `invalid-revision-boundary：${boundaryError.name}: ${boundaryError.message}`
 					: validationError
 						? `invalid-response：${validationError}`
@@ -583,12 +586,11 @@
 				clientRequestId,
 				result,
 				error,
-				errorCode:
-					oversizedError || validationError
-						? 'invalid-response'
-						: boundaryError && result.status === 'completed'
-							? 'invalid-revision-boundary'
-							: undefined,
+				errorCode: validationError
+					? 'invalid-response'
+					: boundaryError && result.status === 'completed'
+						? 'invalid-revision-boundary'
+						: undefined,
 				threadId: capturedThreadId
 			});
 			await persistBatch(capturedRepository, failed, [], capturedFacts);
@@ -596,12 +598,6 @@
 				appendBatch(failed);
 			worker.finishRequest(clientRequestId);
 
-			if (oversizedError && attempt === 1) {
-				oversizedGroupNumbers = oversizedError.oversizedGroupNumbers;
-				attempt += 1;
-				sequence += 1;
-				continue;
-			}
 			if (boundaryError && attempt === 1) {
 				previousInvalidAtomRanges = boundaryError.returnedAtomRanges;
 				attempt += 1;
@@ -979,12 +975,16 @@
 						{metric(bucket.averageCompletedMs, ' ms')}
 					</span>
 				{/each}
+				<span
+					>长段 {longGroupSummary.long}/{longGroupSummary.total}（&gt; {REVISION_LONG_GROUP_CHARACTERS}
+					字）</span
+				>
 				<span>
-					失败原因：{transportSummary.failures.length === 0
+					未解决失败：{transportSummary.failures.length === 0
 						? '无'
 						: transportSummary.failures
 								.map((failure) => `${failure.code} ${failure.count}`)
-								.join(' · ')}
+								.join(' · ')} · 已纠正尝试 {transportSummary.correctedFailures}
 				</span>
 			</div>
 		</details>
@@ -992,7 +992,7 @@
 
 	<div class="column-head" aria-hidden="true"><span>修订原文</span><span>对照译文</span></div>
 	<div class="pairs-scroll" bind:this={scroller} onscroll={updateFollow}>
-		{#if displayRows.length === 0 && failedBatches.length === 0}
+		{#if displayRows.length === 0 && visibleFailedBatches.length === 0}
 			<p class="placeholder">开始后，Live 原文会立即显示在这里，再由 Luna 回望修订。</p>
 		{/if}
 		{#each displayRows as row (row.id)}
@@ -1015,6 +1015,9 @@
 							<code>{row.segment.rawText}</code>
 						</details>
 						{#if row.segment.state === 'open'}<span class="open-badge">修订中</span>{/if}
+						{#if row.segment.sourceEnd - row.segment.sourceStart > REVISION_LONG_GROUP_CHARACTERS}
+							<span class="long-badge">长段</span>
+						{/if}
 						{#if row.segment.boundaryState === 'forced-tail'}<span class="forced-badge">句未完</span
 							>{/if}
 					</div>
@@ -1042,10 +1045,19 @@
 				</div>
 			{/if}
 		{/each}
-		{#each failedBatches as batch (batch.id)}
-			<details class="failed" open={diagnosticsMode}>
+		{#each visibleFailedBatches as batch (batch.id)}
+			<details
+				class="failed"
+				class:corrected={supersededFailureIds.has(batch.id)}
+				open={diagnosticsMode}
+			>
 				<summary>
-					第 {batch.runSequence} 段未修订成功 · {failureSummary(batch.error)}
+					{#if supersededFailureIds.has(batch.id)}
+						第 {batch.runSequence} 段的早期尝试已纠正
+					{:else}
+						第 {batch.runSequence} 段未修订成功
+					{/if}
+					· {failureSummary(batch.error)}
 				</summary>
 				<span>raw {batch.openStart}–{batch.openEnd} · request {batch.clientRequestId}</span>
 				{#if batch.diagnostic}
@@ -1262,6 +1274,7 @@
 		word-break: break-word;
 	}
 	.open-badge,
+	.long-badge,
 	.forced-badge,
 	.live-badge,
 	.unrevised-badge,
@@ -1278,6 +1291,11 @@
 	}
 	.live-badge {
 		color: #72b39e;
+	}
+	.long-badge {
+		top: 4px;
+		right: 42px;
+		color: #b7a77d;
 	}
 	.unrevised-badge {
 		color: #b7a77d;
@@ -1307,6 +1325,10 @@
 	.failed summary {
 		cursor: pointer;
 		font-weight: 700;
+	}
+	.failed.corrected {
+		border-color: #34423c;
+		color: #91a59c;
 	}
 	.failed span,
 	.failed code {

@@ -491,6 +491,8 @@ export async function invokeSidecar({
 	if (body.status === 'completed' && responseId) {
 		if (prepared.structuredOutput === 'revision-pairs') {
 			try {
+				// Group length is a reading preference, not a correctness boundary.
+				// Only atom coverage and the bounded request range can reject output.
 				const parsedRevision = parseRevisionModelOutput(
 					outputText,
 					prepared.revisionAtoms.map((atom) => ({
@@ -499,10 +501,7 @@ export async function invokeSidecar({
 						end: atom.end,
 						text: atom.t,
 						boundary: atom.boundary
-					})),
-					// The server owns hard atom coverage and range validation. The browser owns
-					// the 240-character readability preference and its targeted retry/fallback.
-					{ allowOversizedGroups: true }
+					}))
 				);
 				outputText = JSON.stringify(parsedRevision.output);
 			} catch (error) {

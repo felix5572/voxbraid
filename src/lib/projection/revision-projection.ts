@@ -3,8 +3,8 @@ import { sentenceBoundaries } from '../session/sentence-boundary';
 import {
 	REVISION_HARD_SOURCE_CHARACTERS,
 	REVISION_HARD_WINDOW_MS,
+	REVISION_LONG_GROUP_CHARACTERS,
 	REVISION_MAX_ATOM_SOURCE_CHARACTERS,
-	REVISION_MAX_GROUP_SOURCE_CHARACTERS,
 	REVISION_MAX_OPEN_SOURCE_CHARACTERS,
 	REVISION_MIN_QUIET_SOURCE_CHARACTERS,
 	REVISION_MIN_REQUEST_INTERVAL_MS,
@@ -55,7 +55,6 @@ export interface RevisionTriggerResult {
 export interface RevisionGroupRange {
 	sourceStart: number;
 	sourceEnd: number;
-	oversized: boolean;
 	endingBoundary: SourceAtomBoundary;
 }
 
@@ -294,5 +293,5 @@ export function commitRevisionGroups(input: {
 export const REVISION_PROJECTION_METADATA = Object.freeze({
 	tokenizerVersion: REVISION_TOKENIZER_VERSION,
 	maxAtomCharacters: REVISION_MAX_ATOM_SOURCE_CHARACTERS,
-	maxGroupCharacters: REVISION_MAX_GROUP_SOURCE_CHARACTERS
+	longGroupCharacters: REVISION_LONG_GROUP_CHARACTERS
 });
