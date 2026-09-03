@@ -149,10 +149,37 @@ try {
 				periodStart: '2026-09-01T00:00:00.000Z',
 				periodEnd: '2026-09-01T12:00:00.000Z',
 				windows: [
-					{ days: 1, durationSeconds: 0, costUsd: 0 },
-					{ days: 7, durationSeconds: 0, costUsd: 0 },
-					{ days: 30, durationSeconds: 0, costUsd: 0 }
+					{
+						days: 1,
+						durationSeconds: 0,
+						costUsd: 0,
+						accountCostUsd: 0,
+						breakdown: { translationUsd: 0, transcriptionUsd: 0, sidecarUsd: 0, otherUsd: 0 }
+					},
+					{
+						days: 7,
+						durationSeconds: 0,
+						costUsd: 0,
+						accountCostUsd: 0,
+						breakdown: { translationUsd: 0, transcriptionUsd: 0, sidecarUsd: 0, otherUsd: 0 }
+					},
+					{
+						days: 30,
+						durationSeconds: 0,
+						costUsd: 0,
+						accountCostUsd: 0,
+						breakdown: { translationUsd: 0, transcriptionUsd: 0, sidecarUsd: 0, otherUsd: 0 }
+					}
 				],
+				monthToDate: {
+					periodStart: '2026-09-01T00:00:00.000Z',
+					durationSeconds: 0,
+					costUsd: 0,
+					accountCostUsd: 0,
+					breakdown: { translationUsd: 0, transcriptionUsd: 0, sidecarUsd: 0, otherUsd: 0 }
+				},
+				costMeter: { periodStart: '2026-01-01T00:00:00.000Z', accountCostUsd: 0 },
+				hardSpendLimit: { status: 'not-configured' },
 				updatedAt: '2026-09-01T12:00:00.000Z'
 			})
 		});

@@ -24,6 +24,22 @@ function costsResponse(
 	);
 }
 
+function noSpendLimitResponse(): Response {
+	return new Response(JSON.stringify({ error: { code: 'not_found' } }), { status: 404 });
+}
+
+function spendLimitResponse(thresholdCents: number): Response {
+	return new Response(
+		JSON.stringify({
+			object: 'organization.spend_limit',
+			threshold_amount: thresholdCents,
+			currency: 'USD',
+			interval: 'month',
+			enforcement: { status: 'enforcing' }
+		})
+	);
+}
+
 function bucket(daysAgo: number, results: unknown[]): object {
 	const startTime = NOW_SECONDS - daysAgo * DAY_SECONDS;
 	return {
@@ -57,6 +73,9 @@ describe('fetchOpenAIUsageSummary', () => {
 		let requestedUrl: RequestInfo | URL | undefined;
 		let requestInit: RequestInit | undefined;
 		const fetcher = vi.fn(async (...args: [RequestInfo | URL, RequestInit?]) => {
+			if (new URL(String(args[0])).pathname.endsWith('/spend_limit')) {
+				return spendLimitResponse(1_200);
+			}
 			requestedUrl = args[0];
 			requestInit = args[1];
 			return costsResponse([
@@ -84,18 +103,73 @@ describe('fetchOpenAIUsageSummary', () => {
 		const summary = await fetchOpenAIUsageSummary({ apiKey: API_KEY, fetcher, now: NOW });
 
 		expect(summary).toEqual({
-			periodStart: '2026-08-16T12:34:56.000Z',
+			periodStart: '2026-01-01T00:00:00.000Z',
 			periodEnd: NOW.toISOString(),
 			windows: [
-				{ days: 1, durationSeconds: 30, costUsd: 0.0355 },
-				{ days: 7, durationSeconds: 50, costUsd: 0.0525 },
-				{ days: 30, durationSeconds: 60, costUsd: 0.061 }
+				{
+					days: 1,
+					durationSeconds: 30,
+					costUsd: 0.0355,
+					accountCostUsd: 10.0255,
+					breakdown: {
+						translationUsd: 0.017,
+						transcriptionUsd: 0.0085,
+						sidecarUsd: 0.01,
+						otherUsd: 9.99
+					}
+				},
+				{
+					days: 7,
+					durationSeconds: 50,
+					costUsd: 0.0525,
+					accountCostUsd: 10.0425,
+					breakdown: {
+						translationUsd: 0.02833,
+						transcriptionUsd: 0.01417,
+						sidecarUsd: 0.01,
+						otherUsd: 9.99
+					}
+				},
+				{
+					days: 30,
+					durationSeconds: 60,
+					costUsd: 0.061,
+					accountCostUsd: 10.051,
+					breakdown: {
+						translationUsd: 0.034,
+						transcriptionUsd: 0.017,
+						sidecarUsd: 0.01,
+						otherUsd: 9.99
+					}
+				}
 			],
+			monthToDate: {
+				periodStart: '2026-09-01T00:00:00.000Z',
+				durationSeconds: 50,
+				costUsd: 0.0525,
+				accountCostUsd: 10.0425,
+				breakdown: {
+					translationUsd: 0.02833,
+					transcriptionUsd: 0.01417,
+					sidecarUsd: 0.01,
+					otherUsd: 9.99
+				}
+			},
+			costMeter: {
+				periodStart: '2026-01-01T00:00:00.000Z',
+				accountCostUsd: 10.051
+			},
+			hardSpendLimit: {
+				status: 'configured',
+				thresholdUsd: 12,
+				remainingUsd: 1.9575,
+				enforcementStatus: 'enforcing'
+			},
 			updatedAt: NOW.toISOString()
 		});
 		const request = new URL(String(requestedUrl));
 		expect(request.pathname).toBe('/v1/organization/costs');
-		expect(request.searchParams.get('start_time')).toBe(String(NOW_SECONDS - 30 * DAY_SECONDS));
+		expect(request.searchParams.get('start_time')).toBe('1767225600');
 		expect(request.searchParams.getAll('group_by')).toEqual(['project_id', 'line_item']);
 		expect(requestInit?.headers).toEqual({
 			Authorization: `Bearer ${API_KEY}`
@@ -111,17 +185,25 @@ describe('fetchOpenAIUsageSummary', () => {
 					nextPage: 'next-token'
 				})
 			)
-			.mockResolvedValueOnce(costsResponse([bucket(1, [cost('gpt-realtime-whisper', 10, 0.005)])]));
+			.mockResolvedValueOnce(costsResponse([bucket(1, [cost('gpt-realtime-whisper', 10, 0.005)])]))
+			.mockResolvedValueOnce(noSpendLimitResponse());
 
 		const summary = await fetchOpenAIUsageSummary({ apiKey: API_KEY, fetcher, now: NOW });
 
-		expect(fetcher).toHaveBeenCalledTimes(2);
+		expect(fetcher).toHaveBeenCalledTimes(3);
 		expect(new URL(String(fetcher.mock.calls[1]?.[0])).searchParams.get('page')).toBe('next-token');
-		expect(summary.windows).toEqual([
+		expect(
+			summary.windows.map(({ days, durationSeconds, costUsd }) => ({
+				days,
+				durationSeconds,
+				costUsd
+			}))
+		).toEqual([
 			{ days: 1, durationSeconds: 10, costUsd: 0.015 },
 			{ days: 7, durationSeconds: 10, costUsd: 0.015 },
 			{ days: 30, durationSeconds: 10, costUsd: 0.015 }
 		]);
+		expect(summary.hardSpendLimit).toEqual({ status: 'not-configured' });
 	});
 
 	it('preserves upstream diagnostics without exposing the admin key', async () => {
@@ -144,8 +226,12 @@ describe('fetchOpenAIUsageSummary', () => {
 });
 
 describe('OpenAIUsageSummaryCache', () => {
-	it('reuses a summary until the five-minute cache expires', async () => {
-		const fetcher = vi.fn(async () => costsResponse([]));
+	it('reuses a summary until expiry and lets a manual refresh bypass the cache', async () => {
+		const fetcher = vi.fn(async (input: RequestInfo | URL) =>
+			new URL(String(input)).pathname.endsWith('/spend_limit')
+				? noSpendLimitResponse()
+				: costsResponse([])
+		);
 		const cache = new OpenAIUsageSummaryCache(300_000);
 
 		await cache.get({ apiKey: API_KEY, fetcher, now: NOW });
@@ -155,7 +241,8 @@ describe('OpenAIUsageSummaryCache', () => {
 			now: new Date(NOW.getTime() + 299_999)
 		});
 		await cache.get({ apiKey: API_KEY, fetcher, now: new Date(NOW.getTime() + 300_000) });
+		await cache.get({ apiKey: API_KEY, fetcher, now: new Date(NOW.getTime() + 300_001) }, true);
 
-		expect(fetcher).toHaveBeenCalledTimes(2);
+		expect(fetcher).toHaveBeenCalledTimes(6);
 	});
 });

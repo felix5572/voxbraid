@@ -49,12 +49,26 @@ async function costBuckets() {
 	return buckets;
 }
 
+async function organizationSpendLimit() {
+	const response = await fetch('https://api.openai.com/v1/organization/spend_limit', {
+		headers: { Authorization: `Bearer ${adminKey}` }
+	});
+	const body = await response.json().catch(() => null);
+	if (response.status === 404 && body?.error?.code === 'not_found') return null;
+	if (!response.ok) {
+		return { unavailable: `HTTP ${response.status}: ${body?.error?.message ?? '未知错误'}` };
+	}
+	return body;
+}
+
 const totals = new Map(
 	REALTIME_MODELS.map((model) => [model, { seconds: 0, usd: 0, units: new Set() }])
 );
 const sidecarTotals = new Map(SIDECAR_MODELS.map((model) => [model, { usd: 0, lineItems: 0 }]));
+let accountUsd = 0;
 for (const bucket of await costBuckets()) {
 	for (const result of bucket.results ?? []) {
+		accountUsd += Number(result.amount?.value ?? 0);
 		const total = totals.get(result.line_item);
 		if (total) {
 			if (result.quantity_unit === 'duration_seconds') {
@@ -81,6 +95,7 @@ const realtimeUsd = [...totals.values()].reduce((sum, total) => sum + total.usd,
 const sidecarUsd = [...sidecarTotals.values()].reduce((sum, total) => sum + total.usd, 0);
 const totalUsd = realtimeUsd + sidecarUsd;
 const audioSeconds = Math.max(translation.seconds, transcriptionSeconds);
+const spendLimit = await organizationSpendLimit();
 
 console.log(`VoxBraid OpenAI 用量（${startDate} 至今）`);
 for (const model of REALTIME_MODELS) {
@@ -93,4 +108,16 @@ for (const model of SIDECAR_MODELS) {
 	console.log(`- ${model}: $${total.usd.toFixed(5)}（${total.lineItems} 条费用明细）`);
 }
 console.log(`- 实际音频：${audioSeconds} 秒（两模型处理同一段音频，不重复相加）`);
-console.log(`- 官方总费用：$${totalUsd.toFixed(5)}`);
+console.log(`- VoxBraid 已识别费用：$${totalUsd.toFixed(5)}`);
+console.log(`- 全账户官方费用：$${accountUsd.toFixed(5)}`);
+console.log(`- 账户其他费用：$${Math.max(0, accountUsd - totalUsd).toFixed(5)}`);
+if (spendLimit?.unavailable) {
+	console.log(`- 组织硬消费上限：暂不可用（${spendLimit.unavailable}）`);
+} else if (spendLimit) {
+	console.log(
+		`- 组织硬消费上限：$${(Number(spendLimit.threshold_amount) / 100).toFixed(2)} / ${spendLimit.interval}（${spendLimit.enforcement?.status ?? '状态未知'}）`
+	);
+} else {
+	console.log('- 组织硬消费上限：未配置');
+}
+console.log('- 预付信用余额：官方 Admin API 不提供，请在 OpenAI Billing 页面核对');

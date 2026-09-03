@@ -7,6 +7,7 @@ import {
 } from './sidecar-tasks';
 
 const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organization/costs';
+const OPENAI_SPEND_LIMIT_URL = 'https://api.openai.com/v1/organization/spend_limit';
 const REALTIME_TRANSCRIPTION_LINE_ITEMS = REALTIME_TRANSCRIPTION_MODELS.map((model) => model.code);
 const REALTIME_LINE_ITEMS = new Set([
 	REALTIME_TRANSLATION_MODEL,
@@ -26,14 +27,48 @@ export interface OpenAIUsageSummary {
 	periodStart: string;
 	periodEnd: string;
 	windows: OpenAIUsageWindow[];
+	monthToDate: OpenAIMonthToDateUsage;
+	costMeter: OpenAIAccountCostMeter;
+	hardSpendLimit: OpenAIHardSpendLimit;
 	updatedAt: string;
+}
+
+export interface OpenAICostBreakdown {
+	translationUsd: number;
+	transcriptionUsd: number;
+	sidecarUsd: number;
+	otherUsd: number;
 }
 
 export interface OpenAIUsageWindow {
 	days: (typeof WINDOW_DAYS)[number];
 	durationSeconds: number;
 	costUsd: number;
+	accountCostUsd: number;
+	breakdown: OpenAICostBreakdown;
 }
+
+export interface OpenAIMonthToDateUsage {
+	periodStart: string;
+	durationSeconds: number;
+	costUsd: number;
+	accountCostUsd: number;
+	breakdown: OpenAICostBreakdown;
+}
+
+export interface OpenAIAccountCostMeter {
+	periodStart: string;
+	accountCostUsd: number;
+}
+
+export type OpenAIHardSpendLimit =
+	| { status: 'not-configured' | 'unavailable' }
+	| {
+			status: 'configured';
+			thresholdUsd: number;
+			remainingUsd: number;
+			enforcementStatus: string;
+	  };
 
 export interface FetchOpenAIUsageSummaryOptions {
 	apiKey: string;
@@ -63,6 +98,7 @@ interface DailyCostBucket {
 	endTime: number;
 	realtimeTotals: Map<string, CostTotals>;
 	sidecarUsd: number;
+	accountUsd: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -115,16 +151,12 @@ function addBuckets(body: unknown, buckets: DailyCostBucket[]): void {
 
 		const realtimeTotals = emptyRealtimeTotals();
 		let sidecarUsd = 0;
+		let accountUsd = 0;
 		for (const result of bucket.results) {
-			if (!isRecord(result) || typeof result.line_item !== 'string') continue;
-			const realtimeTotal = realtimeTotals.get(result.line_item);
-			const sidecarLineItem = isSidecarLineItem(result.line_item);
-			if (!realtimeTotal && !sidecarLineItem) continue;
-
-			const quantity = finiteNumber(result.quantity);
+			if (!isRecord(result)) continue;
 			const amount = isRecord(result.amount) ? finiteNumber(result.amount.value) : null;
 			const currency = isRecord(result.amount) ? result.amount.currency : null;
-			if (quantity === null || amount === null || currency !== 'usd') {
+			if (amount === null || currency !== 'usd') {
 				throw new OpenAIUsageRequestError(
 					'OpenAI Costs API 返回了无法识别的费用明细。',
 					null,
@@ -132,26 +164,39 @@ function addBuckets(body: unknown, buckets: DailyCostBucket[]): void {
 					null
 				);
 			}
+			accountUsd += amount;
+			if (typeof result.line_item !== 'string') continue;
+			const realtimeTotal = realtimeTotals.get(result.line_item);
+			const sidecarLineItem = isSidecarLineItem(result.line_item);
+			if (!realtimeTotal && !sidecarLineItem) continue;
 
 			if (realtimeTotal) {
+				const quantity = finiteNumber(result.quantity);
+				if (quantity === null) {
+					throw new OpenAIUsageRequestError(
+						'OpenAI Costs API 返回了无法识别的 Realtime 用量。',
+						null,
+						null,
+						null
+					);
+				}
 				if (result.quantity_unit === 'duration_seconds') realtimeTotal.seconds += quantity;
 				realtimeTotal.usd += amount;
 			} else {
 				sidecarUsd += amount;
 			}
 		}
-		buckets.push({ startTime, endTime, realtimeTotals, sidecarUsd });
+		buckets.push({ startTime, endTime, realtimeTotals, sidecarUsd, accountUsd });
 	}
 }
 
-function summarizeWindow(
+function summarizePeriod(
 	buckets: readonly DailyCostBucket[],
-	endTimeSeconds: number,
-	days: OpenAIUsageWindow['days']
-): OpenAIUsageWindow {
-	const cutoff = endTimeSeconds - days * DAY_SECONDS;
+	cutoff: number
+): Omit<OpenAIUsageWindow, 'days'> {
 	const totals = emptyRealtimeTotals();
 	let sidecarUsd = 0;
+	let accountCostUsd = 0;
 	for (const bucket of buckets) {
 		if (bucket.endTime <= cutoff) continue;
 		for (const [lineItem, bucketTotal] of bucket.realtimeTotals) {
@@ -161,6 +206,7 @@ function summarizeWindow(
 			total.usd += bucketTotal.usd;
 		}
 		sidecarUsd += bucket.sidecarUsd;
+		accountCostUsd += bucket.accountUsd;
 	}
 
 	const translation = totals.get(REALTIME_TRANSLATION_MODEL);
@@ -173,11 +219,75 @@ function summarizeWindow(
 		{ seconds: 0, usd: 0 }
 	);
 	if (!translation) throw new Error('Realtime cost totals were not initialized.');
+	const translationUsd = translation.usd;
+	const transcriptionUsd = transcription.usd;
+	const costUsd = translationUsd + transcriptionUsd + sidecarUsd;
+	return {
+		durationSeconds: Math.round(Math.max(translation.seconds, transcription.seconds)),
+		costUsd: Number(costUsd.toFixed(10)),
+		accountCostUsd: Number(accountCostUsd.toFixed(10)),
+		breakdown: {
+			translationUsd: Number(translationUsd.toFixed(10)),
+			transcriptionUsd: Number(transcriptionUsd.toFixed(10)),
+			sidecarUsd: Number(sidecarUsd.toFixed(10)),
+			otherUsd: Number(Math.max(0, accountCostUsd - costUsd).toFixed(10))
+		}
+	};
+}
+
+function summarizeWindow(
+	buckets: readonly DailyCostBucket[],
+	endTimeSeconds: number,
+	days: OpenAIUsageWindow['days']
+): OpenAIUsageWindow {
 	return {
 		days,
-		durationSeconds: Math.round(Math.max(translation.seconds, transcription.seconds)),
-		costUsd: Number((translation.usd + transcription.usd + sidecarUsd).toFixed(10))
+		...summarizePeriod(buckets, endTimeSeconds - days * DAY_SECONDS)
 	};
+}
+
+async function fetchHardSpendLimit(
+	apiKey: string,
+	fetcher: Fetcher,
+	monthAccountCostUsd: number
+): Promise<OpenAIHardSpendLimit> {
+	try {
+		const response = await fetcher(OPENAI_SPEND_LIMIT_URL, {
+			headers: { Authorization: `Bearer ${apiKey}` }
+		});
+		const body: unknown = await response.json().catch(() => null);
+		if (!response.ok) {
+			if (response.status === 404 && readErrorField(body, 'code') === 'not_found') {
+				return { status: 'not-configured' };
+			}
+			return { status: 'unavailable' };
+		}
+		const thresholdCents = isRecord(body) ? finiteNumber(body.threshold_amount) : null;
+		const currency = isRecord(body) ? body.currency : null;
+		const interval = isRecord(body) ? body.interval : null;
+		const enforcementStatus =
+			isRecord(body) && isRecord(body.enforcement) && typeof body.enforcement.status === 'string'
+				? body.enforcement.status
+				: null;
+		if (
+			thresholdCents === null ||
+			thresholdCents < 0 ||
+			currency !== 'USD' ||
+			interval !== 'month' ||
+			!enforcementStatus
+		) {
+			return { status: 'unavailable' };
+		}
+		const thresholdUsd = thresholdCents / 100;
+		return {
+			status: 'configured',
+			thresholdUsd,
+			remainingUsd: Number((thresholdUsd - monthAccountCostUsd).toFixed(10)),
+			enforcementStatus
+		};
+	} catch {
+		return { status: 'unavailable' };
+	}
 }
 
 function pagination(body: unknown): { hasMore: boolean; nextPage: string | null } {
@@ -197,7 +307,9 @@ export async function fetchOpenAIUsageSummary({
 	if (!normalizedKey) throw new Error('OPENAI_ADMIN_KEY must not be empty.');
 
 	const endTimeSeconds = Math.floor(now.getTime() / 1_000);
-	const startTimeSeconds = endTimeSeconds - 30 * DAY_SECONDS;
+	const yearStart = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+	const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+	const startTimeSeconds = Math.floor(yearStart.getTime() / 1_000);
 	const buckets: DailyCostBucket[] = [];
 	let page: string | null = null;
 
@@ -206,7 +318,7 @@ export async function fetchOpenAIUsageSummary({
 		url.searchParams.set('start_time', String(startTimeSeconds));
 		url.searchParams.set('end_time', String(endTimeSeconds));
 		url.searchParams.set('bucket_width', '1d');
-		url.searchParams.set('limit', '31');
+		url.searchParams.set('limit', '180');
 		url.searchParams.append('group_by', 'project_id');
 		url.searchParams.append('group_by', 'line_item');
 		if (page) url.searchParams.set('page', page);
@@ -248,10 +360,24 @@ export async function fetchOpenAIUsageSummary({
 		page = next.hasMore ? next.nextPage : null;
 	} while (page);
 
+	const windows = WINDOW_DAYS.map((days) => summarizeWindow(buckets, endTimeSeconds, days));
+	const monthUsage = summarizePeriod(buckets, monthStart.getTime() / 1_000);
+	const accountCostUsd = Number(
+		buckets.reduce((total, bucket) => total + bucket.accountUsd, 0).toFixed(10)
+	);
 	return {
 		periodStart: new Date(startTimeSeconds * 1_000).toISOString(),
 		periodEnd: now.toISOString(),
-		windows: WINDOW_DAYS.map((days) => summarizeWindow(buckets, endTimeSeconds, days)),
+		windows,
+		monthToDate: {
+			periodStart: monthStart.toISOString(),
+			...monthUsage
+		},
+		costMeter: {
+			periodStart: yearStart.toISOString(),
+			accountCostUsd
+		},
+		hardSpendLimit: await fetchHardSpendLimit(normalizedKey, fetcher, monthUsage.accountCostUsd),
 		updatedAt: now.toISOString()
 	};
 }
@@ -262,9 +388,9 @@ export class OpenAIUsageSummaryCache {
 
 	constructor(private readonly ttlMs = 5 * 60_000) {}
 
-	async get(options: FetchOpenAIUsageSummaryOptions): Promise<OpenAIUsageSummary> {
+	async get(options: FetchOpenAIUsageSummaryOptions, force = false): Promise<OpenAIUsageSummary> {
 		const nowMs = (options.now ?? new Date()).getTime();
-		if (this.cached && this.cached.expiresAt > nowMs) return this.cached.value;
+		if (!force && this.cached && this.cached.expiresAt > nowMs) return this.cached.value;
 		if (this.inFlight) return this.inFlight;
 
 		this.inFlight = fetchOpenAIUsageSummary(options)

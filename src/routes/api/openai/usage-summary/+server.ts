@@ -6,14 +6,17 @@ import type { RequestHandler } from './$types';
 const cache = new OpenAIUsageSummaryCache();
 const responseHeaders = { 'Cache-Control': 'no-store, private' };
 
-export const GET: RequestHandler = async ({ fetch }) => {
+export const GET: RequestHandler = async ({ fetch, url }) => {
 	const apiKey = openAIAdminKey();
 	if (!apiKey) {
 		return json({ message: '官方用量查询未配置。' }, { status: 503, headers: responseHeaders });
 	}
 
 	try {
-		const summary = await cache.get({ apiKey, fetcher: fetch });
+		const summary = await cache.get(
+			{ apiKey, fetcher: fetch },
+			url.searchParams.get('refresh') === '1'
+		);
 		return json(summary, { headers: responseHeaders });
 	} catch (error) {
 		console.error('[openai-usage] official summary failed', {

@@ -165,10 +165,60 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 				periodStart: '2026-09-01T00:00:00.000Z',
 				periodEnd: '2026-09-01T12:00:00.000Z',
 				windows: [
-					{ days: 1, durationSeconds: 93, costUsd: 0.07905 },
-					{ days: 7, durationSeconds: 121, costUsd: 0.10285 },
-					{ days: 30, durationSeconds: 121, costUsd: 0.10285 }
+					{
+						days: 1,
+						durationSeconds: 93,
+						costUsd: 0.07905,
+						accountCostUsd: 0.07905,
+						breakdown: {
+							translationUsd: 0.0527,
+							transcriptionUsd: 0.02635,
+							sidecarUsd: 0,
+							otherUsd: 0
+						}
+					},
+					{
+						days: 7,
+						durationSeconds: 121,
+						costUsd: 0.10285,
+						accountCostUsd: 0.10285,
+						breakdown: {
+							translationUsd: 0.06857,
+							transcriptionUsd: 0.03428,
+							sidecarUsd: 0,
+							otherUsd: 0
+						}
+					},
+					{
+						days: 30,
+						durationSeconds: 121,
+						costUsd: 0.10285,
+						accountCostUsd: 0.10285,
+						breakdown: {
+							translationUsd: 0.06857,
+							transcriptionUsd: 0.03428,
+							sidecarUsd: 0,
+							otherUsd: 0
+						}
+					}
 				],
+				monthToDate: {
+					periodStart: '2026-09-01T00:00:00.000Z',
+					durationSeconds: 121,
+					costUsd: 0.10285,
+					accountCostUsd: 0.10285,
+					breakdown: {
+						translationUsd: 0.06857,
+						transcriptionUsd: 0.03428,
+						sidecarUsd: 0,
+						otherUsd: 0
+					}
+				},
+				costMeter: {
+					periodStart: '2026-01-01T00:00:00.000Z',
+					accountCostUsd: 0.10285
+				},
+				hardSpendLimit: { status: 'not-configured' },
 				updatedAt: '2026-09-01T12:00:00.000Z'
 			})
 		});
@@ -385,6 +435,28 @@ async function testDiagnosticsModePreference(browser, baseUrl) {
 		await page.reload({ waitUntil: 'networkidle' });
 		await waitForReady(page);
 		await page.getByRole('button', { name: '诊断模式 开', exact: true }).waitFor();
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
+async function testCreditBalanceCalibration(browser, baseUrl) {
+	const { browserErrors, context, page } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await page.getByText('余额与明细', { exact: true }).click();
+		await page.getByLabel('Billing 当前可用余额（美元）').fill('10.00');
+		await page.getByRole('button', { name: '校准预计余额', exact: true }).click();
+		await page.locator('[data-estimated-credit-balance-usd="10"]').waitFor();
+		const stored = await page.evaluate(() =>
+			JSON.parse(localStorage.getItem('voxbraid-openai-credit-balance-anchor') ?? 'null')
+		);
+		assert.equal(stored.balanceUsd, 10);
+		assert.equal(stored.accountCostUsd, 0.10285);
+
+		await page.reload({ waitUntil: 'networkidle' });
+		await page.locator('[data-estimated-credit-balance-usd="10"]').waitFor();
 		assert.deepEqual(browserErrors, []);
 	} finally {
 		await context.close();
@@ -1350,6 +1422,7 @@ try {
 
 	await testPauseResumeAndNewThread(browser, baseUrl);
 	await testDiagnosticsModePreference(browser, baseUrl);
+	await testCreditBalanceCalibration(browser, baseUrl);
 	await testInteractiveRequestDuringPairGeneration(browser, baseUrl);
 	await testCompletedRunTailIsNotMarkedLive(browser, baseUrl);
 	await testCleanTranscriptContinuesAfterFailure(browser, baseUrl);

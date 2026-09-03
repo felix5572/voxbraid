@@ -1,5 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import {
+		createCreditBalanceAnchor,
+		estimateCreditBalance,
+		estimateRemainingAudioHours,
+		isCreditBalanceAnchor,
+		type CreditBalanceAnchor
+	} from '$lib/billing/credit-balance';
 	import { inlineErrorDetails } from '$lib/error-details';
 	import OperationalLogPanel from '$lib/OperationalLogPanel.svelte';
 	import {
@@ -104,11 +111,39 @@
 		days: 1 | 7 | 30;
 		durationSeconds: number;
 		costUsd: number;
+		accountCostUsd: number;
+		breakdown: OfficialCostBreakdown;
+	};
+	type OfficialCostBreakdown = {
+		translationUsd: number;
+		transcriptionUsd: number;
+		sidecarUsd: number;
+		otherUsd: number;
+	};
+	type OfficialUsagePeriod = {
+		periodStart: string;
+		durationSeconds: number;
+		costUsd: number;
+		accountCostUsd: number;
+		breakdown: OfficialCostBreakdown;
 	};
 	type OfficialUsageSummary = {
 		periodStart: string;
 		periodEnd: string;
 		windows: OfficialUsageWindow[];
+		monthToDate: OfficialUsagePeriod;
+		costMeter: {
+			periodStart: string;
+			accountCostUsd: number;
+		};
+		hardSpendLimit:
+			| { status: 'not-configured' | 'unavailable' }
+			| {
+					status: 'configured';
+					thresholdUsd: number;
+					remainingUsd: number;
+					enforcementStatus: string;
+			  };
 		updatedAt: string;
 	};
 	type DiagnosticEvent = {
@@ -141,6 +176,7 @@
 	const DIAGNOSTIC_EVENT_LIMIT = 500;
 	const CAPTION_FONT_SIZE_STORAGE_KEY = 'voxbraid-caption-font-size';
 	const DIAGNOSTICS_MODE_STORAGE_KEY = 'voxbraid-diagnostics-mode';
+	const CREDIT_BALANCE_STORAGE_KEY = 'voxbraid-openai-credit-balance-anchor';
 	const DEFAULT_CAPTION_FONT_SIZE_PX = 22;
 	const MIN_CAPTION_FONT_SIZE_PX = 16;
 	const MAX_CAPTION_FONT_SIZE_PX = 30;
@@ -170,6 +206,9 @@
 	let officialUsage = $state<OfficialUsageSummary | null>(null);
 	let officialUsagePhase = $state<OfficialUsagePhase>('loading');
 	let officialUsageRequest = 0;
+	let creditBalanceAnchor = $state<CreditBalanceAnchor | null>(null);
+	let creditBalanceInput = $state('');
+	let creditBalanceMessage = $state('');
 	let captionFontSizePx = $state(DEFAULT_CAPTION_FONT_SIZE_PX);
 	let diagnosticsMode = $state(false);
 	let operationalLogs = $state<OperationalLogEntry[]>([]);
@@ -266,6 +305,21 @@
 	const officialUpdatedLabel = $derived(
 		officialUsage ? OFFICIAL_USAGE_TIME_FORMATTER.format(new Date(officialUsage.updatedAt)) : ''
 	);
+	const sevenDayOfficialUsage = $derived(
+		officialUsage?.windows.find((window) => window.days === 7) ?? null
+	);
+	const creditBalanceEstimate = $derived(
+		estimateCreditBalance(creditBalanceAnchor, officialUsage?.costMeter ?? null)
+	);
+	const creditBalanceHours = $derived(
+		creditBalanceEstimate && sevenDayOfficialUsage
+			? estimateRemainingAudioHours(
+					Math.max(0, creditBalanceEstimate.balanceUsd),
+					sevenDayOfficialUsage.costUsd,
+					sevenDayOfficialUsage.durationSeconds
+				)
+			: null
+	);
 
 	function nowIso(): string {
 		return new Date().toISOString();
@@ -274,6 +328,47 @@
 	function normalizedCaptionFontSize(value: number): number {
 		if (!Number.isFinite(value)) return DEFAULT_CAPTION_FONT_SIZE_PX;
 		return Math.min(MAX_CAPTION_FONT_SIZE_PX, Math.max(MIN_CAPTION_FONT_SIZE_PX, value));
+	}
+
+	function formatUsd(value: number): string {
+		const sign = value < 0 ? '−' : '';
+		return `${sign}$${formatEstimatedCostUsd(Math.abs(value))}`;
+	}
+
+	function formatAudioHours(value: number): string {
+		if (value < 1) return `约 ${Math.round(value * 60)} 分钟`;
+		if (value < 10) return `约 ${value.toFixed(1)} 小时`;
+		return `约 ${Math.round(value)} 小时`;
+	}
+
+	function calibrateCreditBalance(event: SubmitEvent): void {
+		event.preventDefault();
+		if (!officialUsage) return;
+		const balanceUsd = Number(creditBalanceInput);
+		if (!Number.isFinite(balanceUsd) || balanceUsd < 0) {
+			creditBalanceMessage = '请输入有效的非负美元余额。';
+			return;
+		}
+		const anchor = createCreditBalanceAnchor(balanceUsd, officialUsage.costMeter);
+		creditBalanceAnchor = anchor;
+		creditBalanceInput = '';
+		creditBalanceMessage = '已用当前官方成本读数校准；自动充值后请重新校准。';
+		try {
+			localStorage.setItem(CREDIT_BALANCE_STORAGE_KEY, JSON.stringify(anchor));
+		} catch (storageError) {
+			creditBalanceMessage = `余额校准仅在当前页面有效；本机保存失败。\n${inlineErrorDetails(storageError)}`;
+		}
+	}
+
+	function clearCreditBalanceCalibration(): void {
+		creditBalanceAnchor = null;
+		creditBalanceInput = '';
+		creditBalanceMessage = '已清除本机余额校准。';
+		try {
+			localStorage.removeItem(CREDIT_BALANCE_STORAGE_KEY);
+		} catch (storageError) {
+			creditBalanceMessage = `本机余额校准未能清除。\n${inlineErrorDetails(storageError)}`;
+		}
 	}
 
 	function updateCaptionFontSize(event: Event): void {
@@ -441,6 +536,42 @@
 		return TARGET_LANGUAGES.find((language) => language.code === code)?.label ?? code;
 	}
 
+	function isNonNegativeNumber(value: unknown): value is number {
+		return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+	}
+
+	function isOfficialCostBreakdown(value: unknown): value is OfficialCostBreakdown {
+		return (
+			typeof value === 'object' &&
+			value !== null &&
+			'translationUsd' in value &&
+			isNonNegativeNumber(value.translationUsd) &&
+			'transcriptionUsd' in value &&
+			isNonNegativeNumber(value.transcriptionUsd) &&
+			'sidecarUsd' in value &&
+			isNonNegativeNumber(value.sidecarUsd) &&
+			'otherUsd' in value &&
+			isNonNegativeNumber(value.otherUsd)
+		);
+	}
+
+	function isOfficialUsagePeriod(value: unknown): value is OfficialUsagePeriod {
+		return (
+			typeof value === 'object' &&
+			value !== null &&
+			'periodStart' in value &&
+			typeof value.periodStart === 'string' &&
+			'durationSeconds' in value &&
+			isNonNegativeNumber(value.durationSeconds) &&
+			'costUsd' in value &&
+			isNonNegativeNumber(value.costUsd) &&
+			'accountCostUsd' in value &&
+			isNonNegativeNumber(value.accountCostUsd) &&
+			'breakdown' in value &&
+			isOfficialCostBreakdown(value.breakdown)
+		);
+	}
+
 	function isOfficialUsageSummary(value: unknown): value is OfficialUsageSummary {
 		const validWindows =
 			typeof value === 'object' &&
@@ -454,13 +585,32 @@
 							'days' in window &&
 							(window.days === 1 || window.days === 7 || window.days === 30) &&
 							'durationSeconds' in window &&
-							typeof window.durationSeconds === 'number' &&
-							Number.isFinite(window.durationSeconds) &&
+							isNonNegativeNumber(window.durationSeconds) &&
 							'costUsd' in window &&
-							typeof window.costUsd === 'number' &&
-							Number.isFinite(window.costUsd)
+							isNonNegativeNumber(window.costUsd) &&
+							'accountCostUsd' in window &&
+							isNonNegativeNumber(window.accountCostUsd) &&
+							'breakdown' in window &&
+							isOfficialCostBreakdown(window.breakdown)
 					)
 				: [];
+		const validHardLimit =
+			typeof value === 'object' &&
+			value !== null &&
+			'hardSpendLimit' in value &&
+			typeof value.hardSpendLimit === 'object' &&
+			value.hardSpendLimit !== null &&
+			'status' in value.hardSpendLimit &&
+			(value.hardSpendLimit.status === 'not-configured' ||
+				value.hardSpendLimit.status === 'unavailable' ||
+				(value.hardSpendLimit.status === 'configured' &&
+					'thresholdUsd' in value.hardSpendLimit &&
+					isNonNegativeNumber(value.hardSpendLimit.thresholdUsd) &&
+					'remainingUsd' in value.hardSpendLimit &&
+					typeof value.hardSpendLimit.remainingUsd === 'number' &&
+					Number.isFinite(value.hardSpendLimit.remainingUsd) &&
+					'enforcementStatus' in value.hardSpendLimit &&
+					typeof value.hardSpendLimit.enforcementStatus === 'string'));
 		return (
 			typeof value === 'object' &&
 			value !== null &&
@@ -470,16 +620,28 @@
 			typeof value.periodEnd === 'string' &&
 			validWindows.length === 3 &&
 			new Set(validWindows.map((window) => window.days)).size === 3 &&
+			'monthToDate' in value &&
+			isOfficialUsagePeriod(value.monthToDate) &&
+			'costMeter' in value &&
+			typeof value.costMeter === 'object' &&
+			value.costMeter !== null &&
+			'periodStart' in value.costMeter &&
+			typeof value.costMeter.periodStart === 'string' &&
+			'accountCostUsd' in value.costMeter &&
+			isNonNegativeNumber(value.costMeter.accountCostUsd) &&
+			validHardLimit &&
 			'updatedAt' in value &&
 			typeof value.updatedAt === 'string'
 		);
 	}
 
-	async function refreshOfficialUsage(): Promise<void> {
+	async function refreshOfficialUsage(force = false): Promise<void> {
 		const request = ++officialUsageRequest;
 		officialUsagePhase = 'loading';
 		try {
-			const response = await fetch('/api/openai/usage-summary', { cache: 'no-store' });
+			const response = await fetch(`/api/openai/usage-summary${force ? '?refresh=1' : ''}`, {
+				cache: 'no-store'
+			});
 			const body: unknown = await response.json().catch(() => null);
 			if (!response.ok || !isOfficialUsageSummary(body)) {
 				throw new Error(`Official usage request failed with HTTP ${response.status}.`);
@@ -893,6 +1055,11 @@
 				captionFontSizePx = normalizedCaptionFontSize(Number(storedCaptionFontSize));
 			}
 			diagnosticsMode = localStorage.getItem(DIAGNOSTICS_MODE_STORAGE_KEY) === 'true';
+			const storedCreditBalance = localStorage.getItem(CREDIT_BALANCE_STORAGE_KEY);
+			if (storedCreditBalance) {
+				const parsed: unknown = JSON.parse(storedCreditBalance);
+				if (isCreditBalanceAnchor(parsed)) creditBalanceAnchor = parsed;
+			}
 		} catch (storageError) {
 			console.warn('[display-preferences] preferences could not be loaded', storageError);
 		}
@@ -1383,21 +1550,45 @@
 				<div
 					class="official-usage"
 					title={officialUsagePhase === 'ready'
-						? `OpenAI 组织近期 Realtime 累计消费；更新于 ${officialUpdatedLabel}，账单数据可能有延迟。`
-						: 'OpenAI 组织近期 Realtime 累计消费；不影响实时翻译。'}
+						? `OpenAI 组织账目；更新于 ${officialUpdatedLabel}，Costs API 数据可能有延迟。`
+						: 'OpenAI 组织账目；查询失败不影响实时翻译。'}
 				>
 					<div class="official-usage-heading">
-						<span>近期官方消费</span>
+						<span>OpenAI 账目</span>
 						<button
 							class="usage-refresh"
 							type="button"
 							disabled={officialUsagePhase === 'loading'}
-							onclick={() => void refreshOfficialUsage()}
-							aria-label="刷新近期官方消费">刷新</button
+							onclick={() => void refreshOfficialUsage(true)}
+							aria-label="刷新 OpenAI 账目">刷新</button
 						>
 					</div>
 					{#if officialUsagePhase === 'ready' && officialUsage}
+						<div class="credit-balance-summary">
+							<em>预计余额</em>
+							{#if creditBalanceEstimate}
+								<strong
+									class:balance-warning={creditBalanceEstimate.balanceUsd <= 2}
+									data-estimated-credit-balance-usd={creditBalanceEstimate.balanceUsd}
+								>
+									{formatUsd(creditBalanceEstimate.balanceUsd)}
+									{#if creditBalanceHours !== null}
+										<i aria-hidden="true">·</i>{formatAudioHours(creditBalanceHours)}
+									{/if}
+								</strong>
+							{:else}
+								<strong class="muted">未校准</strong>
+							{/if}
+						</div>
 						<div class="official-usage-windows">
+							<div class="official-usage-window month-to-date">
+								<em>本月</em>
+								<strong>
+									<span>{officialUsage.monthToDate.durationSeconds} 秒</span>
+									<i aria-hidden="true">·</i>
+									<span>{formatUsd(officialUsage.monthToDate.costUsd)}</span>
+								</strong>
+							</div>
 							{#each officialUsage.windows as window (window.days)}
 								<div class="official-usage-window" data-official-window-days={window.days}>
 									<em>近 {window.days} 天</em>
@@ -1406,13 +1597,95 @@
 											>{window.durationSeconds} 秒</span
 										>
 										<i aria-hidden="true">·</i>
-										<span data-official-cost-usd={window.costUsd}
-											>${formatEstimatedCostUsd(window.costUsd)}</span
-										>
+										<span data-official-cost-usd={window.costUsd}>{formatUsd(window.costUsd)}</span>
 									</strong>
 								</div>
 							{/each}
 						</div>
+						<details class="usage-ledger-details">
+							<summary>余额与明细</summary>
+							<div class="usage-ledger-popover">
+								<div class="ledger-breakdown">
+									<strong>本月 VoxBraid {formatUsd(officialUsage.monthToDate.costUsd)}</strong>
+									<span
+										>实时翻译 {formatUsd(officialUsage.monthToDate.breakdown.translationUsd)}</span
+									>
+									<span
+										>源文转写 {formatUsd(
+											officialUsage.monthToDate.breakdown.transcriptionUsd
+										)}</span
+									>
+									<span
+										>修订 / 清稿 / 问答 {formatUsd(
+											officialUsage.monthToDate.breakdown.sidecarUsd
+										)}</span
+									>
+									{#if officialUsage.monthToDate.breakdown.otherUsd > 0}
+										<span
+											>账户其他消费 {formatUsd(officialUsage.monthToDate.breakdown.otherUsd)}</span
+										>
+									{/if}
+								</div>
+
+								<div class="ledger-limit">
+									{#if officialUsage.hardSpendLimit.status === 'configured'}
+										<strong
+											>本月硬上限剩余 {formatUsd(officialUsage.hardSpendLimit.remainingUsd)}</strong
+										>
+										<span
+											>上限 {formatUsd(officialUsage.hardSpendLimit.thresholdUsd)} · {officialUsage
+												.hardSpendLimit.enforcementStatus}</span
+										>
+									{:else if officialUsage.hardSpendLimit.status === 'not-configured'}
+										<strong>未设置组织硬消费上限</strong>
+										<span>它与预付余额、自动充值上限是不同约束。</span>
+									{:else}
+										<strong>硬消费上限暂不可读取</strong>
+									{/if}
+								</div>
+
+								<form class="balance-calibration" onsubmit={calibrateCreditBalance}>
+									<label>
+										<span>Billing 当前可用余额（美元）</span>
+										<input
+											type="number"
+											min="0"
+											step="0.01"
+											placeholder="例如 10.00"
+											bind:value={creditBalanceInput}
+										/>
+									</label>
+									<div class="balance-actions">
+										<button type="submit">校准预计余额</button>
+										{#if creditBalanceAnchor}
+											<button
+												type="button"
+												class="secondary"
+												onclick={clearCreditBalanceCalibration}>清除</button
+											>
+										{/if}
+									</div>
+								</form>
+								<p class="balance-note">
+									预付余额没有受支持的查询
+									API。这里把你校准的余额减去之后出现的全账户官方成本；自动充值后需重新校准。
+								</p>
+								{#if creditBalanceEstimate}
+									<p class="balance-note">
+										校准后已记录消费 {formatUsd(
+											creditBalanceEstimate.spentSinceAnchorUsd
+										)}；录制时长按近 7 天实际 VoxBraid 每音频小时成本估算，最低按基础实时链路
+										$3.06/小时。
+									</p>
+								{/if}
+								{#if creditBalanceMessage}<p class="balance-message">{creditBalanceMessage}</p>{/if}
+								<a
+									href="https://platform.openai.com/settings/organization/billing/overview"
+									target="_blank"
+									rel="noreferrer">打开 OpenAI Billing 核对余额</a
+								>
+							</div>
+						</details>
 					{:else if officialUsagePhase === 'loading'}
 						<strong class="muted">正在更新</strong>
 					{:else}
@@ -1992,7 +2265,7 @@
 		gap: 10px;
 	}
 	.usage-summary {
-		min-width: 164px;
+		min-width: 210px;
 		display: grid;
 		gap: 7px;
 	}
@@ -2030,6 +2303,9 @@
 		color: #78827d;
 		font-weight: 520;
 	}
+	.official-usage {
+		position: relative;
+	}
 	.official-usage-heading {
 		display: flex;
 		align-items: center;
@@ -2040,9 +2316,28 @@
 		display: grid;
 		gap: 1px;
 	}
+	.credit-balance-summary {
+		display: grid;
+		grid-template-columns: 58px 1fr;
+		align-items: baseline;
+		gap: 5px;
+		white-space: nowrap;
+	}
+	.credit-balance-summary em {
+		color: #85aa9d;
+		font-style: normal;
+		text-align: right;
+	}
+	.credit-balance-summary strong {
+		color: #bde9da;
+		text-align: left;
+	}
+	.credit-balance-summary strong.balance-warning {
+		color: #e3bd79;
+	}
 	.official-usage-window {
 		display: grid;
-		grid-template-columns: 40px 1fr;
+		grid-template-columns: 58px 1fr;
 		align-items: baseline;
 		gap: 5px;
 		white-space: nowrap;
@@ -2059,6 +2354,99 @@
 		background: transparent;
 		color: #65706a;
 		font-size: 10px;
+	}
+	.usage-ledger-details {
+		position: relative;
+		margin-top: 2px;
+	}
+	.usage-ledger-details > summary {
+		cursor: pointer;
+		color: #73817a;
+		font-size: 10px;
+		list-style: none;
+	}
+	.usage-ledger-details > summary::-webkit-details-marker {
+		display: none;
+	}
+	.usage-ledger-details[open] > summary {
+		color: #9dc8b7;
+	}
+	.usage-ledger-popover {
+		position: absolute;
+		z-index: 20;
+		top: calc(100% + 8px);
+		right: 0;
+		width: min(360px, calc(100vw - 40px));
+		padding: 14px;
+		border: 1px solid #35453e;
+		border-radius: 13px;
+		display: grid;
+		gap: 12px;
+		background: #101613;
+		box-shadow: 0 18px 48px rgba(0, 0, 0, 0.4);
+		color: #94a099;
+		text-align: left;
+	}
+	.ledger-breakdown,
+	.ledger-limit {
+		display: grid;
+		gap: 4px;
+	}
+	.ledger-breakdown strong,
+	.ledger-limit strong {
+		color: #d0dad5;
+		font-size: 12px;
+	}
+	.balance-calibration {
+		display: grid;
+		gap: 8px;
+	}
+	.balance-calibration label {
+		display: grid;
+		gap: 6px;
+		font-size: 11px;
+	}
+	.balance-calibration input {
+		width: 100%;
+		padding: 8px 10px;
+		border: 1px solid #34413b;
+		border-radius: 9px;
+		background: #0b100d;
+		color: #e7eeea;
+		font: inherit;
+	}
+	.balance-actions {
+		display: flex;
+		gap: 7px;
+	}
+	.balance-actions button {
+		min-width: 0;
+		width: auto;
+		padding: 7px 10px;
+		border: 1px solid #3f6657;
+		border-radius: 8px;
+		background: #173126;
+		color: #bde9da;
+		font-size: 11px;
+	}
+	.balance-actions button.secondary {
+		border-color: #3a423e;
+		background: #171c19;
+		color: #9ba59f;
+	}
+	.balance-note,
+	.balance-message {
+		margin: 0;
+		font-size: 10px;
+		line-height: 1.5;
+	}
+	.balance-message {
+		color: #d4b986;
+		white-space: pre-wrap;
+	}
+	.usage-ledger-popover a {
+		color: #91cdb7;
+		font-size: 11px;
 	}
 	.mic {
 		width: 10px;
@@ -2289,11 +2677,24 @@
 		.official-usage {
 			text-align: left;
 		}
+		.credit-balance-summary,
+		.official-usage-window {
+			grid-template-columns: 62px 1fr;
+		}
+		.credit-balance-summary em,
+		.official-usage-window em {
+			text-align: left;
+		}
 		.usage-refresh {
 			width: auto;
 		}
-		.official-usage-window {
-			grid-template-columns: 44px 1fr;
+		.usage-ledger-details > summary {
+			text-align: left;
+		}
+		.usage-ledger-popover {
+			position: static;
+			width: 100%;
+			margin-top: 8px;
 		}
 		.control-actions {
 			width: 100%;
