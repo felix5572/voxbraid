@@ -8,6 +8,7 @@ import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
 import type { StoredRevisedSegment, StoredRevisionBatch } from '../projection/revision-records';
 import { VoxBraidLocalDatabase } from './local-session-database';
 import { LocalSessionRepository } from './local-session-repository';
+import type { EvaluationBundle } from './evaluation-bundle';
 
 const START = '2026-09-01T00:00:00.000Z';
 const CHECKPOINT = '2026-09-01T00:00:10.000Z';
@@ -757,6 +758,10 @@ describe('LocalSessionRepository', () => {
 			batch: revisionBatch,
 			segments: [revisedSegment]
 		});
+		const legacySummary = createAutoSummary();
+		const cleanBlock = createCleanBlock();
+		await repository.saveAutoSummary(legacySummary);
+		await repository.saveCleanTranscriptBlock(cleanBlock);
 		const exported = await repository.exportThread(thread.id, '2026-09-01T00:02:00.000Z');
 
 		const importedDatabase = new VoxBraidLocalDatabase(
@@ -776,10 +781,110 @@ describe('LocalSessionRepository', () => {
 				batches: [revisionBatch],
 				segments: [revisedSegment]
 			});
+			await expect(importedRepository.loadAutoSummary(thread.id)).resolves.toEqual(legacySummary);
+			await expect(importedRepository.loadCleanTranscriptBlocks(thread.id)).resolves.toEqual([
+				cleanBlock
+			]);
 			expect(exported).not.toContain('checkpointedAt');
 		} finally {
 			await importedDatabase.delete();
 		}
+	});
+
+	it('exports a self-contained evaluation bundle with usage, diagnostics, and derived metrics', async () => {
+		const thread = createThread();
+		const run = createRun('run-1', 1, { status: 'completed', endedAt: CHECKPOINT });
+		await repository.saveCheckpoint({ thread, run, checkpointedAt: CHECKPOINT });
+		await repository.saveAutoSummary(createAutoSummary());
+		await repository.saveCleanTranscriptBlock(createCleanBlock());
+		await repository.saveRevisionBatch({
+			batch: createRevisionBatch({
+				usageStatus: 'recorded',
+				usage: {
+					inputTokens: 200,
+					cachedInputTokens: 80,
+					outputTokens: 40,
+					reasoningTokens: 0,
+					totalTokens: 240
+				}
+			}),
+			segments: [createRevisedSegment()]
+		});
+		await repository.saveOperationalLog({
+			id: 'log-thread',
+			severity: 'warning',
+			source: 'revision',
+			code: 'test-warning',
+			summary: 'A relevant warning.',
+			details: 'diagnostic details',
+			occurredAt: CHECKPOINT,
+			lastOccurredAt: CHECKPOINT,
+			threadId: thread.id,
+			runId: run.id,
+			requestId: 'request-1',
+			dedupeKey: 'relevant',
+			state: 'active',
+			count: 1
+		});
+		await repository.saveOperationalLog({
+			id: 'log-other',
+			severity: 'error',
+			source: 'revision',
+			code: 'other-thread',
+			summary: 'Should not leak into this bundle.',
+			details: null,
+			occurredAt: CHECKPOINT,
+			lastOccurredAt: CHECKPOINT,
+			threadId: 'thread-other',
+			runId: null,
+			requestId: null,
+			dedupeKey: 'other',
+			state: 'active',
+			count: 1
+		});
+
+		const bundle = JSON.parse(
+			await repository.exportEvaluationBundle(thread.id, {
+				exportedAt: '2026-09-01T00:02:00.000Z',
+				build: { commitSha: 'abc12345', commitMessage: 'test build', dirty: false },
+				captureSettings: {
+					scope: 'export-time-ui',
+					transcriptionModel: 'gpt-live-transcribe',
+					noiseReduction: 'off',
+					targetLanguage: 'zh'
+				},
+				realtimeDiagnostic: { events: [{ type: 'session.created' }] },
+				officialUsageSnapshot: { windows: [{ days: 1, costUsd: 1.23 }] }
+			})
+		) as EvaluationBundle;
+
+		expect(bundle).toMatchObject({
+			kind: 'voxbraid-evaluation-bundle',
+			schemaVersion: 1,
+			summary: {
+				usage: { persistedProjectionTasks: { inputTokens: 300, totalTokens: 360 } },
+				metrics: {
+					cleanTranscript: { completedBlocks: 1, failedBlocks: 0 },
+					operationalLogs: { total: 1, activeWarnings: 1, activeErrors: 0 }
+				},
+				limitations: expect.arrayContaining([expect.stringContaining('export time')])
+			},
+			producer: { commitSha: 'abc12345', commitMessage: 'test build', dirty: false },
+			captureSettings: { transcriptionModel: 'gpt-live-transcribe', noiseReduction: 'off' },
+			usage: {
+				revision: { inputTokens: 200, cachedInputTokens: 80, totalTokens: 240 },
+				persistedProjectionTasks: { inputTokens: 300, totalTokens: 360 }
+			},
+			metrics: {
+				cleanTranscript: { completedBlocks: 1, failedBlocks: 0 },
+				operationalLogs: { total: 1, activeWarnings: 1, activeErrors: 0 }
+			},
+			diagnostics: {
+				operationalLogs: [{ id: 'log-thread' }],
+				realtimeLatestRun: { events: [{ type: 'session.created' }] }
+			}
+		});
+		expect(JSON.stringify(bundle)).not.toContain('Should not leak into this bundle.');
 	});
 
 	it('rejects malformed and cross-thread archives before replacing stored data', async () => {
@@ -789,16 +894,24 @@ describe('LocalSessionRepository', () => {
 			run: createRun(),
 			checkpointedAt: CHECKPOINT
 		});
+		await repository.saveCleanTranscriptBlock(createCleanBlock());
 
 		await expect(repository.importThread('{', CHECKPOINT)).rejects.toThrow('not valid JSON');
 		const exported = JSON.parse(await repository.exportThread(thread.id, CHECKPOINT)) as {
 			schemaVersion: number;
 			runs: Array<{ threadId: string }>;
+			cleanTranscriptProjection: { blocks: Array<{ threadId: string }> };
 		};
-		exported.schemaVersion = 4;
+		exported.schemaVersion = 5;
 		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
 			'Unsupported session archive version'
 		);
+		exported.schemaVersion = 4;
+		exported.cleanTranscriptProjection.blocks[0].threadId = 'thread-elsewhere';
+		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
+			'does not match its run'
+		);
+		exported.cleanTranscriptProjection.blocks[0].threadId = thread.id;
 		exported.schemaVersion = 3;
 		exported.runs[0].threadId = 'thread-elsewhere';
 		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
@@ -820,7 +933,7 @@ describe('LocalSessionRepository', () => {
 
 		await expect(repository.importThread(JSON.stringify(legacy), CHECKPOINT)).resolves.toEqual({
 			threadId: 'thread-1',
-			warnings: ['该备份不含当前修订对照；Live 原文已恢复，修订对照将从此重新开始。']
+			warnings: ['该备份不含当前修订对照与课堂清稿；Live 原文已恢复，派生内容将从此重新开始。']
 		});
 		await expect(repository.loadRevisionProjection('thread-1')).resolves.toEqual({
 			batches: [],
@@ -842,7 +955,7 @@ describe('LocalSessionRepository', () => {
 		};
 		await expect(repository.importThread(JSON.stringify(legacy), CHECKPOINT)).resolves.toEqual({
 			threadId: 'thread-1',
-			warnings: ['该备份不含当前修订对照；Live 原文已恢复，修订对照将从此重新开始。']
+			warnings: ['该备份不含当前修订对照与课堂清稿；Live 原文已恢复，派生内容将从此重新开始。']
 		});
 		await expect(repository.loadThread('thread-1')).resolves.toMatchObject({
 			runs: [{ sourceStream: createRun().sourceStream }]
@@ -851,6 +964,33 @@ describe('LocalSessionRepository', () => {
 			batches: [],
 			segments: []
 		});
+	});
+
+	it('imports a version 3 archive with revision pairs and an explicit cleanup warning', async () => {
+		const thread = createThread();
+		const run = createRun();
+		const revisionBatch = createRevisionBatch();
+		const revisedSegment = createRevisedSegment();
+		const legacy = {
+			schemaVersion: 3,
+			exportedAt: CHECKPOINT,
+			thread,
+			runs: [run],
+			segments: [],
+			revisionProjection: {
+				batches: [revisionBatch],
+				segments: [revisedSegment]
+			}
+		};
+
+		await expect(repository.importThread(JSON.stringify(legacy), CHECKPOINT)).resolves.toEqual({
+			threadId: thread.id,
+			warnings: ['该备份不含课堂清稿；事实与修订对照已恢复，课堂清稿将从此重新开始。']
+		});
+		await expect(repository.loadRevisionProjection(thread.id)).resolves.toEqual(
+			legacy.revisionProjection
+		);
+		await expect(repository.loadCleanTranscriptBlocks(thread.id)).resolves.toEqual([]);
 	});
 
 	it('persists and clears the bounded operational issue journal', async () => {

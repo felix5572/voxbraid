@@ -19,8 +19,10 @@ import {
 import {
 	SESSION_ARCHIVE_VERSION,
 	parseSessionArchive,
-	stringifySessionArchive
+	stringifySessionArchive,
+	type SessionArchive
 } from './session-archive';
+import { stringifyEvaluationBundle, type EvaluationBundleOptions } from './evaluation-bundle';
 
 const ABANDONED_STATUSES = new Set(['starting', 'live', 'stopping']);
 
@@ -526,18 +528,77 @@ export class LocalSessionRepository {
 		);
 	}
 
+	private async archiveSnapshot(
+		threadId: string,
+		exportedAt: string
+	): Promise<SessionArchive | null> {
+		return this.database.transaction(
+			'r',
+			[
+				this.database.threads,
+				this.database.runs,
+				this.database.segments,
+				this.database.autoSummaries,
+				this.database.cleanTranscriptBlocks,
+				this.database.revisionBatches,
+				this.database.revisedSegments
+			],
+			async () => {
+				const threadRecord = await this.database.threads.get(threadId);
+				if (!threadRecord) return null;
+				const runRecords = await this.database.runs.where('threadId').equals(threadId).toArray();
+				const runIds = runRecords.map((run) => run.id);
+				const [segments, legacySummary, cleanBlocks, revisionBatches, revisedSegments] =
+					await Promise.all([
+						runIds.length === 0
+							? Promise.resolve([])
+							: this.database.segments.where('runId').anyOf(runIds).toArray(),
+						this.database.autoSummaries.get(threadId),
+						this.database.cleanTranscriptBlocks.where('threadId').equals(threadId).toArray(),
+						this.database.revisionBatches.where('threadId').equals(threadId).toArray(),
+						this.database.revisedSegments.where('threadId').equals(threadId).toArray()
+					]);
+				return {
+					schemaVersion: SESSION_ARCHIVE_VERSION,
+					exportedAt,
+					thread: fromThreadRecord(threadRecord),
+					runs: runRecords.map(fromRunRecord).sort(compareRuns),
+					segments: segments.sort(compareSegments),
+					revisionProjection: {
+						batches: revisionBatches.sort(
+							(left, right) =>
+								left.runSequence - right.runSequence || left.sequence - right.sequence
+						),
+						segments: revisedSegments.sort(
+							(left, right) =>
+								left.runSequence - right.runSequence || left.sourceStart - right.sourceStart
+						)
+					},
+					cleanTranscriptProjection: {
+						legacySummary: legacySummary ?? null,
+						blocks: cleanBlocks.sort((left, right) => left.sequence - right.sequence)
+					}
+				};
+			}
+		);
+	}
+
 	async exportThread(threadId: string, exportedAt: string): Promise<string> {
-		const [stored, revisionProjection] = await Promise.all([
-			this.loadThread(threadId),
-			this.loadRevisionProjection(threadId)
+		const archive = await this.archiveSnapshot(threadId, exportedAt);
+		if (!archive) throw new Error(`Thread not found: ${threadId}.`);
+		return stringifySessionArchive(archive);
+	}
+
+	async exportEvaluationBundle(
+		threadId: string,
+		options: EvaluationBundleOptions
+	): Promise<string> {
+		const [archive, operationalLogs] = await Promise.all([
+			this.archiveSnapshot(threadId, options.exportedAt),
+			this.loadOperationalLogs()
 		]);
-		if (!stored) throw new Error(`Thread not found: ${threadId}.`);
-		return stringifySessionArchive({
-			schemaVersion: SESSION_ARCHIVE_VERSION,
-			exportedAt,
-			...stored,
-			revisionProjection
-		});
+		if (!archive) throw new Error(`Thread not found: ${threadId}.`);
+		return stringifyEvaluationBundle(archive, operationalLogs, options);
 	}
 
 	async importThread(value: string, checkpointedAt: string): Promise<ImportThreadResult> {
@@ -601,6 +662,16 @@ export class LocalSessionRepository {
 				) {
 					throw new Error('Imported revised segment ID belongs to another thread.');
 				}
+				const importedCleanBlockCollisions = await this.database.cleanTranscriptBlocks.bulkGet(
+					archive.cleanTranscriptProjection.blocks.map((block) => block.id)
+				);
+				if (
+					importedCleanBlockCollisions.some(
+						(block) => block !== undefined && block.threadId !== archive.thread.id
+					)
+				) {
+					throw new Error('Imported clean transcript block ID belongs to another thread.');
+				}
 
 				if (existingRunIds.length > 0) {
 					await this.database.segments.where('runId').anyOf(existingRunIds).delete();
@@ -620,6 +691,10 @@ export class LocalSessionRepository {
 				await this.database.segments.bulkPut(archive.segments);
 				await this.database.revisionBatches.bulkPut(archive.revisionProjection.batches);
 				await this.database.revisedSegments.bulkPut(archive.revisionProjection.segments);
+				if (archive.cleanTranscriptProjection.legacySummary) {
+					await this.database.autoSummaries.put(archive.cleanTranscriptProjection.legacySummary);
+				}
+				await this.database.cleanTranscriptBlocks.bulkPut(archive.cleanTranscriptProjection.blocks);
 			}
 		);
 		return { threadId: archive.thread.id, warnings: parsed.warnings };

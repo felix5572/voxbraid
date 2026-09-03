@@ -202,6 +202,8 @@
 	let followFrame: number | null = null;
 	let diagnosticStartedAt = performance.now();
 	let diagnosticStartedAtIso = nowIso();
+	let diagnosticThreadId: string | null = null;
+	let diagnosticRunId: string | null = null;
 	let diagnosticRequestedTranscriptionModel: RealtimeTranscriptionModel =
 		DEFAULT_REALTIME_TRANSCRIPTION_MODEL;
 	let diagnosticRequestedNoiseReduction: RealtimeNoiseReductionMode =
@@ -298,6 +300,8 @@
 		diagnosticStartedAtIso = nowIso();
 		diagnosticRequestedTranscriptionModel = transcriptionModel;
 		diagnosticRequestedNoiseReduction = noiseReduction;
+		diagnosticThreadId = null;
+		diagnosticRunId = null;
 		diagnosticEvents = [];
 		diagnosticStatuses = [];
 		diagnosticMediaTrack = null;
@@ -387,6 +391,8 @@
 				version: 1,
 				startedAt: diagnosticStartedAtIso,
 				generatedAt: nowIso(),
+				threadId: diagnosticThreadId,
+				runId: diagnosticRunId,
 				requestedTranscriptionModel: diagnosticRequestedTranscriptionModel,
 				requestedNoiseReduction: diagnosticRequestedNoiseReduction,
 				build: __VOXBRAID_BUILD_INFO__,
@@ -575,6 +581,52 @@
 				source: 'storage',
 				code: 'export-failed',
 				summary: '会话导出失败。',
+				details: inlineErrorDetails(exportError),
+				threadId: session?.thread.id ?? null
+			});
+		}
+	}
+
+	async function downloadEvaluationBundle(): Promise<void> {
+		if (!repository || !session) return;
+		markCheckpointDirty();
+		if (!(await flushCheckpoint())) return;
+
+		try {
+			const exportedAt = nowIso();
+			refreshDiagnosticReport();
+			const json = await repository.exportEvaluationBundle(session.thread.id, {
+				exportedAt,
+				build: __VOXBRAID_BUILD_INFO__,
+				captureSettings: {
+					scope: 'export-time-ui',
+					transcriptionModel,
+					noiseReduction,
+					targetLanguage
+				},
+				realtimeDiagnostic:
+					diagnosticThreadId === session.thread.id
+						? (JSON.parse(diagnosticReportText) as unknown)
+						: null,
+				officialUsageSnapshot: officialUsage
+			});
+			const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = `voxbraid-evaluation-${exportedAt.replaceAll(':', '-')}.json`;
+			document.body.append(link);
+			link.click();
+			link.remove();
+			setTimeout(() => URL.revokeObjectURL(url), 0);
+			backupMessage = '当前会话评估数据已导出。';
+		} catch (exportError) {
+			console.error('[persistence] evaluation export failed', exportError);
+			persistenceError = `评估数据导出失败，请稍后重试。\n${inlineErrorDetails(exportError)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'evaluation-export-failed',
+				summary: '评估数据导出失败。',
 				details: inlineErrorDetails(exportError),
 				threadId: session?.thread.id ?? null
 			});
@@ -1162,6 +1214,8 @@
 			clientPlatform: navigator.userAgent,
 			at
 		});
+		diagnosticThreadId = session.thread.id;
+		diagnosticRunId = activeCaptureRun(session)?.id ?? null;
 		markCheckpointDirty();
 		await flushCheckpoint();
 		await refreshThreadList();
@@ -1513,12 +1567,17 @@
 					<button
 						class="export"
 						disabled={sessionActionsDisabled || !session}
-						onclick={() => void downloadSessionArchive()}>导出当前会话 JSON</button
+						onclick={() => void downloadSessionArchive()}>导出恢复备份</button
+					>
+					<button
+						class="export"
+						disabled={sessionActionsDisabled || !session}
+						onclick={() => void downloadEvaluationBundle()}>导出评估数据</button
 					>
 					<button
 						class="export"
 						disabled={sessionActionsDisabled}
-						onclick={() => backupInput?.click()}>导入会话 JSON</button
+						onclick={() => backupInput?.click()}>恢复备份</button
 					>
 					<input
 						bind:this={backupInput}
@@ -1644,6 +1703,8 @@
 
 	.backup-actions {
 		display: flex;
+		justify-content: flex-end;
+		flex-wrap: wrap;
 		gap: 8px;
 	}
 
@@ -2255,6 +2316,9 @@
 		.footer-copy {
 			flex-direction: column;
 			gap: 5px;
+		}
+		.backup-actions {
+			justify-content: flex-start;
 		}
 		.export {
 			width: auto;

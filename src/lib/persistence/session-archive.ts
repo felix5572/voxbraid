@@ -14,6 +14,11 @@ import type {
 	StoredRevisionProjection
 } from '../projection/revision-records';
 import { REVISION_MAX_OPEN_SOURCE_CHARACTERS } from '../projection/revision-constants';
+import type { StoredAutoSummary } from '../sidecar/auto-summary';
+import type {
+	CleanTranscriptFailureAttempt,
+	StoredCleanTranscriptBlock
+} from '../sidecar/clean-transcript';
 import type {
 	ModelUsage,
 	SidecarErrorCode,
@@ -21,7 +26,12 @@ import type {
 	SidecarTransportDiagnostic
 } from '../sidecar/types';
 
-export const SESSION_ARCHIVE_VERSION = 3 as const;
+export const SESSION_ARCHIVE_VERSION = 4 as const;
+
+export interface StoredCleanTranscriptProjection {
+	legacySummary: StoredAutoSummary | null;
+	blocks: StoredCleanTranscriptBlock[];
+}
 
 export interface SessionArchive {
 	schemaVersion: typeof SESSION_ARCHIVE_VERSION;
@@ -30,6 +40,7 @@ export interface SessionArchive {
 	runs: CaptureRun[];
 	segments: TranscriptSegment[];
 	revisionProjection: StoredRevisionProjection;
+	cleanTranscriptProjection: StoredCleanTranscriptProjection;
 }
 
 export interface ParsedSessionArchive {
@@ -146,6 +157,120 @@ function modelUsage(value: unknown, label: string): ModelUsage {
 		outputTokens: nonnegativeNumber(input.outputTokens, `${label}.outputTokens`),
 		reasoningTokens: nullableNonnegativeNumber(input.reasoningTokens, `${label}.reasoningTokens`),
 		totalTokens: nonnegativeNumber(input.totalTokens, `${label}.totalTokens`)
+	};
+}
+
+function cleanFailureAttempt(value: unknown, label: string): CleanTranscriptFailureAttempt {
+	const input = record(value, label);
+	return {
+		capturedAt: timestamp(input.capturedAt, `${label}.capturedAt`),
+		failedAt: timestamp(input.failedAt, `${label}.failedAt`),
+		clientRequestId: string(input.clientRequestId, `${label}.clientRequestId`),
+		responseId: nullableString(input.responseId, `${label}.responseId`),
+		model: nullableString(input.model, `${label}.model`),
+		upstreamStatus: upstreamStatus(input.upstreamStatus, `${label}.upstreamStatus`),
+		errorCode: sidecarErrorCode(input.errorCode, `${label}.errorCode`),
+		error: string(input.error, `${label}.error`),
+		diagnostic: failureDiagnostic(input.diagnostic, `${label}.diagnostic`)
+	};
+}
+
+function autoSummary(value: unknown): StoredAutoSummary | null {
+	if (value === null) return null;
+	const label = 'cleanTranscriptProjection.legacySummary';
+	const input = record(value, label);
+	const usageStatus = string(input.usageStatus, `${label}.usageStatus`);
+	if (usageStatus !== 'recorded' && usageStatus !== 'unavailable') {
+		throw new Error(`${label}.usageStatus is invalid.`);
+	}
+	const usage = input.usage === null ? null : modelUsage(input.usage, `${label}.usage`);
+	if ((usageStatus === 'recorded') !== (usage !== null)) {
+		throw new Error(`${label}.usage does not match usageStatus.`);
+	}
+	return {
+		threadId: string(input.threadId, `${label}.threadId`),
+		revision: positiveInteger(input.revision, `${label}.revision`),
+		text: string(input.text, `${label}.text`),
+		sourceCharacters: nonnegativeInteger(input.sourceCharacters, `${label}.sourceCharacters`),
+		translationCharacters: nonnegativeInteger(
+			input.translationCharacters,
+			`${label}.translationCharacters`
+		),
+		capturedAt: timestamp(input.capturedAt, `${label}.capturedAt`),
+		model: string(input.model, `${label}.model`),
+		usageStatus,
+		usage,
+		updatedAt: timestamp(input.updatedAt, `${label}.updatedAt`)
+	};
+}
+
+function cleanTranscriptBlock(value: unknown, index: number): StoredCleanTranscriptBlock {
+	const label = `cleanTranscriptProjection.blocks[${index}]`;
+	const input = record(value, label);
+	const status = string(input.status, `${label}.status`);
+	const usageStatus = string(input.usageStatus, `${label}.usageStatus`);
+	if (status !== 'completed' && status !== 'failed') throw new Error(`${label}.status is invalid.`);
+	if (usageStatus !== 'recorded' && usageStatus !== 'unavailable') {
+		throw new Error(`${label}.usageStatus is invalid.`);
+	}
+	const usage = input.usage === null ? null : modelUsage(input.usage, `${label}.usage`);
+	if ((usageStatus === 'recorded') !== (usage !== null)) {
+		throw new Error(`${label}.usage does not match usageStatus.`);
+	}
+	const attemptsInput = input.failureAttempts;
+	if (attemptsInput !== undefined && !Array.isArray(attemptsInput)) {
+		throw new Error(`${label}.failureAttempts must be an array.`);
+	}
+	return {
+		id: string(input.id, `${label}.id`),
+		threadId: string(input.threadId, `${label}.threadId`),
+		runId: string(input.runId, `${label}.runId`),
+		sequence: positiveInteger(input.sequence, `${label}.sequence`),
+		runSequence: positiveInteger(input.runSequence, `${label}.runSequence`),
+		targetLanguage: string(input.targetLanguage, `${label}.targetLanguage`),
+		sourceStart: nonnegativeInteger(input.sourceStart, `${label}.sourceStart`),
+		sourceEnd: nonnegativeInteger(input.sourceEnd, `${label}.sourceEnd`),
+		translationStart: nonnegativeInteger(input.translationStart, `${label}.translationStart`),
+		translationEnd: nonnegativeInteger(input.translationEnd, `${label}.translationEnd`),
+		sourceElapsedEndMs: nullableNonnegativeNumber(
+			input.sourceElapsedEndMs,
+			`${label}.sourceElapsedEndMs`
+		),
+		translationElapsedEndMs: nullableNonnegativeNumber(
+			input.translationElapsedEndMs,
+			`${label}.translationElapsedEndMs`
+		),
+		status,
+		text: string(input.text, `${label}.text`),
+		capturedAt: timestamp(input.capturedAt, `${label}.capturedAt`),
+		model: nullableString(input.model, `${label}.model`),
+		taskVersion: positiveInteger(input.taskVersion, `${label}.taskVersion`),
+		usageStatus,
+		usage,
+		...(input.clientRequestId === undefined
+			? {}
+			: { clientRequestId: string(input.clientRequestId, `${label}.clientRequestId`) }),
+		...(input.responseId === undefined
+			? {}
+			: { responseId: nullableString(input.responseId, `${label}.responseId`) }),
+		...(input.upstreamStatus === undefined
+			? {}
+			: { upstreamStatus: upstreamStatus(input.upstreamStatus, `${label}.upstreamStatus`) }),
+		...(input.errorCode === undefined
+			? {}
+			: { errorCode: sidecarErrorCode(input.errorCode, `${label}.errorCode`) }),
+		...(input.diagnostic === undefined
+			? {}
+			: { diagnostic: failureDiagnostic(input.diagnostic, `${label}.diagnostic`) }),
+		...(attemptsInput === undefined
+			? {}
+			: {
+					failureAttempts: attemptsInput.map((attempt, attemptIndex) =>
+						cleanFailureAttempt(attempt, `${label}.failureAttempts[${attemptIndex}]`)
+					)
+				}),
+		error: nullableString(input.error, `${label}.error`),
+		updatedAt: timestamp(input.updatedAt, `${label}.updatedAt`)
 	};
 }
 
@@ -423,6 +548,14 @@ export function validateSessionArchive(archive: SessionArchive): SessionArchive 
 		archive.segments.map((item) => `${item.runId}:${item.revision}:${item.sequence}`),
 		'segment run/revision sequences'
 	);
+	unique(
+		archive.cleanTranscriptProjection.blocks.map((item) => item.id),
+		'clean transcript block IDs'
+	);
+	unique(
+		archive.cleanTranscriptProjection.blocks.map((item) => String(item.sequence)),
+		'clean transcript block sequences'
+	);
 
 	const runIds = new Set(archive.runs.map((item) => item.id));
 	const activeRuns = archive.runs.filter((item) => ACTIVE_RUN_STATUSES.has(item.status));
@@ -445,6 +578,29 @@ export function validateSessionArchive(archive: SessionArchive): SessionArchive 
 		if (!runIds.has(item.runId)) throw new Error(`Segment ${item.id} points to a missing run.`);
 	}
 	const runsById = new Map(archive.runs.map((item) => [item.id, item]));
+	const legacySummary = archive.cleanTranscriptProjection.legacySummary;
+	if (legacySummary && legacySummary.threadId !== archive.thread.id) {
+		throw new Error('Legacy clean transcript summary does not belong to the archived thread.');
+	}
+	for (const block of archive.cleanTranscriptProjection.blocks) {
+		const parentRun = runsById.get(block.runId);
+		if (
+			block.threadId !== archive.thread.id ||
+			!parentRun ||
+			parentRun.sequence !== block.runSequence ||
+			block.targetLanguage !== parentRun.targetLanguage ||
+			block.sourceEnd < block.sourceStart ||
+			block.translationEnd < block.translationStart ||
+			(block.sourceEnd === block.sourceStart && block.translationEnd === block.translationStart) ||
+			block.sourceEnd > parentRun.sourceStream.text.length ||
+			block.translationEnd > parentRun.translationStream.text.length ||
+			(block.status === 'completed' &&
+				(!block.text.trim() || block.model === null || block.error !== null)) ||
+			(block.status === 'failed' && block.error === null)
+		) {
+			throw new Error(`Clean transcript block ${block.id} does not match its run.`);
+		}
+	}
 	const batchesById = new Map(archive.revisionProjection.batches.map((item) => [item.id, item]));
 	for (const batch of archive.revisionProjection.batches) {
 		const parentRun = runsById.get(batch.runId);
@@ -516,6 +672,7 @@ export function parseSessionArchive(value: string): ParsedSessionArchive {
 	if (
 		input.schemaVersion !== 1 &&
 		input.schemaVersion !== 2 &&
+		input.schemaVersion !== 3 &&
 		input.schemaVersion !== SESSION_ARCHIVE_VERSION
 	) {
 		throw new Error(`Unsupported session archive version: ${String(input.schemaVersion)}.`);
@@ -523,7 +680,8 @@ export function parseSessionArchive(value: string): ParsedSessionArchive {
 	if (!Array.isArray(input.runs)) throw new Error('archive.runs must be an array.');
 	if (!Array.isArray(input.segments)) throw new Error('archive.segments must be an array.');
 	const current = input.schemaVersion === SESSION_ARCHIVE_VERSION;
-	const revisionInput = current
+	const hasRevisionProjection = input.schemaVersion === 3 || current;
+	const revisionInput = hasRevisionProjection
 		? record(input.revisionProjection, 'archive.revisionProjection')
 		: { batches: [], segments: [] };
 	if (!Array.isArray(revisionInput.batches)) {
@@ -531,6 +689,12 @@ export function parseSessionArchive(value: string): ParsedSessionArchive {
 	}
 	if (!Array.isArray(revisionInput.segments)) {
 		throw new Error('archive.revisionProjection.segments must be an array.');
+	}
+	const cleanInput = current
+		? record(input.cleanTranscriptProjection, 'archive.cleanTranscriptProjection')
+		: { legacySummary: null, blocks: [] };
+	if (!Array.isArray(cleanInput.blocks)) {
+		throw new Error('archive.cleanTranscriptProjection.blocks must be an array.');
 	}
 
 	const archive = validateSessionArchive({
@@ -542,11 +706,19 @@ export function parseSessionArchive(value: string): ParsedSessionArchive {
 		revisionProjection: {
 			batches: revisionInput.batches.map(revisionBatch),
 			segments: revisionInput.segments.map(revisedSegment)
+		},
+		cleanTranscriptProjection: {
+			legacySummary: autoSummary(cleanInput.legacySummary),
+			blocks: cleanInput.blocks.map(cleanTranscriptBlock)
 		}
 	});
 	return {
 		archive,
-		warnings: current ? [] : ['该备份不含当前修订对照；Live 原文已恢复，修订对照将从此重新开始。']
+		warnings: current
+			? []
+			: hasRevisionProjection
+				? ['该备份不含课堂清稿；事实与修订对照已恢复，课堂清稿将从此重新开始。']
+				: ['该备份不含当前修订对照与课堂清稿；Live 原文已恢复，派生内容将从此重新开始。']
 	};
 }
 

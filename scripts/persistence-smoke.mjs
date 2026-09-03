@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -1019,15 +1019,35 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await firstThreadButton.click();
 		await page.getByText('Hold across thread switch', { exact: true }).waitFor();
 		const downloadPromise = page.waitForEvent('download');
-		await page.getByRole('button', { name: '导出当前会话 JSON' }).click();
+		await page.getByRole('button', { name: '导出恢复备份' }).click();
 		const download = await downloadPromise;
 		const archivePath = await download.path();
 		assert.ok(archivePath);
+		const archive = JSON.parse(await readFile(archivePath, 'utf8'));
+		assert.equal(archive.schemaVersion, 4);
+		assert.ok(Array.isArray(archive.cleanTranscriptProjection.blocks));
+		assert.ok(archive.cleanTranscriptProjection.blocks.length > 0);
+		assert.ok(Array.isArray(archive.revisionProjection.batches));
+		const evaluationDownloadPromise = page.waitForEvent('download');
+		await page.getByRole('button', { name: '导出评估数据' }).click();
+		const evaluationDownload = await evaluationDownloadPromise;
+		const evaluationPath = await evaluationDownload.path();
+		assert.ok(evaluationPath);
+		const evaluation = JSON.parse(await readFile(evaluationPath, 'utf8'));
+		assert.equal(evaluation.kind, 'voxbraid-evaluation-bundle');
+		assert.equal(evaluation.schemaVersion, 1);
+		assert.ok(evaluation.summary.metrics.revisionTransport);
+		assert.equal(typeof evaluation.summary.usage.persistedProjectionTasks.totalTokens, 'number');
+		assert.ok(Array.isArray(evaluation.summary.limitations));
+		assert.ok(evaluation.metrics.revisionTransport);
+		assert.equal(typeof evaluation.usage.persistedProjectionTasks.totalTokens, 'number');
+		assert.equal(typeof evaluation.producer.commitSha, 'string');
+		assert.ok(Array.isArray(evaluation.diagnostics.operationalLogs));
 		await newThreadButton.click();
-		const importButton = page.getByRole('button', { name: '导入会话 JSON' });
+		const importButton = page.getByRole('button', { name: '恢复备份', exact: true });
 		await page.waitForFunction(() => {
 			const button = [...document.querySelectorAll('button')].find((item) =>
-				item.textContent?.includes('导入会话 JSON')
+				item.textContent?.includes('恢复备份')
 			);
 			return button instanceof HTMLButtonElement && !button.disabled;
 		});
@@ -1036,6 +1056,13 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		await importInput.setInputFiles(archivePath);
 		await page.getByText('会话已恢复。重复导入同一文件不会创建副本。', { exact: true }).waitFor();
 		await mainText(page, firstSource).waitFor();
+		const restoredCleanBlocks = (await readStore(page, 'cleanTranscriptBlocks')).filter(
+			(record) => record.threadId === archive.thread.id
+		);
+		assert.deepEqual(
+			restoredCleanBlocks.map((record) => record.id).sort(),
+			archive.cleanTranscriptProjection.blocks.map((record) => record.id).sort()
+		);
 		assert.equal((await readStore(page, 'threads')).length, 2);
 
 		await page.setViewportSize({ width: 768, height: 1_024 });
