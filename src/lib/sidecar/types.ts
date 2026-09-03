@@ -104,6 +104,17 @@ export interface SidecarFailureDiagnostic {
 	httpStatus: number | null;
 }
 
+export interface SidecarTransportDiagnostic {
+	transport: 'http' | 'http-fallback' | 'websocket';
+	chainAction: 'none' | 'bootstrap' | 'continued' | 'rebuilt';
+	streamId: string | null;
+	chainTurn: number | null;
+	chainAgeMs: number | null;
+	firstEventMs: number | null;
+	completedMs: number | null;
+	fallbackError?: string | null;
+}
+
 export type SidecarErrorCode =
 	| 'invalid-request'
 	| 'empty-context'
@@ -113,6 +124,7 @@ export type SidecarErrorCode =
 	| 'invalid-revision-boundary'
 	| 'budget-check-failed'
 	| 'request-timeout'
+	| 'websocket-outcome-unknown'
 	| 'upstream-failed'
 	| 'upstream-incomplete';
 
@@ -125,6 +137,7 @@ export type SidecarInvokeResult =
 			outputText: string;
 			usageStatus: ModelUsageStatus;
 			usage: ModelUsage | null;
+			transportDiagnostic?: SidecarTransportDiagnostic | null;
 			completedAt: string;
 	  }
 	| {
@@ -136,6 +149,7 @@ export type SidecarInvokeResult =
 			upstreamStatus: 'failed' | 'incomplete' | 'cancelled' | null;
 			usageStatus: ModelUsageStatus;
 			usage: ModelUsage | null;
+			transportDiagnostic?: SidecarTransportDiagnostic | null;
 			diagnostic?: SidecarFailureDiagnostic | null;
 			error: { code: SidecarErrorCode; message: string };
 			failedAt: string;
@@ -193,12 +207,36 @@ function isSidecarFailureDiagnostic(value: unknown): value is SidecarFailureDiag
 	);
 }
 
+function isSidecarTransportDiagnostic(value: unknown): value is SidecarTransportDiagnostic {
+	return (
+		isRecord(value) &&
+		(value.transport === 'http' ||
+			value.transport === 'http-fallback' ||
+			value.transport === 'websocket') &&
+		(value.chainAction === 'none' ||
+			value.chainAction === 'bootstrap' ||
+			value.chainAction === 'continued' ||
+			value.chainAction === 'rebuilt') &&
+		(value.streamId === null || typeof value.streamId === 'string') &&
+		isNullableNumber(value.chainTurn) &&
+		isNullableNumber(value.chainAgeMs) &&
+		isNullableNumber(value.firstEventMs) &&
+		isNullableNumber(value.completedMs) &&
+		(value.fallbackError === undefined ||
+			value.fallbackError === null ||
+			typeof value.fallbackError === 'string')
+	);
+}
+
 export function isSidecarInvokeResult(value: unknown): value is SidecarInvokeResult {
 	if (!isRecord(value) || (value.status !== 'completed' && value.status !== 'failed')) return false;
 	if (
 		typeof value.clientRequestId !== 'string' ||
 		(value.usageStatus !== 'recorded' && value.usageStatus !== 'unavailable') ||
-		(value.usageStatus === 'recorded' ? !isModelUsage(value.usage) : value.usage !== null)
+		(value.usageStatus === 'recorded' ? !isModelUsage(value.usage) : value.usage !== null) ||
+		(value.transportDiagnostic !== undefined &&
+			value.transportDiagnostic !== null &&
+			!isSidecarTransportDiagnostic(value.transportDiagnostic))
 	) {
 		return false;
 	}

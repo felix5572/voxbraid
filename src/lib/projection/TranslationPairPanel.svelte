@@ -16,6 +16,7 @@
 	} from '../sidecar/types';
 	import { ProjectionWorker } from './projection-worker';
 	import { reconcileRevisionSegmentPresentation } from './revision-display';
+	import { revisionTransportSummary } from './revision-transport-summary';
 	import {
 		REVISION_MAX_CONTINUITY_CHARACTERS,
 		REVISION_QUIET_WINDOW_MS,
@@ -123,6 +124,7 @@
 	const totalTokens = $derived(
 		batches.reduce((total, batch) => total + (batch.usage?.totalTokens ?? 0), 0)
 	);
+	const transportSummary = $derived(revisionTransportSummary(batches));
 	const orderedSegments = $derived(
 		[...segments].sort(
 			(left, right) => left.runSequence - right.runSequence || left.sourceStart - right.sourceStart
@@ -272,6 +274,7 @@
 			result.status === 'failed' &&
 			(result.error.code === 'browser-network-failed' ||
 				result.error.code === 'request-timeout' ||
+				result.error.code === 'websocket-outcome-unknown' ||
 				result.error.code === 'upstream-failed')
 		);
 	}
@@ -392,6 +395,7 @@
 					? `${result.error.code}：${result.error.message}`
 					: 'invalid-response：模型输出无法验证。'),
 			diagnostic: result.status === 'failed' ? (result.diagnostic ?? null) : null,
+			transportDiagnostic: result.transportDiagnostic ?? null,
 			updatedAt: input.updatedAt
 		};
 	}
@@ -546,6 +550,7 @@
 					errorCode: null,
 					error: null,
 					diagnostic: null,
+					transportDiagnostic: result.transportDiagnostic ?? null,
 					updatedAt
 				};
 				await persistBatch(capturedRepository, batch, nextSegments, capturedFacts);
@@ -843,8 +848,9 @@
 						? '等待标点或短暂停顿'
 						: '准备修订';
 		const readingStatus = `第 ${run.sequence} 段 · 冻结至约 ${courseTime(frozen?.sourceElapsedEndMs ?? null)} · ${reason}`;
+		const transport = batchesForRun(run.id).at(-1)?.transportDiagnostic;
 		return diagnosticsMode
-			? `${readingStatus} · 开放区 ${pending} 字 · 累计 ${totalTokens} tokens`
+			? `${readingStatus} · 开放区 ${pending} 字 · 累计 ${totalTokens} tokens${transport ? ` · ${transport.transport}/${transport.chainAction} · turn ${transport.chainTurn ?? '—'} · ${transport.completedMs ?? '—'} ms` : ''}`
 			: readingStatus;
 	}
 
@@ -855,6 +861,10 @@
 	function recentlyChanged(timestamp: string): boolean {
 		const changedAt = Date.parse(timestamp);
 		return Number.isFinite(changedAt) && statusNowMs - changedAt < 2_000;
+	}
+
+	function metric(value: number | null, suffix = ''): string {
+		return value === null ? '暂无' : `${value}${suffix}`;
 	}
 
 	$effect(() => {
@@ -945,6 +955,40 @@
 			{waitingStatus()}
 		{/if}
 	</div>
+	{#if diagnosticsMode && transportSummary.total > 0}
+		<details class="transport-observability">
+			<summary>
+				WebSocket 链命中 {transportSummary.continued}/{transportSummary.websocket}（{metric(
+					transportSummary.chainHitRate === null
+						? null
+						: Math.round(transportSummary.chainHitRate * 100),
+					'%'
+				)}）· 全部传输完整结果平均 {metric(transportSummary.averageCompletedMs, ' ms')}
+			</summary>
+			<div>
+				<span>
+					bootstrap {transportSummary.bootstrap} · rebuilt {transportSummary.rebuilt} · HTTP 回退
+					{transportSummary.httpFallback}
+				</span>
+				{#each transportSummary.turnBuckets as bucket (bucket.label)}
+					<span>
+						{bucket.label}：{bucket.count} 批 · 平均输入 {metric(
+							bucket.averageInputTokens,
+							' tokens'
+						)} · 平均缓存 {metric(bucket.averageCachedInputTokens, ' tokens')} · 平均完成
+						{metric(bucket.averageCompletedMs, ' ms')}
+					</span>
+				{/each}
+				<span>
+					失败原因：{transportSummary.failures.length === 0
+						? '无'
+						: transportSummary.failures
+								.map((failure) => `${failure.code} ${failure.count}`)
+								.join(' · ')}
+				</span>
+			</div>
+		</details>
+	{/if}
 
 	<div class="column-head" aria-hidden="true"><span>修订原文</span><span>对照译文</span></div>
 	<div class="pairs-scroll" bind:this={scroller} onscroll={updateFollow}>
@@ -1011,6 +1055,17 @@
 						· online {String(batch.diagnostic.online ?? '未知')} · HTTP {batch.diagnostic
 							.httpStatus ?? '未收到'}
 					</span>
+				{/if}
+				{#if batch.transportDiagnostic}
+					<span>
+						传输 {batch.transportDiagnostic.transport} · 链 {batch.transportDiagnostic.chainAction}
+						· turn {batch.transportDiagnostic.chainTurn ?? '—'} · stream {batch.transportDiagnostic
+							.streamId ?? '—'} · 首事件 {batch.transportDiagnostic.firstEventMs ?? '—'} ms · 完成 {batch
+							.transportDiagnostic.completedMs ?? '—'} ms
+					</span>
+					{#if batch.transportDiagnostic.fallbackError}
+						<code>WebSocket 发送前失败：{batch.transportDiagnostic.fallbackError}</code>
+					{/if}
 				{/if}
 				<code>{batch.error}</code>
 			</details>
@@ -1085,6 +1140,22 @@
 		background: #101714;
 		color: #9eaaa4;
 		font-size: 12px;
+	}
+	.transport-observability {
+		margin: 0 0 10px;
+		padding: 8px 10px;
+		border: 1px solid #26342e;
+		border-radius: 8px;
+		color: #aabbb4;
+		font-size: 11px;
+	}
+	.transport-observability summary {
+		cursor: pointer;
+	}
+	.transport-observability div {
+		display: grid;
+		gap: 3px;
+		margin-top: 7px;
 	}
 	.column-head {
 		margin-top: 12px;

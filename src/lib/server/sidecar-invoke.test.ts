@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SidecarInvokeRequest, SidecarInvokeResult } from '../sidecar/types';
 import { invokeSidecar } from './sidecar-invoke';
+import {
+	type RevisionResponsesTransport,
+	WebSocketBeforeSendError,
+	WebSocketOutcomeUnknownError
+} from './responses-websocket';
 
 const API_KEY = 'server-only-sidecar-key';
 const NOW = '2026-09-01T12:00:00.000Z';
@@ -51,9 +56,157 @@ function jsonResponse(body: unknown, status = 200, requestId?: string): Response
 	});
 }
 
+function pairRequestBody(): unknown {
+	return {
+		clientRequestId: 'pair-websocket-request',
+		intent: {
+			kind: 'revise-pairs',
+			trigger: 'periodic',
+			targetLanguage: 'zh',
+			atoms: [{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' }],
+			continuity: [],
+			previousDraft: [],
+			oversizedGroupNumbers: [],
+			previousInvalidAtomRanges: []
+		},
+		context: {
+			threadId: 'thread-1',
+			scope: 'latest-run',
+			capturedAt: NOW,
+			runs: [
+				{
+					runId: 'run-1',
+					sequence: 1,
+					targetLanguage: 'zh',
+					sourceText: 'First sentence.',
+					translationText: ''
+				}
+			]
+		}
+	};
+}
+
+function completedPairBody(id = 'resp-ws-1'): Record<string, unknown> {
+	return {
+		id,
+		model: 'gpt-5.6-luna',
+		status: 'completed',
+		output_text: JSON.stringify({
+			groups: [
+				{
+					firstAtom: 1,
+					lastAtom: 1,
+					revisedSourceText: 'First sentence.',
+					translatedText: '第一句。',
+					paragraphBreakBefore: false
+				}
+			]
+		}),
+		usage: { input_tokens: 40, output_tokens: 10, total_tokens: 50 }
+	};
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe('invokeSidecar', () => {
+	it('uses the revision WebSocket transport without issuing an HTTP generation request', async () => {
+		const fetcher = vi.fn();
+		const transport: RevisionResponsesTransport = {
+			invoke: vi.fn(async () => ({
+				ok: true,
+				status: 200,
+				body: completedPairBody(),
+				rawBody: JSON.stringify(completedPairBody()),
+				requestId: 'ws-request-1',
+				transportDiagnostic: {
+					transport: 'websocket' as const,
+					chainAction: 'bootstrap' as const,
+					streamId: 'revision.1.1',
+					chainTurn: 1,
+					chainAgeMs: 0,
+					firstEventMs: 12,
+					completedMs: 80
+				}
+			})),
+			invalidate: vi.fn()
+		};
+		const response = await invokeSidecar({
+			request: rawRequest(pairRequestBody()),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW,
+			revisionResponsesTransport: transport
+		});
+
+		expect(fetcher).not.toHaveBeenCalled();
+		expect(transport.invoke).toHaveBeenCalledTimes(1);
+		expect(await result(response)).toMatchObject({
+			status: 'completed',
+			transportDiagnostic: { transport: 'websocket', chainAction: 'bootstrap' }
+		});
+	});
+
+	it('uses HTTP only when WebSocket fails before sending a frame', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const fetcher = vi.fn(async () => jsonResponse(completedPairBody(), 200, 'http-fallback-1'));
+		const transport: RevisionResponsesTransport = {
+			invoke: vi.fn(async () => {
+				throw new WebSocketBeforeSendError('handshake failed');
+			}),
+			invalidate: vi.fn()
+		};
+		const response = await invokeSidecar({
+			request: rawRequest(pairRequestBody()),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW,
+			revisionResponsesTransport: transport
+		});
+
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		expect(await result(response)).toMatchObject({
+			status: 'completed',
+			transportDiagnostic: {
+				transport: 'http-fallback',
+				fallbackError: expect.stringContaining('handshake failed')
+			}
+		});
+	});
+
+	it('does not retry HTTP when a sent WebSocket request has an unknown outcome', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const fetcher = vi.fn();
+		const diagnostic = {
+			transport: 'websocket' as const,
+			chainAction: 'continued' as const,
+			streamId: 'revision.1.1',
+			chainTurn: 2,
+			chainAgeMs: 2_000,
+			firstEventMs: null,
+			completedMs: 60_000
+		};
+		const transport: RevisionResponsesTransport = {
+			invoke: vi.fn(async () => {
+				throw new WebSocketOutcomeUnknownError('socket closed', diagnostic);
+			}),
+			invalidate: vi.fn()
+		};
+		const response = await invokeSidecar({
+			request: rawRequest(pairRequestBody()),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW,
+			revisionResponsesTransport: transport
+		});
+
+		expect(fetcher).not.toHaveBeenCalled();
+		expect(await result(response)).toMatchObject({
+			status: 'failed',
+			error: { code: 'websocket-outcome-unknown' },
+			transportDiagnostic: diagnostic
+		});
+	});
+
 	it('generates and validates revision pairs with one bounded Responses call', async () => {
 		const fetcher = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
 			async () =>
@@ -476,6 +629,16 @@ describe('invokeSidecar', () => {
 				outputTokens: 8,
 				reasoningTokens: 2,
 				totalTokens: 50
+			},
+			transportDiagnostic: {
+				transport: 'http',
+				chainAction: 'none',
+				streamId: null,
+				chainTurn: null,
+				chainAgeMs: null,
+				firstEventMs: null,
+				completedMs: expect.any(Number),
+				fallbackError: null
 			},
 			completedAt: NOW
 		});

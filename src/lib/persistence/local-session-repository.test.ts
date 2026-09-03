@@ -86,6 +86,15 @@ function createRevisionBatch(overrides: Partial<StoredRevisionBatch> = {}): Stor
 		errorCode: null,
 		error: null,
 		diagnostic: null,
+		transportDiagnostic: {
+			transport: 'websocket',
+			chainAction: 'continued',
+			streamId: 'revision.1.1',
+			chainTurn: 2,
+			chainAgeMs: 3_000,
+			firstEventMs: 120,
+			completedMs: 1_900
+		},
 		updatedAt: CHECKPOINT,
 		...overrides
 	};

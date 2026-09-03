@@ -2,7 +2,8 @@ import type {
 	ModelUsage,
 	ModelUsageStatus,
 	SidecarErrorCode,
-	SidecarFailureDiagnostic
+	SidecarFailureDiagnostic,
+	SidecarTransportDiagnostic
 } from '../sidecar/types';
 
 export type RevisionBatchStatus = 'completed' | 'failed';
@@ -33,6 +34,7 @@ export interface StoredRevisionBatch {
 	errorCode: SidecarErrorCode | null;
 	error: string | null;
 	diagnostic: SidecarFailureDiagnostic | null;
+	transportDiagnostic?: SidecarTransportDiagnostic | null;
 	updatedAt: string;
 }
 

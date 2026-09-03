@@ -57,9 +57,12 @@ corepack pnpm dev
 ```dotenv
 OPENAI_API_KEY=sk-...
 BODY_SIZE_LIMIT=2M
+VOXBRAID_RESPONSES_WEBSOCKET=true
 VOXBRAID_BASIC_AUTH_USERNAME=your-name
 VOXBRAID_BASIC_AUTH_PASSWORD=use-a-long-random-password
 ```
+
+修订对照默认使用 Responses WebSocket 短链；若线上出现连接级故障，可把 `VOXBRAID_RESPONSES_WEBSOCKET` 设为 `false`，临时切回 HTTP 并保留完整错误诊断。
 
 若需要在页面显示 OpenAI 组织近 1 天、7 天和 30 天官方消费，再配置只读的 `OPENAI_ADMIN_KEY`。所有环境变量只写入 Railway Variables，不进入 Git 仓库。生产运行时强制要求完整的 Basic Auth 用户名和密码；除公开的 `/api/health` 健康检查外，网页和 API 共用同一层保护。浏览器通过 HTTPS 访问时会显示系统登录框。
 

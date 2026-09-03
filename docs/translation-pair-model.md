@@ -206,7 +206,61 @@ archive v3 继续导出事实和当前投影。v1/v2 导入只恢复仍满足当
 
 每个 batch 保存真实 usage。真实课程应观测：每小时请求数、首稿延迟、冻结延迟、平均输入/输出 token、边界纠正率、软行长 forced 接受率、失败率和相邻草稿编辑距离。240 字、1.2 秒、4 秒、800/1,600 字都是可调起点，不是对三小时课程效果的先验保证。
 
-## 七、验证范围
+## 七、Responses WebSocket 短链
+
+修订任务把 Node 到 OpenAI 的传输升级为 Responses API WebSocket；浏览器到 Node 仍使用一次一批的 HTTP POST。浏览器只有在整批结构化输出通过服务端和本地校验后才替换修订区，因此向浏览器透传 token delta 没有展示价值。
+
+WebSocket 是传输与短期上下文缓存，不是新的事实来源：
+
+- 浏览器每轮仍提交完整原子、previousDraft、衔接和 raw 事实切片；Node/Railway 重启或连接丢失时，可以从这一份快照无损重建；
+- `instructions` 不会沿 `previous_response_id` 自动继承，每轮必须完整重发；
+- 只有 bootstrap / rebuilt 发送冻结衔接与 previousDraft 的完整快照；命中短链的 continued 请求只发送原子尾部增量与当前布局，不重复携带链内已有的两份派生文本；
+- 链上历史即使通过 `previous_response_id` 复用仍按输入 token 计费，命中缓存只影响缓存价格和 prefill，因此换链同时是成本上限；
+- `store: false` 保持不变，链状态只存在于 OpenAI 当前连接缓存和 VoxBraid 当前 Node 进程内存，不能冒充持久化会话。
+
+明确不实现 `generate: false` 预热。它只可能减少每条短链第一轮的一小段 prefill，却会额外产生真实请求、占用 stream，并把开始收音、目标语言、任务版本、连接轮换和失败恢复绑到一个严格时机；五分钟短链下收益不足以抵消这些状态与费用。第一轮直接用完整快照 bootstrap，后续轮次才使用链内增量。
+
+### 7.1 尾部替换协议
+
+浏览器使用绝对 raw 坐标提交完整当前快照；Node 保存上一次已发送的原子快照并找出第一个变化位置。续链输入不是简单追加，而是：
+
+```ts
+interface RevisionChainDelta {
+	replaceFrom: string | null; // 从这个稳定 atom id 起，旧链内尾部作废；纯追加为 null
+	atoms: Array<{ id: string; i: number; t: string; boundary: SourceAtomBoundary }>;
+	openRange: { firstAtomId: string; lastAtomId: string; firstAtom: number; lastAtom: number };
+	currentLayout: Array<{ id: string; i: number }>;
+}
+```
+
+稳定 atom id 由 run id 与绝对 `start` 组成；请求内 `i` 仍从 1 开始，只服务于本轮输出校验。`3,` 增长为 `3,000`、末尾 open 原子变长或标点导致尾部重切时，Node 从首个变化 atom 起替换，不让旧尾巴和新尾巴同时留在模型上下文。若当前快照无法和链内快照形成可信的连续重叠，直接开新链并发送完整快照，不猜测修补。
+
+### 7.2 链生命周期
+
+每个 `threadId + runId + targetLanguage + taskVersion + tokenizerVersion` 对应一个短链和一个具名 `stream_id`。以下任一条件触发新链：
+
+- 链已存在约 5 分钟；
+- 已成功完成 50 次修订；
+- 从链起点算起已冻结超过约 3,000 个原文字符；
+- 连接接近 60 分钟上限、Railway 进程重启、连接级错误或应用级输出校验失败；
+- 当前完整快照无法与上次原子快照安全求差。
+
+换链时直接复用现有显式输入：冻结衔接、当前开放窗口和 previousDraft。连接可以承载多个 run 的 lane；同一 lane 仍保持 FIFO 和单在飞，页面级车道规则不变。连接在接近官方 60 分钟上限或接近具名 stream 数上限前主动轮换。
+
+### 7.3 失败与回退
+
+- WebSocket 在发送 `response.create` 之前连接失败，可以回退到现有 HTTP Responses 调用；此时不存在重复计费的不确定性；
+- 一旦请求帧已发送，断线、超时或无法确认终态时不得自动再发 HTTP，返回 `websocket-outcome-unknown`，保留已等待时间、stream、链轮次和原始连接错误；
+- 官方协议没有单响应取消消息；某一请求超时后必须终止整条 socket，连接上的其他 lane 也成为结果未知并从浏览器完整快照重建。服务端以 `request-timeout`、`keepalive-timeout`、`socket-error`、`socket-close` 等结构化 reason 记录连接重置，观测时按 reason 分桶；
+- `previous_response_not_found` 是确定的请求级失败：清掉该链，用浏览器完整快照重建一次；第二次仍失败则原样返回，不继续重试；
+- OpenAI 4xx/5xx、非 completed 终态或应用级结构化校验失败都会让当前链失效；后续新 raw 从完整快照开新链；
+- HTTP 回退不是静默兜底：结果和服务端日志必须标明实际 transport、链动作与完整延迟。
+
+修订 batch 在诊断信息中记录 `transport`、`chainAction`、`streamId`、`chainTurn`、`chainAgeMs`、首事件与完整终态耗时。诊断模式从当前 thread 的持久化 batch 聚合链命中率、bootstrap/rebuilt/HTTP 回退次数、完整结果平均耗时、按链轮次分桶的平均输入 token、缓存 token 与耗时，以及失败错误码；不要求连接 Railway 日志才能做第一轮判断。上线对照只看浏览器真正能消费的完整结构化结果延迟，并按链长分桶观察输入 token、缓存 token 和每小时成本；“约 1 秒”或“40%”都不是本功能的先验保证。
+
+WebSocket 默认开启且只影响 `revise-pairs`；课堂清稿、自由问答和手动重译继续使用 HTTP。服务端环境变量 `VOXBRAID_RESPONSES_WEBSOCKET=false` 是连接故障时的紧急关闭开关，不承担灰度或实验分流职责。真实课堂仍要按链长分桶观察完整结果延迟、失败率和每小时成本；观测结果用于调整链周期与阈值，而不是阻塞迁移。
+
+## 八、验证范围
 
 本地验证覆盖：
 
@@ -220,4 +274,4 @@ archive v3 继续导出事实和当前投影。v1/v2 导入只恢复仍满足当
 - frozen 前缀稳定、收尾本地冻结、失败审计和同窗口不重复付费；
 - 刷新恢复、长积压追赶和跨 thread 请求归属。
 
-协议字段从 v3 的词 token `lastTokenIndex/lastTokenText` 改为 v4 的子句原子 `firstAtom/lastAtom`。下一步应运行一次 opt-in Luna 冒烟，再用真实课堂持续观察协议校验失败率与阅读分组；只有真实数据能决定是否继续调整标点与频率阈值。
+协议字段从 v3 的词 token `lastTokenIndex/lastTokenText` 改为 v4 的子句原子 `firstAtom/lastAtom`。本地验证已经覆盖：纯追加、open 原子增长、尾部重切、冻结前缀退出开放窗、三种换链条件、连接前失败走 HTTP、发送后断线不重发、`previous_response_not_found` 只重建一次，以及不同 `stream_id` 事件交错时不串批；付费 Luna 探针也已验证 bootstrap 与 continued 两轮真实请求。上线后继续用真实课堂观察协议校验失败率、阅读分组、链长成本和完整结果延迟，再据此调整标点与频率阈值。

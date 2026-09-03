@@ -95,6 +95,15 @@ describe('sidecar task preparation', () => {
 		expect(prepared.instructions).toContain('firstAtom');
 		expect(prepared.instructions).toContain('Never restart numbering');
 		expect(prepared.instructions).toContain('Protocol example');
+		expect(prepared.instructions).toContain('currentLayout');
+		expect(prepared.revisionChainContext).toMatchObject({
+			threadId: 'thread-1',
+			runId: 'run-1',
+			targetLanguage: 'zh',
+			openStart: 0,
+			tokenizerVersion: 2
+		});
+		expect(prepared.revisionChainContext?.chainKey).toBe('["thread-1","run-1","zh",4,2]');
 	});
 
 	it('shows the model only request-local atom coordinates for previous drafts', () => {

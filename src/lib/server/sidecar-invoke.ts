@@ -1,4 +1,9 @@
-import type { ModelUsage, SidecarErrorCode, SidecarInvokeResult } from '../sidecar/types';
+import type {
+	ModelUsage,
+	SidecarErrorCode,
+	SidecarInvokeResult,
+	SidecarTransportDiagnostic
+} from '../sidecar/types';
 import { errorDetails } from '../error-details';
 import {
 	parseRevisionModelOutput,
@@ -12,6 +17,12 @@ import {
 	SidecarRequestValidationError,
 	type PreparedSidecarCall
 } from './sidecar-tasks';
+import {
+	type ResponsesTransportResult,
+	type RevisionResponsesTransport,
+	WebSocketBeforeSendError,
+	WebSocketOutcomeUnknownError
+} from './responses-websocket';
 
 const INPUT_TOKENS_URL = 'https://api.openai.com/v1/responses/input_tokens';
 const RESPONSES_URL = 'https://api.openai.com/v1/responses';
@@ -26,6 +37,7 @@ interface InvokeSidecarOptions {
 	apiKey: string;
 	now?: () => string;
 	timeoutMs?: number;
+	revisionResponsesTransport?: RevisionResponsesTransport | null;
 }
 
 function noStoreHeaders(): HeadersInit {
@@ -108,6 +120,7 @@ function failure(
 		outputText?: string | null;
 		upstreamStatus?: UpstreamTerminalStatus | null;
 		usage?: ModelUsage | null;
+		transportDiagnostic?: SidecarTransportDiagnostic | null;
 	} = {}
 ): SidecarInvokeResult {
 	const usage = options.usage ?? null;
@@ -120,9 +133,28 @@ function failure(
 		upstreamStatus: options.upstreamStatus ?? null,
 		usageStatus: usage ? 'recorded' : 'unavailable',
 		usage,
+		transportDiagnostic: options.transportDiagnostic ?? null,
 		diagnostic: null,
 		error: { code, message },
 		failedAt: now()
+	};
+}
+
+function httpTransportDiagnostic(
+	transport: 'http' | 'http-fallback',
+	startedAtMs: number,
+	completedAtMs: number,
+	fallbackError: string | null
+): SidecarTransportDiagnostic {
+	return {
+		transport,
+		chainAction: 'none',
+		streamId: null,
+		chainTurn: null,
+		chainAgeMs: null,
+		firstEventMs: null,
+		completedMs: completedAtMs - startedAtMs,
+		fallbackError
 	};
 }
 
@@ -223,7 +255,8 @@ export async function invokeSidecar({
 	fetcher,
 	apiKey,
 	now = () => new Date().toISOString(),
-	timeoutMs = SIDECAR_REQUEST_TIMEOUT_MS
+	timeoutMs = SIDECAR_REQUEST_TIMEOUT_MS,
+	revisionResponsesTransport = null
 }: InvokeSidecarOptions): Promise<Response> {
 	const rawBody: unknown = await request.json().catch(() => null);
 	const clientRequestId = clientRequestIdFrom(rawBody);
@@ -325,22 +358,82 @@ export async function invokeSidecar({
 		}
 	}
 
-	let upstream: Response;
+	const generationBody = {
+		...responseBody(prepared),
+		max_output_tokens: prepared.maxOutputTokens,
+		store: false,
+		stream: false,
+		...(prepared.reasoningEffort ? { reasoning: { effort: prepared.reasoningEffort } } : {}),
+		...(prepared.structuredOutput === 'revision-pairs'
+			? { text: { format: REVISION_OUTPUT_SCHEMA } }
+			: {})
+	};
+	let upstreamResult: ResponsesTransportResult;
+	let transport: 'http' | 'http-fallback' = 'http';
+	let webSocketBeforeSendDetails: string | null = null;
+	const invokeHttp = async (): Promise<ResponsesTransportResult> => {
+		const startedAtMs = Date.now();
+		const response = await upstreamFetch(RESPONSES_URL, generationBody, {
+			fetcher,
+			apiKey,
+			timeoutMs
+		});
+		const result = await readUpstreamBody(response);
+		return {
+			ok: response.ok,
+			status: response.status,
+			body: result.parsed,
+			rawBody: result.raw,
+			requestId: requestId(response),
+			transportDiagnostic: httpTransportDiagnostic(
+				transport,
+				startedAtMs,
+				Date.now(),
+				webSocketBeforeSendDetails
+			)
+		};
+	};
+
 	try {
-		upstream = await upstreamFetch(
-			RESPONSES_URL,
-			{
-				...responseBody(prepared),
-				max_output_tokens: prepared.maxOutputTokens,
-				store: false,
-				stream: false,
-				...(prepared.reasoningEffort ? { reasoning: { effort: prepared.reasoningEffort } } : {}),
-				...(prepared.structuredOutput === 'revision-pairs'
-					? { text: { format: REVISION_OUTPUT_SCHEMA } }
-					: {})
-			},
-			{ fetcher, apiKey, timeoutMs }
-		);
+		if (revisionResponsesTransport && prepared.kind === 'revise-pairs') {
+			try {
+				upstreamResult = await revisionResponsesTransport.invoke({
+					prepared,
+					body: generationBody,
+					apiKey,
+					timeoutMs
+				});
+			} catch (error) {
+				if (error instanceof WebSocketOutcomeUnknownError) {
+					const details = errorDetails(error);
+					console.error('[sidecar] websocket outcome unknown', {
+						clientRequestId: prepared.clientRequestId,
+						transport: error.diagnostic,
+						error: details
+					});
+					return json(
+						failure(
+							prepared.clientRequestId,
+							now,
+							'websocket-outcome-unknown',
+							`Responses WebSocket 请求已发出，但没有收到可确认的终态；为避免重复计费，本次不会自动改走 HTTP。原始错误：\n${details}`,
+							{ model: prepared.model, transportDiagnostic: error.diagnostic }
+						),
+						{ status: 502, headers: noStoreHeaders() }
+					);
+				}
+				if (!(error instanceof WebSocketBeforeSendError)) throw error;
+				transport = 'http-fallback';
+				webSocketBeforeSendDetails = errorDetails(error);
+				console.error('[sidecar] websocket failed before send; using HTTP', {
+					clientRequestId: prepared.clientRequestId,
+					error: webSocketBeforeSendDetails
+				});
+				upstreamResult = await invokeHttp();
+			}
+		} else {
+			upstreamResult = await invokeHttp();
+		}
 	} catch (error) {
 		const timedOut = error instanceof Error && error.name === 'AbortError';
 		const details = errorDetails(error);
@@ -354,25 +447,26 @@ export async function invokeSidecar({
 				now,
 				timedOut ? 'request-timeout' : 'upstream-failed',
 				timedOut
-					? `模型调用在 ${timeoutMs} ms 后超时；上游可能已经产生费用。原始错误：\n${details}`
-					: `模型调用失败。原始错误：\n${details}`,
+					? `模型调用在 ${timeoutMs} ms 后超时；上游可能已经产生费用。${webSocketBeforeSendDetails ? `此前 WebSocket 在发送前失败并转用 HTTP：\n${webSocketBeforeSendDetails}\n` : ''}原始错误：\n${details}`
+					: `模型调用失败。${webSocketBeforeSendDetails ? `此前 WebSocket 在发送前失败并转用 HTTP：\n${webSocketBeforeSendDetails}\n` : ''}原始错误：\n${details}`,
 				{ model: prepared.model }
 			),
 			{ status: timedOut ? 504 : 502, headers: noStoreHeaders() }
 		);
 	}
 
-	const upstreamRequestId = requestId(upstream);
-	const upstreamResult = await readUpstreamBody(upstream);
-	const body = upstreamResult.parsed;
-	if (!upstream.ok || !isRecord(body)) {
+	const upstreamRequestId = upstreamResult.requestId;
+	const body = upstreamResult.body;
+	if (!upstreamResult.ok || !isRecord(body)) {
+		revisionResponsesTransport?.invalidate(prepared);
 		const upstreamDetails = upstreamErrorDetails(body);
-		const rawUpstream = boundedResponseBody(upstreamResult.raw);
+		const rawUpstream = boundedResponseBody(upstreamResult.rawBody);
 		console.error('[sidecar] response rejected', {
 			clientRequestId: prepared.clientRequestId,
-			status: upstream.status,
+			status: upstreamResult.status,
 			requestId: upstreamRequestId,
 			code: stringField(isRecord(body) ? body.error : null, 'code'),
+			transport: upstreamResult.transportDiagnostic,
 			body: rawUpstream
 		});
 		return json(
@@ -380,8 +474,11 @@ export async function invokeSidecar({
 				prepared.clientRequestId,
 				now,
 				'upstream-failed',
-				`OpenAI 模型调用失败（HTTP ${upstream.status}${requestIdSuffix(upstreamRequestId)}）${upstreamDetails ? `：${upstreamDetails}` : '。'}\n原始响应：\n${rawUpstream}`,
-				{ model: prepared.model }
+				`OpenAI 模型调用失败（${upstreamResult.transportDiagnostic.transport === 'websocket' ? 'WebSocket 请求级错误' : `HTTP ${upstreamResult.status}`}${requestIdSuffix(upstreamRequestId)}）${upstreamDetails ? `：${upstreamDetails}` : '。'}\n原始响应：\n${rawUpstream}`,
+				{
+					model: prepared.model,
+					transportDiagnostic: upstreamResult.transportDiagnostic
+				}
 			),
 			{ status: 502, headers: noStoreHeaders() }
 		);
@@ -409,6 +506,7 @@ export async function invokeSidecar({
 				);
 				outputText = JSON.stringify(parsedRevision.output);
 			} catch (error) {
+				revisionResponsesTransport?.invalidate(prepared);
 				const details = errorDetails(error);
 				const errorCode: SidecarErrorCode =
 					error instanceof RevisionBoundaryError ? 'invalid-revision-boundary' : 'invalid-response';
@@ -425,7 +523,13 @@ export async function invokeSidecar({
 						now,
 						errorCode,
 						`OpenAI 修订对照输出没有通过原子覆盖校验${requestIdSuffix(upstreamRequestId)}。\n原始错误：\n${details}\n原始模型输出：\n${boundedResponseBody(outputText)}`,
-						{ responseId, model, outputText: outputText || null, usage }
+						{
+							responseId,
+							model,
+							outputText: outputText || null,
+							usage,
+							transportDiagnostic: upstreamResult.transportDiagnostic
+						}
 					),
 					{ status: 502, headers: noStoreHeaders() }
 				);
@@ -435,7 +539,8 @@ export async function invokeSidecar({
 			clientRequestId: prepared.clientRequestId,
 			responseId,
 			requestId: upstreamRequestId,
-			model
+			model,
+			transport: upstreamResult.transportDiagnostic
 		});
 		const result: SidecarInvokeResult = {
 			status: 'completed',
@@ -445,6 +550,7 @@ export async function invokeSidecar({
 			outputText,
 			usageStatus: usage ? 'recorded' : 'unavailable',
 			usage,
+			transportDiagnostic: upstreamResult.transportDiagnostic,
 			completedAt: now()
 		};
 		return json(result, { headers: noStoreHeaders() });
@@ -452,12 +558,14 @@ export async function invokeSidecar({
 
 	const status = terminalStatus(body.status);
 	const reason = incompleteReason(body);
-	const terminalBody = boundedResponseBody(upstreamResult.raw);
+	revisionResponsesTransport?.invalidate(prepared);
+	const terminalBody = boundedResponseBody(upstreamResult.rawBody);
 	console.error('[sidecar] response reached a non-completed terminal state', {
 		clientRequestId: prepared.clientRequestId,
 		status: body.status,
 		reason,
 		requestId: upstreamRequestId,
+		transport: upstreamResult.transportDiagnostic,
 		body: terminalBody
 	});
 	return json(
@@ -471,7 +579,8 @@ export async function invokeSidecar({
 				model,
 				outputText: outputText || null,
 				upstreamStatus: status,
-				usage
+				usage,
+				transportDiagnostic: upstreamResult.transportDiagnostic
 			}
 		),
 		{ status: 502, headers: noStoreHeaders() }

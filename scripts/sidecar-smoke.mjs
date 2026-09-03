@@ -55,6 +55,19 @@ try {
 			boundary: atom.boundary
 		})
 	);
+	const revisionSourceContinued = `${revisionSource} This final clause arrives later, and it confirms that the same WebSocket chain can replace or append the live tail.`;
+	const revisionAtomsContinued = sourceClauseAtoms(
+		revisionSourceContinued,
+		0,
+		revisionSourceContinued.length,
+		'en'
+	).map((atom) => ({
+		i: atom.index,
+		start: atom.start,
+		end: atom.end,
+		t: atom.text,
+		boundary: atom.boundary
+	}));
 	assert.equal(revisionAtoms.map((atom) => atom.t).join(''), revisionSource);
 	assert.ok(revisionAtoms.some((atom) => atom.boundary === 'forced'));
 	assert.ok(revisionAtoms.some((atom) => atom.t.includes('3,000')));
@@ -92,10 +105,25 @@ try {
 				oversizedGroupNumbers: [],
 				previousInvalidAtomRanges: []
 			}
+		},
+		{
+			kind: 'revise-pairs-continued',
+			expectedModel: 'gpt-5.6-luna',
+			intent: {
+				kind: 'revise-pairs',
+				trigger: 'manual',
+				targetLanguage: 'zh',
+				atoms: revisionAtomsContinued,
+				continuity: [],
+				previousDraft: [],
+				oversizedGroupNumbers: [],
+				previousInvalidAtomRanges: []
+			}
 		}
 	];
 
 	for (const testCase of cases) {
+		const revisionCase = testCase.intent.kind === 'revise-pairs';
 		const response = await fetch(endpoint, {
 			method: 'POST',
 			headers: {
@@ -114,10 +142,9 @@ try {
 							runId: 'paid-smoke-run',
 							sequence: 1,
 							targetLanguage: 'zh',
-							sourceText:
-								testCase.kind === 'revise-pairs'
-									? testCase.intent.atoms.map((atom) => atom.t).join('')
-									: 'The speaker visited a public park, walked beside a lake, and took the train home after lunch.',
+							sourceText: revisionCase
+								? testCase.intent.atoms.map((atom) => atom.t).join('')
+								: 'The speaker visited a public park, walked beside a lake, and took the train home after lunch.',
 							translationText: '讲者去了公园，在湖边散步，午饭后乘火车回家。'
 						}
 					]
@@ -134,7 +161,7 @@ try {
 		assert.equal(typeof body.responseId, 'string');
 		assert.equal(body.model, testCase.expectedModel);
 		assert.ok(body.outputText?.trim(), `${testCase.kind} 没有返回文本。`);
-		if (testCase.kind === 'revise-pairs') {
+		if (revisionCase) {
 			const output = JSON.parse(body.outputText);
 			assert.ok(output.groups.length >= 2, 'revise-pairs 应识别明确的话题切换。');
 			assert.ok(
@@ -147,6 +174,11 @@ try {
 			assert.equal(output.groups[0]?.firstAtom, 1);
 			assert.equal(output.groups.at(-1)?.lastAtom, testCase.intent.atoms.length);
 			assert.ok(output.groups.every((group) => group.revisedSourceText?.trim()));
+			assert.equal(body.transportDiagnostic?.transport, 'websocket');
+			assert.equal(
+				body.transportDiagnostic?.chainAction,
+				testCase.kind === 'revise-pairs' ? 'bootstrap' : 'continued'
+			);
 		}
 		assert.ok(
 			(body.usageStatus === 'recorded' && body.usage?.totalTokens >= 0) ||
@@ -155,7 +187,7 @@ try {
 		);
 		if (process.env.SIDECAR_TEST_VERBOSE === '1') console.log(body.outputText.trim());
 		console.log(
-			`[sidecar-smoke] passed ${testCase.kind}: ${body.model}, ${body.usage?.totalTokens ?? 'usage unavailable'} total tokens`
+			`[sidecar-smoke] passed ${testCase.kind}: ${body.model}, ${body.usage?.totalTokens ?? 'usage unavailable'} total tokens, ${body.usage?.cachedInputTokens ?? 'cached unavailable'} cached input, ${body.transportDiagnostic?.transport ?? 'transport unavailable'}/${body.transportDiagnostic?.chainAction ?? 'n/a'}, ${body.transportDiagnostic?.completedMs ?? 'latency unavailable'} ms`
 		);
 	}
 } finally {

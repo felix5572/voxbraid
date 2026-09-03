@@ -14,7 +14,8 @@ import {
 	REVISION_MAX_CONTINUITY_CHARACTERS,
 	REVISION_MAX_OPEN_SOURCE_CHARACTERS,
 	REVISION_MAX_PREPARED_INPUT_BYTES,
-	REVISION_TASK_VERSION
+	REVISION_TASK_VERSION,
+	REVISION_TOKENIZER_VERSION
 } from '../projection/revision-constants';
 import { sourceClauseAtoms } from '../projection/revision-projection';
 import { CLEAN_TRANSCRIPT_TASK_VERSION } from '../sidecar/clean-transcript';
@@ -57,6 +58,26 @@ export interface PreparedSidecarCall {
 	reasoningEffort: 'none' | null;
 	structuredOutput: 'revision-pairs' | null;
 	revisionAtoms: readonly SidecarRevisionAtom[];
+	revisionChainContext: PreparedRevisionChainContext | null;
+}
+
+export interface PreparedRevisionChainContext {
+	chainKey: string;
+	threadId: string;
+	runId: string;
+	targetLanguage: string;
+	openStart: number;
+	tokenizerVersion: number;
+	atoms: readonly SidecarRevisionAtom[];
+	continuity: readonly SidecarRevisionContextSegment[];
+	previousDraft: readonly {
+		firstAtom: number;
+		lastAtom: number;
+		revisedSourceText: string;
+		translatedText: string;
+		paragraphBreakBefore: boolean;
+	}[];
+	taskParameters: Readonly<Record<string, unknown>>;
 }
 
 export class SidecarRequestValidationError extends Error {
@@ -113,7 +134,8 @@ const DEFINITIONS: Readonly<Record<SidecarTaskKind, SidecarTaskDefinition>> = Ob
 			'ASR punctuation supplies clause and sentence hints, not immutable prose. Prefer one readable sentence per group. Merge short fragments or obvious continuations when useful, and split a long sentence at a clause atom when that improves reading. Keep each group within the requested 240 raw-character preference. The translated text for each group must translate exactly that group. Do not summarize, omit substantive content, expand, or invent uncaptured speech.',
 			'Frozen continuity is reference-only and must not be output. Previous draft is a stability hint: without new evidence preserve its grouping and wording; with conflicting evidence the current raw atoms win. Mark paragraph breaks only at questions, responses, speaker turns, topic shifts, or distinct reasoning steps.',
 			'Boundary protocol: firstAtom and lastAtom copy the inclusive i range from currentAtoms. The first group starts at 1, every later firstAtom equals the prior lastAtom plus 1, and the final lastAtom equals the final input atom i. Never restart numbering after a paragraph or topic change.',
-			'Protocol example: currentAtoms 1(clause), 2(sentence), 3(clause), 4(sentence) can produce groups [{"firstAtom":1,"lastAtom":2},{"firstAtom":3,"lastAtom":4}].'
+			'Protocol example: currentAtoms 1(clause), 2(sentence), 3(clause), 4(sentence) can produce groups [{"firstAtom":1,"lastAtom":2},{"firstAtom":3,"lastAtom":4}].',
+			"On a continued WebSocket chain, revisionChainDelta replaces the prior atom state from replaceFrom onward, then appends the supplied atoms. currentLayout is the complete authoritative mapping from stable atom ids to this request's local i values; openRange identifies the complete current range. Discard invalidated tail atoms and return groups using only the currentLayout i values."
 		].join(' '),
 		model: SIDECAR_FAST_MODEL,
 		maxInputTokens: null,
@@ -464,6 +486,25 @@ export function prepareSidecarCall(request: SidecarInvokeRequest): PreparedSidec
 	}
 
 	const revisionIntent = request.intent.kind === 'revise-pairs' ? request.intent : null;
+	const preparedDraft = revisionIntent
+		? revisionIntent.previousDraft.map((draft) => {
+				const first = revisionIntent.atoms.find((atom) => atom.start === draft.sourceStart);
+				const last = revisionIntent.atoms.find((atom) => atom.end === draft.sourceEnd);
+				if (!first || !last || first.i > last.i) {
+					throw new SidecarRequestValidationError(
+						'invalid-request',
+						'修订对照 previousDraft 未对齐当前原子边界。'
+					);
+				}
+				return {
+					firstAtom: first.i,
+					lastAtom: last.i,
+					revisedSourceText: draft.revisedSourceText,
+					translatedText: draft.translatedText,
+					paragraphBreakBefore: draft.paragraphBreakBefore
+				};
+			})
+		: [];
 	const transcript = revisionIntent
 		? {
 				capturedAt: request.context.capturedAt,
@@ -473,23 +514,7 @@ export function prepareSidecarCall(request: SidecarInvokeRequest): PreparedSidec
 					boundary: atom.boundary
 				})),
 				frozenContinuity: revisionIntent.continuity,
-				previousDraft: revisionIntent.previousDraft.map((draft) => {
-					const first = revisionIntent.atoms.find((atom) => atom.start === draft.sourceStart);
-					const last = revisionIntent.atoms.find((atom) => atom.end === draft.sourceEnd);
-					if (!first || !last || first.i > last.i) {
-						throw new SidecarRequestValidationError(
-							'invalid-request',
-							'修订对照 previousDraft 未对齐当前原子边界。'
-						);
-					}
-					return {
-						firstAtom: first.i,
-						lastAtom: last.i,
-						revisedSourceText: draft.revisedSourceText,
-						translatedText: draft.translatedText,
-						paragraphBreakBefore: draft.paragraphBreakBefore
-					};
-				})
+				previousDraft: preparedDraft
 			}
 		: preparedTranscript(
 				request.context,
@@ -559,7 +584,7 @@ export function prepareSidecarCall(request: SidecarInvokeRequest): PreparedSidec
 		}
 	}
 
-	const taskInput =
+	const taskInput: Record<string, unknown> =
 		request.intent.kind === 'ask'
 			? {
 					outputLanguage: request.intent.outputLanguage,
@@ -606,7 +631,30 @@ export function prepareSidecarCall(request: SidecarInvokeRequest): PreparedSidec
 		revisionAtoms:
 			request.intent.kind === 'revise-pairs'
 				? Object.freeze(request.intent.atoms.map((atom) => Object.freeze({ ...atom })))
-				: Object.freeze([])
+				: Object.freeze([]),
+		revisionChainContext:
+			revisionIntent && request.context.runs[0]
+				? Object.freeze({
+						chainKey: JSON.stringify([
+							request.context.threadId,
+							request.context.runs[0].runId,
+							revisionIntent.targetLanguage,
+							definition.version,
+							REVISION_TOKENIZER_VERSION
+						]),
+						threadId: request.context.threadId,
+						runId: request.context.runs[0].runId,
+						targetLanguage: revisionIntent.targetLanguage,
+						openStart: revisionIntent.atoms[0].start,
+						tokenizerVersion: REVISION_TOKENIZER_VERSION,
+						atoms: Object.freeze(revisionIntent.atoms.map((atom) => Object.freeze({ ...atom }))),
+						continuity: Object.freeze(
+							revisionIntent.continuity.map((segment) => Object.freeze({ ...segment }))
+						),
+						previousDraft: Object.freeze(preparedDraft.map((draft) => Object.freeze({ ...draft }))),
+						taskParameters: Object.freeze({ ...taskInput })
+					})
+				: null
 	});
 }
 

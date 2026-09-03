@@ -14,7 +14,12 @@ import type {
 	StoredRevisionProjection
 } from '../projection/revision-records';
 import { REVISION_MAX_OPEN_SOURCE_CHARACTERS } from '../projection/revision-constants';
-import type { ModelUsage, SidecarErrorCode, SidecarFailureDiagnostic } from '../sidecar/types';
+import type {
+	ModelUsage,
+	SidecarErrorCode,
+	SidecarFailureDiagnostic,
+	SidecarTransportDiagnostic
+} from '../sidecar/types';
 
 export const SESSION_ARCHIVE_VERSION = 3 as const;
 
@@ -57,8 +62,10 @@ const SIDECAR_ERROR_CODES = new Set<SidecarErrorCode>([
 	'context-too-large',
 	'browser-network-failed',
 	'invalid-response',
+	'invalid-revision-boundary',
 	'budget-check-failed',
 	'request-timeout',
+	'websocket-outcome-unknown',
 	'upstream-failed',
 	'upstream-incomplete'
 ]);
@@ -153,6 +160,36 @@ function failureDiagnostic(value: unknown, label: string): SidecarFailureDiagnos
 	};
 }
 
+function transportDiagnostic(value: unknown, label: string): SidecarTransportDiagnostic | null {
+	if (value === undefined || value === null) return null;
+	const input = record(value, label);
+	const transport = string(input.transport, `${label}.transport`);
+	const chainAction = string(input.chainAction, `${label}.chainAction`);
+	if (transport !== 'http' && transport !== 'http-fallback' && transport !== 'websocket') {
+		throw new Error(`${label}.transport is invalid.`);
+	}
+	if (
+		chainAction !== 'none' &&
+		chainAction !== 'bootstrap' &&
+		chainAction !== 'continued' &&
+		chainAction !== 'rebuilt'
+	) {
+		throw new Error(`${label}.chainAction is invalid.`);
+	}
+	return {
+		transport,
+		chainAction,
+		streamId: nullableString(input.streamId, `${label}.streamId`),
+		chainTurn: nullableNonnegativeNumber(input.chainTurn, `${label}.chainTurn`),
+		chainAgeMs: nullableNonnegativeNumber(input.chainAgeMs, `${label}.chainAgeMs`),
+		firstEventMs: nullableNonnegativeNumber(input.firstEventMs, `${label}.firstEventMs`),
+		completedMs: nullableNonnegativeNumber(input.completedMs, `${label}.completedMs`),
+		...(input.fallbackError === undefined
+			? {}
+			: { fallbackError: nullableString(input.fallbackError, `${label}.fallbackError`) })
+	};
+}
+
 function upstreamStatus(
 	value: unknown,
 	label: string
@@ -212,6 +249,14 @@ function revisionBatch(value: unknown, index: number): StoredRevisionBatch {
 		errorCode: sidecarErrorCode(input.errorCode, `${label}.errorCode`),
 		error: nullableString(input.error, `${label}.error`),
 		diagnostic: failureDiagnostic(input.diagnostic, `${label}.diagnostic`),
+		...(input.transportDiagnostic === undefined
+			? {}
+			: {
+					transportDiagnostic: transportDiagnostic(
+						input.transportDiagnostic,
+						`${label}.transportDiagnostic`
+					)
+				}),
 		updatedAt: timestamp(input.updatedAt, `${label}.updatedAt`)
 	};
 }

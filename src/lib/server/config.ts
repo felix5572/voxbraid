@@ -9,6 +9,9 @@ function requireEnvironmentVariable(name: string, value: string | undefined): st
 
 export const serverConfig = Object.freeze({
 	openaiApiKey: requireEnvironmentVariable('OPENAI_API_KEY', env.OPENAI_API_KEY),
+	responsesWebSocketEnabled:
+		env.VOXBRAID_RESPONSES_WEBSOCKET?.trim().toLowerCase() !== 'false' &&
+		env.VOXBRAID_RESPONSES_WEBSOCKET?.trim() !== '0',
 	basicAuth: readBasicAuthCredentials(
 		env.VOXBRAID_BASIC_AUTH_USERNAME,
 		env.VOXBRAID_BASIC_AUTH_PASSWORD
