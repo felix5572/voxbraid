@@ -1460,8 +1460,7 @@
 		border-top: 0;
 	}
 	.pair-row.paragraph-break {
-		margin-top: 3px;
-		border-top-color: #3a4942;
+		border-top-color: #27312d;
 	}
 	.revision-row.recently-changed {
 		animation: revision-changed 9s ease-out;
