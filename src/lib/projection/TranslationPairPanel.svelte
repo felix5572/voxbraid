@@ -1329,11 +1329,11 @@
 		border-top-color: #3a4942;
 	}
 	.revision-row.recently-changed {
-		animation: revision-changed 1.8s ease-out;
+		animation: revision-changed 9s ease-out;
 	}
 	@keyframes revision-changed {
 		from {
-			background: rgb(114 179 158 / 15%);
+			background: rgb(114 179 158 / 10%);
 		}
 		to {
 			background: transparent;
