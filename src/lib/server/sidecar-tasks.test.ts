@@ -92,7 +92,7 @@ describe('sidecar task preparation', () => {
 		expect(prepared).toMatchObject({
 			kind: 'revise-pairs',
 			model: 'gpt-5.6-luna',
-			taskVersion: 4,
+			taskVersion: 5,
 			inputTokenPreflight: 'skip-bounded',
 			maxPreparedInputBytes: 64_000,
 			reasoningEffort: 'none',
@@ -108,6 +108,9 @@ describe('sidecar task preparation', () => {
 		expect(prepared.instructions).toContain('Never restart numbering');
 		expect(prepared.instructions).toContain('Protocol example');
 		expect(prepared.instructions).toContain('currentLayout');
+		expect(prepared.instructions).toContain('one short semantic clause per group');
+		expect(prepared.instructions).toContain('80–180 raw characters');
+		expect(prepared.instructions).toContain('reading preferences');
 		expect(prepared.revisionChainContext).toMatchObject({
 			threadId: 'thread-1',
 			runId: 'run-1',
@@ -115,7 +118,7 @@ describe('sidecar task preparation', () => {
 			openStart: 0,
 			tokenizerVersion: 2
 		});
-		expect(prepared.revisionChainContext?.chainKey).toBe('["thread-1","run-1","zh",4,2]');
+		expect(prepared.revisionChainContext?.chainKey).toBe('["thread-1","run-1","zh",5,2]');
 	});
 
 	it('rejects an old tokenizer version with a refresh-specific error', () => {
