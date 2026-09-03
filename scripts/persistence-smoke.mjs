@@ -475,6 +475,41 @@ async function testCreditBalanceCalibration(browser, baseUrl) {
 	}
 }
 
+async function testHiddenPageContinuesRevision(browser, baseUrl) {
+	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
+	try {
+		await waitForReady(page);
+		await startCapture(page);
+		await page.evaluate(() => {
+			Object.defineProperty(document, 'visibilityState', {
+				configurable: true,
+				get: () => 'hidden'
+			});
+		});
+		const source = 'Background revision keeps working. A second sentence confirms it.';
+		await emitPair(page, source, '后台仍继续修订。第二句话确认这一点。');
+		await waitForSidecarRequest(
+			page,
+			sidecarRequests,
+			(request) =>
+				request.intent.kind === 'revise-pairs' &&
+				request.intent.atoms
+					.map((atom) => atom.t)
+					.join('')
+					.includes(source),
+			'页面隐藏时的句段修订请求'
+		);
+		await waitForPairCoverage(page, source.length, '页面隐藏时句段对照追平');
+		await page.evaluate(() => {
+			delete document.visibilityState;
+		});
+		await stopCapture(page);
+		assert.deepEqual(browserErrors, []);
+	} finally {
+		await context.close();
+	}
+}
+
 async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 	const { browserErrors, context, page, sidecarRequests } = await createPage(browser, baseUrl);
 	try {
@@ -1445,6 +1480,7 @@ try {
 	await testPauseResumeAndNewThread(browser, baseUrl);
 	await testDiagnosticsModePreference(browser, baseUrl);
 	await testCreditBalanceCalibration(browser, baseUrl);
+	await testHiddenPageContinuesRevision(browser, baseUrl);
 	await testInteractiveRequestDuringPairGeneration(browser, baseUrl);
 	await testCompletedRunTailIsNotMarkedLive(browser, baseUrl);
 	await testCleanTranscriptContinuesAfterFailure(browser, baseUrl);

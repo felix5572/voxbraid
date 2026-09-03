@@ -1116,7 +1116,6 @@
 			phase !== 'idle' ||
 			reloadRequired ||
 			statusNowMs < recoveryNotBeforeMs ||
-			document.visibilityState !== 'visible' ||
 			!navigator.onLine
 		)
 			return;
