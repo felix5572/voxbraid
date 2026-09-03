@@ -77,6 +77,7 @@
 
 	interface ActiveRequest {
 		clientRequestId: string;
+		runId: string;
 		runSequence: number;
 		batchSequence: number;
 		capturedAt: string;
@@ -102,8 +103,20 @@
 				sourceStart: number;
 				sourceEnd: number;
 				rawText: string;
-				status: 'live' | 'unrevised';
+				status: 'capturing' | 'live' | 'unrevised';
 		  };
+
+	interface LiveTailLine {
+		sourceStart: number;
+		text: string;
+	}
+
+	interface ReadingAnchor {
+		runId: string;
+		sourceOffset: number;
+		top: number;
+		line: boolean;
+	}
 
 	let {
 		session,
@@ -164,13 +177,31 @@
 			segment
 		}));
 		for (const run of session?.runs ?? []) {
-			const sourceStart = currentSegments
+			let sourceStart = currentSegments
 				.filter((segment) => segment.runId === run.id)
 				.reduce((maximum, segment) => Math.max(maximum, segment.sourceEnd), 0);
 			if (sourceStart >= run.sourceStream.text.length) continue;
+			const capturedEnd =
+				activeRequest?.runId === run.id && run.id === activeRunId
+					? Math.min(run.sourceStream.text.length, Math.max(sourceStart, activeRequest.openEnd))
+					: sourceStart;
+			if (capturedEnd > sourceStart) {
+				rows.push({
+					kind: 'raw',
+					id: `raw:${run.id}:${sourceStart}`,
+					runId: run.id,
+					runSequence: run.sequence,
+					sourceStart,
+					sourceEnd: capturedEnd,
+					rawText: run.sourceStream.text.slice(sourceStart, capturedEnd),
+					status: 'capturing'
+				});
+				sourceStart = capturedEnd;
+			}
+			if (sourceStart >= run.sourceStream.text.length) continue;
 			rows.push({
 				kind: 'raw',
-				id: `raw:${run.id}`,
+				id: `raw:${run.id}:${sourceStart}`,
 				runId: run.id,
 				runSequence: run.sequence,
 				sourceStart,
@@ -184,16 +215,21 @@
 		);
 	});
 
-	function liveTailLines(rawText: string): string[] {
+	function liveTailLines(rawText: string, absoluteStart: number): LiveTailLine[] {
 		const boundaries = sentenceBoundaries(rawText);
-		const lines: string[] = [];
+		const lines: LiveTailLine[] = [];
 		let start = 0;
 		for (const boundary of boundaries) {
-			lines.push(rawText.slice(start, boundary.end));
+			lines.push({ sourceStart: absoluteStart + start, text: rawText.slice(start, boundary.end) });
 			start = boundary.end;
 		}
-		if (start < rawText.length) lines.push(rawText.slice(start));
-		return lines.length > 0 ? lines : [rawText];
+		if (start < rawText.length) {
+			const tail = rawText.slice(start);
+			const previous = lines.at(-1);
+			if (previous && tail.trim().length === 0) previous.text += tail;
+			else lines.push({ sourceStart: absoluteStart + start, text: tail });
+		}
+		return lines.length > 0 ? lines : [{ sourceStart: absoluteStart, text: rawText }];
 	}
 
 	function batchesForRun(runId: string): StoredRevisionBatch[] {
@@ -317,13 +353,81 @@
 		);
 	}
 
+	function numericData(value: string | undefined): number | null {
+		if (value === undefined) return null;
+		const parsed = Number(value);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+
+	function captureReadingAnchor(runId: string): ReadingAnchor | null {
+		if (!scroller) return null;
+		if (following) {
+			const line = [...scroller.querySelectorAll<HTMLElement>('[data-live-source-line]')].find(
+				(element) => element.dataset.runId === runId
+			);
+			const sourceOffset = numericData(line?.dataset.sourceStart);
+			if (line && sourceOffset !== null) {
+				return { runId, sourceOffset, top: line.getBoundingClientRect().top, line: true };
+			}
+		}
+		const viewport = scroller.getBoundingClientRect();
+		const row = [...scroller.querySelectorAll<HTMLElement>('[data-revision-display-row]')].find(
+			(element) => {
+				const bounds = element.getBoundingClientRect();
+				return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+			}
+		);
+		const sourceOffset = numericData(row?.dataset.sourceStart);
+		if (!row || sourceOffset === null || !row.dataset.runId) return null;
+		return {
+			runId: row.dataset.runId,
+			sourceOffset,
+			top: row.getBoundingClientRect().top,
+			line: false
+		};
+	}
+
+	function anchorElement(anchor: ReadingAnchor): HTMLElement | null {
+		if (anchor.line) {
+			return (
+				[...scroller.querySelectorAll<HTMLElement>('[data-live-source-line]')].find(
+					(element) =>
+						element.dataset.runId === anchor.runId &&
+						numericData(element.dataset.sourceStart) === anchor.sourceOffset
+				) ?? null
+			);
+		}
+		return (
+			[...scroller.querySelectorAll<HTMLElement>('[data-revision-display-row]')].find((element) => {
+				if (element.dataset.runId !== anchor.runId) return false;
+				const start = numericData(element.dataset.sourceStart);
+				const end = numericData(element.dataset.sourceEnd);
+				return (
+					start !== null &&
+					end !== null &&
+					start <= anchor.sourceOffset &&
+					end > anchor.sourceOffset
+				);
+			}) ?? null
+		);
+	}
+
+	async function restoreReadingAnchor(anchor: ReadingAnchor): Promise<void> {
+		await tick();
+		if (!scroller) return;
+		const element = anchorElement(anchor);
+		if (element) scroller.scrollTop += element.getBoundingClientRect().top - anchor.top;
+	}
+
 	function replaceOpenSegments(runId: string, next: StoredRevisedSegment[]): void {
+		const anchor = captureReadingAnchor(runId);
 		segments = [
 			...segments.filter((segment) => segment.runId !== runId || segment.state === 'frozen'),
 			...next
 		].sort(
 			(left, right) => left.runSequence - right.runSequence || left.sourceStart - right.sourceStart
 		);
+		if (anchor) void restoreReadingAnchor(anchor);
 	}
 
 	async function persistBatch(
@@ -517,6 +621,7 @@
 			worker.beginRequest(clientRequestId, capturedThreadId);
 			activeRequest = {
 				clientRequestId,
+				runId: candidate.runId,
 				runSequence: candidate.runSequence,
 				batchSequence: sequence,
 				capturedAt,
@@ -919,6 +1024,16 @@
 		scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
 	}
 
+	function revealLatestContent(): void {
+		if (!following || !scroller) return;
+		const rawLines = scroller.querySelectorAll<HTMLElement>('[data-follow-source-line]');
+		const latest = rawLines.item(rawLines.length - 1) ?? scroller.lastElementChild;
+		if (!(latest instanceof HTMLElement)) return;
+		const viewportBottom = scroller.getBoundingClientRect().bottom;
+		const overflow = latest.getBoundingClientRect().bottom - viewportBottom;
+		if (overflow > 0) scroller.scrollTop += overflow;
+	}
+
 	function requestTime(timestamp: string): string {
 		const parsed = new Date(timestamp);
 		return Number.isNaN(parsed.getTime()) ? timestamp : parsed.toLocaleTimeString();
@@ -1024,7 +1139,7 @@
 					: null;
 		if (!latestRevision) return;
 		void tick().then(() => {
-			if (following && scroller) scroller.scrollTop = scroller.scrollHeight;
+			revealLatestContent();
 		});
 	});
 </script>
@@ -1122,6 +1237,10 @@
 						class:paragraph-break={row.segment.paragraphBreakBefore}
 						class:recently-changed={recentlyChanged(row.segment.updatedAt)}
 						class="pair-row revision-row"
+						data-revision-display-row
+						data-run-id={row.segment.runId}
+						data-source-start={row.segment.sourceStart}
+						data-source-end={row.segment.sourceEnd}
 					>
 						<div class="source">{row.segment.revisedSourceText}</div>
 						<div class="translation">{row.segment.translatedText}</div>
@@ -1145,20 +1264,35 @@
 			{:else}
 				<div
 					class="pair-row"
+					class:capturing-row={row.status === 'capturing'}
 					class:live-row={row.status === 'live'}
 					class:unrevised-row={row.status === 'unrevised'}
+					data-revision-display-row
+					data-run-id={row.runId}
+					data-source-start={row.sourceStart}
+					data-source-end={row.sourceEnd}
+					data-capturing-source-tail={row.status === 'capturing' ? row.runId : undefined}
 					data-live-source-tail={row.status === 'live' ? row.runId : undefined}
 					data-unrevised-source-tail={row.status === 'unrevised' ? row.runId : undefined}
 				>
 					<div class="source live-source">
-						{#each liveTailLines(row.rawText) as line, index (index)}<span>{line}</span>{/each}
+						{#each liveTailLines(row.rawText, row.sourceStart) as line (line.sourceStart)}<span
+								data-follow-source-line={row.status !== 'unrevised' ? true : undefined}
+								data-live-source-line={row.status === 'live' ? true : undefined}
+								data-run-id={row.runId}
+								data-source-start={line.sourceStart}>{line.text}</span
+							>{/each}
 					</div>
-					<div class="translation live-translation" aria-label="等待修订译文"></div>
+					<div
+						class="translation live-translation"
+						aria-label={row.status === 'capturing' ? '正在生成修订译文' : '等待修订译文'}
+					></div>
 					<span
 						class:live-badge={row.status === 'live'}
 						class:unrevised-badge={row.status === 'unrevised'}
+						class:capturing-badge={row.status === 'capturing'}
 					>
-						{row.status === 'live' ? '实时' : '未修订'}
+						{row.status === 'live' ? '实时' : row.status === 'capturing' ? '回望中' : '未修订'}
 					</span>
 					{#if diagnosticsMode}<span class="raw-range">raw {row.sourceStart}–{row.sourceEnd}</span
 						>{/if}
@@ -1310,6 +1444,7 @@
 	.pairs-scroll {
 		max-height: 46vh;
 		overflow: auto;
+		overflow-anchor: none;
 		border-top: 1px solid #202824;
 		border-bottom: 1px solid #202824;
 	}
@@ -1344,6 +1479,9 @@
 	}
 	.live-row {
 		background: #0d1411;
+	}
+	.capturing-row {
+		background: #0e1512;
 	}
 	.unrevised-row {
 		background: #101210;
@@ -1396,6 +1534,7 @@
 	.open-badge,
 	.long-badge,
 	.forced-badge,
+	.capturing-badge,
 	.live-badge,
 	.unrevised-badge,
 	.raw-range {
@@ -1405,12 +1544,16 @@
 		color: #819088;
 	}
 	.open-badge,
+	.capturing-badge,
 	.live-badge,
 	.unrevised-badge {
 		top: 4px;
 	}
 	.live-badge {
 		color: #72b39e;
+	}
+	.capturing-badge {
+		color: #8ba99e;
 	}
 	.long-badge {
 		top: 4px;

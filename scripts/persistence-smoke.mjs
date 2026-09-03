@@ -102,7 +102,13 @@ async function waitForReady(page) {
 async function waitForLiveRevisionTail(page, expected) {
 	await page.waitForFunction(
 		(value) =>
-			document.querySelector('[data-live-source-tail] .live-source')?.textContent === value,
+			[
+				...document.querySelectorAll(
+					'[data-capturing-source-tail] .live-source, [data-live-source-tail] .live-source'
+				)
+			]
+				.map((element) => element.textContent ?? '')
+				.join('') === value,
 		expected
 	);
 }
@@ -408,11 +414,32 @@ async function testInteractiveRequestDuringPairGeneration(browser, baseUrl) {
 		const continuation = ' New raw words arrive while Luna is still revising.';
 		await emitPair(page, continuation, 'Luna处理期间的新内容。');
 		await waitForLiveRevisionTail(page, source + continuation);
+		const anchorBefore = await page.evaluate(() => {
+			const element = document.querySelector('[data-live-source-line]');
+			if (!(element instanceof HTMLElement)) throw new Error('实时阅读锚点不存在。');
+			window.__voxbraidRevisionReadingAnchor = element;
+			const bounds = element.getBoundingClientRect();
+			return { left: bounds.left, top: bounds.top, text: element.textContent };
+		});
+		assert.equal(anchorBefore.text, continuation);
 		await page
 			.locator('.pair-row:not(.live-row) .source')
 			.getByText(source, { exact: true })
 			.waitFor();
 		await waitForLiveRevisionTail(page, continuation);
+		const anchorAfter = await page.evaluate(() => {
+			const element = document.querySelector('[data-live-source-line]');
+			if (!(element instanceof HTMLElement)) throw new Error('修订后的实时阅读锚点不存在。');
+			const bounds = element.getBoundingClientRect();
+			return {
+				left: bounds.left,
+				top: bounds.top,
+				sameNode: element === window.__voxbraidRevisionReadingAnchor
+			};
+		});
+		assert.equal(anchorAfter.sameNode, true);
+		assert.ok(Math.abs(anchorAfter.left - anchorBefore.left) <= 1);
+		assert.ok(Math.abs(anchorAfter.top - anchorBefore.top) <= 2);
 		const question = page.getByLabel('字幕问题', { exact: true });
 		assert.equal(await question.isEnabled(), true);
 		await question.fill('Can I ask while sentence pairs are still running?');
@@ -498,7 +525,8 @@ async function testOpenWindowRevision(browser, baseUrl) {
 				record.sequence > first.sequence &&
 				record.status === 'completed' &&
 				record.openEnd === partial.length + ending.length,
-			'新上下文到达后重写开放窗口'
+			'新上下文到达后重写开放窗口',
+			7_000
 		);
 		const revisionRequests = sidecarRequests.filter(
 			(request) => request.intent.kind === 'revise-pairs'
