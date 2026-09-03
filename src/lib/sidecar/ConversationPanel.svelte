@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
+	import { safeMarkdownHtml } from '../markdown';
 	import { emitOperationalLog } from '../operational-log';
 	import type { TranslationSessionState } from '../session/translation-session';
 	import { sendSidecarRequest, sidecarErrorDetails, sidecarLocalFailure } from './client';
@@ -272,7 +273,8 @@
 								<pre>{invocation.result.error.message}</pre>
 							</details>
 						{:else if invocation.result?.outputText}
-							<div class="answer-text">{invocation.result.outputText}</div>
+							<!-- eslint-disable-next-line svelte/no-at-html-tags -- safeMarkdownHtml applies a strict allowlist after parsing. -->
+							<div class="answer-text">{@html safeMarkdownHtml(invocation.result.outputText)}</div>
 						{/if}
 					</div>
 					<footer class="turn-meta" class:reading-meta={!diagnosticsMode}>
@@ -425,8 +427,120 @@
 	.answer-text {
 		margin-top: 4px;
 		color: #e2ebe6;
-		white-space: pre-wrap;
 		word-break: break-word;
+	}
+
+	.answer-text :global(:first-child) {
+		margin-top: 0;
+	}
+
+	.answer-text :global(:last-child) {
+		margin-bottom: 0;
+	}
+
+	.answer-text :global(p),
+	.answer-text :global(ul),
+	.answer-text :global(ol),
+	.answer-text :global(blockquote),
+	.answer-text :global(pre),
+	.answer-text :global(table) {
+		margin: 0.55em 0;
+	}
+
+	.answer-text :global(h1),
+	.answer-text :global(h2),
+	.answer-text :global(h3),
+	.answer-text :global(h4),
+	.answer-text :global(h5),
+	.answer-text :global(h6) {
+		margin: 0.8em 0 0.35em;
+		color: #f0f6f3;
+		line-height: 1.3;
+	}
+
+	.answer-text :global(h1) {
+		font-size: 1.35em;
+	}
+
+	.answer-text :global(h2) {
+		font-size: 1.22em;
+	}
+
+	.answer-text :global(h3),
+	.answer-text :global(h4),
+	.answer-text :global(h5),
+	.answer-text :global(h6) {
+		font-size: 1.08em;
+	}
+
+	.answer-text :global(ul),
+	.answer-text :global(ol) {
+		padding-left: 1.5em;
+	}
+
+	.answer-text :global(li + li) {
+		margin-top: 0.22em;
+	}
+
+	.answer-text :global(blockquote) {
+		padding-left: 0.9em;
+		border-left: 3px solid #426357;
+		color: #afbeb7;
+	}
+
+	.answer-text :global(code) {
+		padding: 0.1em 0.32em;
+		border-radius: 4px;
+		background: #18221e;
+		color: #d8eee5;
+		font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		font-size: 0.9em;
+	}
+
+	.answer-text :global(pre) {
+		padding: 10px 12px;
+		overflow-x: auto;
+		border: 1px solid #293b34;
+		border-radius: 8px;
+		background: #080d0b;
+	}
+
+	.answer-text :global(pre code) {
+		padding: 0;
+		background: transparent;
+		white-space: pre;
+	}
+
+	.answer-text :global(a) {
+		color: #8fd0ba;
+		text-decoration-thickness: 1px;
+		text-underline-offset: 2px;
+	}
+
+	.answer-text :global(table) {
+		display: block;
+		max-width: 100%;
+		overflow-x: auto;
+		border-collapse: collapse;
+	}
+
+	.answer-text :global(th),
+	.answer-text :global(td) {
+		padding: 6px 8px;
+		border: 1px solid #31423a;
+		text-align: left;
+		vertical-align: top;
+	}
+
+	.answer-text :global(th) {
+		background: #15201b;
+		color: #e7f0ec;
+	}
+
+	.answer-text :global(hr) {
+		margin: 0.8em 0;
+		border: 0;
+		border-top: 1px solid #314039;
 	}
 
 	.pending,

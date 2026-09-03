@@ -4,6 +4,13 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const MARKDOWN_ANSWER = `# 自动问答结果
+
+- **重点**：回答已按 Markdown 渲染。
+
+[安全链接](https://example.com/path) [坏链接](javascript:alert('link'))
+
+<img src=x onerror="alert('image')"><script>alert('script')</script>`;
 
 try {
 	process.loadEnvFile('.env');
@@ -322,7 +329,12 @@ async function createPage(browser, baseUrl, query = '?browser-test=1') {
 		const outputs = {
 			summarize: `课堂清稿第${cleanBlockNumber}块`,
 			retranslate: '自动重译结果',
-			ask: askNumber === 1 ? '自动问答结果' : '自动追问结果',
+			ask:
+				body.intent.question === 'What was captured?'
+					? MARKDOWN_ANSWER
+					: askNumber === 1
+						? '自动问答结果'
+						: '自动追问结果',
 			'revise-pairs': JSON.stringify({ groups: pairGroups })
 		};
 		await route.fulfill({
@@ -1007,7 +1019,17 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 
 		await page.getByLabel('字幕问题', { exact: true }).fill('What was captured?');
 		await page.getByRole('button', { name: '提问', exact: true }).click();
-		await page.getByText('自动问答结果', { exact: true }).waitFor();
+		await page.locator('.answer-text h1').getByText('自动问答结果', { exact: true }).waitFor();
+		await page.locator('.answer-text li strong').getByText('重点', { exact: true }).waitFor();
+		const renderedAnswer = page.locator('.answer-text').last();
+		const safeLink = renderedAnswer.getByRole('link', { name: '安全链接', exact: true });
+		await safeLink.waitFor();
+		assert.equal(await safeLink.getAttribute('href'), 'https://example.com/path');
+		assert.equal(await safeLink.getAttribute('target'), '_blank');
+		assert.equal(await safeLink.getAttribute('rel'), 'noopener noreferrer');
+		assert.equal(await renderedAnswer.getByRole('link', { name: '坏链接' }).count(), 0);
+		assert.equal(await renderedAnswer.locator('script, img, [onerror]').count(), 0);
+		assert.equal((await renderedAnswer.textContent()).includes("alert('script')"), false);
 		const askRequest = sidecarRequests.find((request) => request.intent.kind === 'ask');
 		assert.ok(askRequest);
 		assert.equal(askRequest.intent.question, 'What was captured?');
@@ -1022,7 +1044,7 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		assert.equal(askRequests.length, 2);
 		assert.equal(askRequests[1].intent.question, 'What did you just answer?');
 		assert.deepEqual(askRequests[1].intent.history, [
-			{ question: 'What was captured?', answer: '自动问答结果' }
+			{ question: 'What was captured?', answer: MARKDOWN_ANSWER }
 		]);
 		assert.equal(askRequests[1].context.cleanedTranscript, askRequest.context.cleanedTranscript);
 		assert.equal(askRequests[1].context.runs.length, 2);
