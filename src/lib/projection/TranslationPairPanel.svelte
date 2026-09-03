@@ -2,6 +2,7 @@
 	import { tick, untrack } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { inlineErrorDetails } from '../error-details';
+	import { emitOperationalLog, resolveOperationalIssue } from '../operational-log';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
 	import { sentenceBoundaries } from '../session/sentence-boundary';
 	import type { CaptureRun } from '../session/types';
@@ -15,6 +16,11 @@
 		SidecarRevisionDraftSegment
 	} from '../sidecar/types';
 	import { ProjectionWorker } from './projection-worker';
+	import {
+		REVISION_FINALIZING_RETRY_DELAY_MS,
+		canAutomaticallyRetryFinalizing,
+		revisionBackoffMs
+	} from './revision-recovery';
 	import {
 		reconcileRevisionSegmentPresentation,
 		revisionLongGroupSummary,
@@ -66,6 +72,7 @@
 		trigger: RevisionTrigger;
 		finalizing: boolean;
 		triggerResult: RevisionTriggerResult;
+		finalizingRetryKey: string | null;
 	}
 
 	interface ActiveRequest {
@@ -107,19 +114,22 @@
 	}: Props = $props();
 	let batches = $state<StoredRevisionBatch[]>([]);
 	let segments = $state<StoredRevisedSegment[]>([]);
-	let phase = $state<'loading' | 'idle' | 'requesting' | 'freezing' | 'paused'>('loading');
+	let phase = $state<'loading' | 'idle' | 'requesting' | 'freezing'>('loading');
 	let loadedThreadId = $state<string | null>(null);
 	let activeRequest = $state<ActiveRequest | null>(null);
 	let statusNowMs = $state(Date.now());
 	let errorMessage = $state('');
 	let persistenceMessage = $state('');
 	let consecutiveInfrastructureFailures = $state(0);
+	let recoveryNotBeforeMs = $state(0);
+	let reloadRequired = $state(false);
 	let scroller: HTMLDivElement;
 	let following = $state(true);
 	const worker = new ProjectionWorker();
 	const automaticBaselines = new SvelteMap<string, number>();
 	const pendingSince = new SvelteMap<string, number>();
 	const lastAutomaticRequestAt = new SvelteMap<string, number>();
+	const finalizingRetries = new SvelteMap<string, { notBeforeMs: number; consumed: boolean }>();
 	const threadId = $derived(session?.thread.id ?? null);
 	const allFailedBatches = $derived(batches.filter((batch) => batch.status === 'failed'));
 	const supersededFailureIds = $derived(
@@ -291,6 +301,16 @@
 		);
 	}
 
+	function revisionIssueKey(
+		value: Pick<RevisionCandidate, 'runId' | 'openStart' | 'openEnd'>
+	): string {
+		return `revision:${value.runId}:${value.openStart}:${value.openEnd}`;
+	}
+
+	function recoveryIssueKey(value: string): string {
+		return `revision-recovery:${value}`;
+	}
+
 	function appendBatch(batch: StoredRevisionBatch): void {
 		batches = [...batches, batch].sort(
 			(left, right) => left.runSequence - right.runSequence || left.sequence - right.sequence
@@ -325,6 +345,16 @@
 		} catch (error) {
 			console.error('[revision-pairs] save failed', error);
 			persistenceMessage = `修订对照已生成，但保存到本设备失败。\n${inlineErrorDetails(error)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'revision-save-failed',
+				summary: '修订对照已生成，但保存到本设备失败。',
+				details: inlineErrorDetails(error),
+				threadId: batch.threadId,
+				runId: batch.runId,
+				requestId: batch.clientRequestId
+			});
 		}
 	}
 
@@ -437,6 +467,10 @@
 		if (candidate.trigger === 'periodic') {
 			lastAutomaticRequestAt.set(candidate.runId, statusNowMs);
 		}
+		if (candidate.finalizingRetryKey) {
+			const retry = finalizingRetries.get(candidate.finalizingRetryKey);
+			if (retry) finalizingRetries.set(candidate.finalizingRetryKey, { ...retry, consumed: true });
+		}
 		onRequestingChange(true);
 		phase = 'requesting';
 		errorMessage = '';
@@ -451,6 +485,7 @@
 					kind: 'revise-pairs',
 					trigger: candidate.trigger,
 					targetLanguage: candidate.targetLanguage,
+					tokenizerVersion: REVISION_TOKENIZER_VERSION,
 					atoms: candidate.atoms.map((atom) => ({
 						i: atom.index,
 						start: atom.start,
@@ -561,12 +596,20 @@
 				if (loadedThreadId === capturedThreadId && worker.ownsRequest(clientRequestId)) {
 					appendBatch(batch);
 					replaceOpenSegments(candidate.runId, nextSegments);
+					for (const correctedFailure of supersededFailedBatches(batches)) {
+						resolveOperationalIssue(revisionIssueKey(correctedFailure), 'corrected');
+					}
 				}
 				worker.finishRequest(clientRequestId);
 				activeRequest = null;
 				onRequestingChange(false);
 				phase = 'idle';
 				consecutiveInfrastructureFailures = 0;
+				recoveryNotBeforeMs = 0;
+				reloadRequired = false;
+				finalizingRetries.delete(revisionIssueKey(candidate));
+				resolveOperationalIssue(revisionIssueKey(candidate), 'corrected');
+				resolveOperationalIssue(recoveryIssueKey(capturedThreadId));
 				pendingSince.set(candidate.runId, statusNowMs);
 				return true;
 			}
@@ -606,10 +649,56 @@
 			}
 			activeRequest = null;
 			onRequestingChange(false);
-			if (infrastructureFailure(result)) consecutiveInfrastructureFailures += 1;
-			else consecutiveInfrastructureFailures = 0;
-			phase = consecutiveInfrastructureFailures >= 3 ? 'paused' : 'idle';
+			if (infrastructureFailure(result)) {
+				consecutiveInfrastructureFailures += 1;
+				const backoffMs = revisionBackoffMs(consecutiveInfrastructureFailures);
+				if (backoffMs > 0) {
+					recoveryNotBeforeMs = statusNowMs + backoffMs;
+					emitOperationalLog({
+						severity: 'warning',
+						source: 'revision',
+						code: 'automatic-backoff',
+						summary: `修订服务连续失败，${Math.ceil(backoffMs / 1_000)} 秒后自动恢复。`,
+						details: failed.error,
+						threadId: capturedThreadId,
+						runId: candidate.runId,
+						requestId: clientRequestId,
+						dedupeKey: recoveryIssueKey(capturedThreadId)
+					});
+				}
+			} else {
+				consecutiveInfrastructureFailures = 0;
+			}
+			if (
+				candidate.finalizing &&
+				!candidate.finalizingRetryKey &&
+				canAutomaticallyRetryFinalizing(result)
+			) {
+				finalizingRetries.set(revisionIssueKey(candidate), {
+					notBeforeMs: statusNowMs + REVISION_FINALIZING_RETRY_DELAY_MS,
+					consumed: false
+				});
+			}
+			reloadRequired =
+				result.status === 'failed' && result.error.code === 'atomizer-version-mismatch';
+			phase = 'idle';
 			errorMessage = failed.error ?? '当前修订对照生成失败。';
+			emitOperationalLog({
+				severity:
+					result.status === 'failed' && result.retryDisposition === 'automatic'
+						? 'warning'
+						: 'error',
+				source: 'revision',
+				code: result.status === 'failed' ? result.error.code : 'invalid-response',
+				summary: reloadRequired
+					? '页面与服务端的原文切分版本不同，请刷新页面。'
+					: failureSummary(failed.error),
+				details: failed.error,
+				threadId: capturedThreadId,
+				runId: candidate.runId,
+				requestId: clientRequestId,
+				dedupeKey: revisionIssueKey(candidate)
+			});
 			return false;
 		}
 		activeRequest = null;
@@ -676,6 +765,15 @@
 		} catch (error) {
 			console.error('[revision-pairs] local freeze failed', error);
 			persistenceMessage = `修订对照本地冻结失败。\n${inlineErrorDetails(error)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'revision-freeze-failed',
+				summary: '修订对照本地冻结失败。',
+				details: inlineErrorDetails(error),
+				threadId: capturedThreadId,
+				runId: run.id
+			});
 		} finally {
 			if (loadedThreadId === capturedThreadId) phase = 'idle';
 		}
@@ -709,7 +807,9 @@
 			latestBatch?.openStart === openStart &&
 			latestBatch.openEnd === result.capturedSourceEnd
 		) {
-			return null;
+			const key = `revision:${run.id}:${openStart}:${result.capturedSourceEnd}`;
+			const retry = finalizing ? finalizingRetries.get(key) : null;
+			if (!retry || retry.consumed || statusNowMs < retry.notBeforeMs) return null;
 		}
 		const atoms = sourceClauseAtoms(run.sourceStream.text, openStart, result.capturedSourceEnd);
 		return {
@@ -722,7 +822,11 @@
 			atoms,
 			trigger: manual ? 'manual' : finalizing ? 'finalizing' : 'periodic',
 			finalizing,
-			triggerResult: result
+			triggerResult: result,
+			finalizingRetryKey:
+				!manual && finalizing && latestBatch?.openEnd === result.capturedSourceEnd
+					? `revision:${run.id}:${openStart}:${result.capturedSourceEnd}`
+					: null
 		};
 	}
 
@@ -748,6 +852,7 @@
 			return;
 		phase = 'idle';
 		consecutiveInfrastructureFailures = 0;
+		recoveryNotBeforeMs = 0;
 		errorMessage = '';
 		for (const run of session.runs) automaticBaselines.delete(run.id);
 		while (true) {
@@ -767,6 +872,9 @@
 		automaticBaselines.clear();
 		pendingSince.clear();
 		lastAutomaticRequestAt.clear();
+		finalizingRetries.clear();
+		recoveryNotBeforeMs = 0;
+		reloadRequired = false;
 		errorMessage = '';
 		persistenceMessage = '';
 		loadedThreadId = null;
@@ -781,6 +889,14 @@
 			} catch (error) {
 				console.error('[revision-pairs] restore failed', error);
 				persistenceMessage = `修订对照记录读取失败；本页仍可继续生成。\n${inlineErrorDetails(error)}`;
+				emitOperationalLog({
+					severity: 'error',
+					source: 'storage',
+					code: 'revision-restore-failed',
+					summary: '修订对照记录读取失败；本页仍可继续生成。',
+					details: inlineErrorDetails(error),
+					threadId: nextThreadId
+				});
 			}
 		}
 		if (!worker.ownsLoad(generation) || session?.thread.id !== nextThreadId) return;
@@ -883,6 +999,8 @@
 			loadedThreadId !== currentThreadId ||
 			disabled ||
 			phase !== 'idle' ||
+			reloadRequired ||
+			statusNowMs < recoveryNotBeforeMs ||
 			document.visibilityState !== 'visible' ||
 			!navigator.onLine
 		)
@@ -924,9 +1042,9 @@
 				phase === 'requesting' ||
 				phase === 'freezing' ||
 				!session}
-			onclick={() => void processManual()}
+			onclick={() => (reloadRequired ? location.reload() : void processManual())}
 		>
-			{phase === 'paused' ? '恢复自动修订' : '整理全部'}
+			{reloadRequired ? '刷新页面' : recoveryNotBeforeMs > statusNowMs ? '立即恢复' : '整理全部'}
 		</button>
 	</header>
 
@@ -945,8 +1063,10 @@
 				{activeRequest.openStart}–{activeRequest.openEnd} · 此前累计 {totalTokens} tokens{/if}
 		{:else if phase === 'freezing'}
 			正在本地冻结已完成的开放段（不会调用模型）…
-		{:else if phase === 'paused'}
-			连续 {consecutiveInfrastructureFailures} 次基础设施失败，自动修订已暂停。
+		{:else if reloadRequired}
+			版本已更新，请刷新页面后继续修订。
+		{:else if recoveryNotBeforeMs > statusNowMs}
+			修订服务暂时不可用 · {Math.ceil((recoveryNotBeforeMs - statusNowMs) / 1_000)} 秒后自动重试
 		{:else}
 			{waitingStatus()}
 		{/if}

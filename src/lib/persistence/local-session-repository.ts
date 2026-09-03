@@ -7,6 +7,7 @@ import type {
 	StoredRevisionProjection
 } from '../projection/revision-records';
 import { REVISION_MAX_OPEN_SOURCE_CHARACTERS } from '../projection/revision-constants';
+import { OPERATIONAL_LOG_LIMIT, type OperationalLogEntry } from '../operational-log';
 import {
 	fromRunRecord,
 	fromThreadRecord,
@@ -243,6 +244,32 @@ export class LocalSessionRepository {
 	async listThreads(): Promise<TranslationThread[]> {
 		const records = await this.database.threads.orderBy('updatedAt').reverse().toArray();
 		return records.map(fromThreadRecord);
+	}
+
+	async loadOperationalLogs(): Promise<OperationalLogEntry[]> {
+		return this.database.operationalLogs
+			.orderBy('lastOccurredAt')
+			.reverse()
+			.limit(OPERATIONAL_LOG_LIMIT)
+			.toArray();
+	}
+
+	async saveOperationalLog(entry: OperationalLogEntry): Promise<void> {
+		await this.database.transaction('rw', this.database.operationalLogs, async () => {
+			await this.database.operationalLogs.put(entry);
+			const overflow = (await this.database.operationalLogs.count()) - OPERATIONAL_LOG_LIMIT;
+			if (overflow > 0) {
+				const oldest = await this.database.operationalLogs
+					.orderBy('lastOccurredAt')
+					.limit(overflow)
+					.primaryKeys();
+				await this.database.operationalLogs.bulkDelete(oldest);
+			}
+		});
+	}
+
+	async clearOperationalLogs(): Promise<void> {
+		await this.database.operationalLogs.clear();
 	}
 
 	async loadAutoSummary(threadId: string): Promise<StoredAutoSummary | null> {

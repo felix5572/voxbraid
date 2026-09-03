@@ -219,6 +219,10 @@ type SidecarInvokeResult =
 
 统一错误展示纪律：固定产品文案只能作为原始错误的前缀，不能替代错误；用户可见的 catch 至少追加 `error.name: error.message`，完整 Error 对象同时写入控制台。HTTP 和 OpenAI 错误按上一段保留结构化信息。目标设备是 iPad，因此“只写 console”不算完成用户可见的错误暴露。
 
+页面最下方提供全局“运行问题”事件簿，只收录 VoxBraid 主动定义的 warning 与 error，不抓取框架或浏览器控制台噪声。功能区仍原位显示与当前操作直接相关的错误；事件簿负责跨 Realtime、存储、修订、清稿、对话与服务端 warning 汇总。相同 active 问题按稳定 dedupe key 合并计数，恢复或纠正后保留记录并标记状态；详情保留有界原始错误与 request/run 标识。最近 300 条先进入页面内存并尽力写入 Dexie，日志存储自身失败不得递归产生新日志。事件簿不进入会话归档，复制与清空均为用户显式动作。
+
+旁路生成超时按任务设置：微批修订 20 秒、课堂清稿 90 秒、自由对话与手动重译 60 秒。测试可以显式覆盖超时值。超时只结束当前请求；Responses WebSocket 的单请求超时仍会重建共享上游连接，并遵守“发送后结果未知不自动重发”的计费纪律。
+
 只有上游 `completed` 映射为 `completed`。`failed`、`incomplete` 和 `cancelled` 都映射为旁路 `failed`，但保留原始 `upstreamStatus`、响应中已经存在的文本和 usage；失败且没有任何文本时 `outputText` 为 `null`，不使用空字符串冒充一段输出。官方响应 schema 将 usage 定义为可选，因此 `recorded` 要求 usage 非空且 token 字段完整，`unavailable` 要求 usage 为空；不能因调用完成就假定 usage 一定存在。解析文本时优先使用 API 客户端提供的 `output_text` 聚合结果；若直接解析原始响应，则聚合全部 `output_text` content item，不假设 `output[0]` 一定是最终消息。
 
 ## 五、页面瞬时状态

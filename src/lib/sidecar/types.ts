@@ -56,6 +56,7 @@ export type SidecarIntent =
 			kind: 'revise-pairs';
 			trigger: SidecarTrigger;
 			targetLanguage: string;
+			tokenizerVersion: number;
 			atoms: SidecarRevisionAtom[];
 			continuity: SidecarRevisionContextSegment[];
 			previousDraft: SidecarRevisionDraftSegment[];
@@ -114,8 +115,17 @@ export interface SidecarTransportDiagnostic {
 	fallbackError?: string | null;
 }
 
+export interface SidecarWarning {
+	code: string;
+	message: string;
+	details?: string | null;
+}
+
+export type SidecarRetryDisposition = 'automatic' | 'manual-only' | 'reload-required';
+
 export type SidecarErrorCode =
 	| 'invalid-request'
+	| 'atomizer-version-mismatch'
 	| 'empty-context'
 	| 'context-too-large'
 	| 'browser-network-failed'
@@ -137,6 +147,7 @@ export type SidecarInvokeResult =
 			usageStatus: ModelUsageStatus;
 			usage: ModelUsage | null;
 			transportDiagnostic?: SidecarTransportDiagnostic | null;
+			warnings?: SidecarWarning[];
 			completedAt: string;
 	  }
 	| {
@@ -149,6 +160,8 @@ export type SidecarInvokeResult =
 			usageStatus: ModelUsageStatus;
 			usage: ModelUsage | null;
 			transportDiagnostic?: SidecarTransportDiagnostic | null;
+			warnings?: SidecarWarning[];
+			retryDisposition?: SidecarRetryDisposition;
 			diagnostic?: SidecarFailureDiagnostic | null;
 			error: { code: SidecarErrorCode; message: string };
 			failedAt: string;
@@ -227,6 +240,15 @@ function isSidecarTransportDiagnostic(value: unknown): value is SidecarTransport
 	);
 }
 
+function isSidecarWarning(value: unknown): value is SidecarWarning {
+	return (
+		isRecord(value) &&
+		typeof value.code === 'string' &&
+		typeof value.message === 'string' &&
+		(value.details === undefined || value.details === null || typeof value.details === 'string')
+	);
+}
+
 export function isSidecarInvokeResult(value: unknown): value is SidecarInvokeResult {
 	if (!isRecord(value) || (value.status !== 'completed' && value.status !== 'failed')) return false;
 	if (
@@ -235,7 +257,9 @@ export function isSidecarInvokeResult(value: unknown): value is SidecarInvokeRes
 		(value.usageStatus === 'recorded' ? !isModelUsage(value.usage) : value.usage !== null) ||
 		(value.transportDiagnostic !== undefined &&
 			value.transportDiagnostic !== null &&
-			!isSidecarTransportDiagnostic(value.transportDiagnostic))
+			!isSidecarTransportDiagnostic(value.transportDiagnostic)) ||
+		(value.warnings !== undefined &&
+			(!Array.isArray(value.warnings) || !value.warnings.every(isSidecarWarning)))
 	) {
 		return false;
 	}
@@ -260,6 +284,10 @@ export function isSidecarInvokeResult(value: unknown): value is SidecarInvokeRes
 		(value.diagnostic === undefined ||
 			value.diagnostic === null ||
 			isSidecarFailureDiagnostic(value.diagnostic)) &&
+		(value.retryDisposition === undefined ||
+			value.retryDisposition === 'automatic' ||
+			value.retryDisposition === 'manual-only' ||
+			value.retryDisposition === 'reload-required') &&
 		isRecord(value.error) &&
 		typeof value.error.code === 'string' &&
 		typeof value.error.message === 'string' &&

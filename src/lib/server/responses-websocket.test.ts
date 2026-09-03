@@ -90,6 +90,7 @@ function preparedPair(texts: string[], threadId = 'thread-1') {
 			kind: 'revise-pairs',
 			trigger: 'periodic',
 			targetLanguage: 'zh',
+			tokenizerVersion: 2,
 			atoms: revisionAtoms,
 			continuity: [],
 			previousDraft: [],

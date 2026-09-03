@@ -616,6 +616,13 @@ async function testInvalidRevisionDoesNotRetry(browser, baseUrl) {
 			(record) => record.status === 'failed' && record.errorCode === 'invalid-response',
 			'无效模型响应审计'
 		);
+		await waitForRecord(
+			page,
+			'operationalLogs',
+			(record) => record.source === 'revision' && record.code === 'invalid-response',
+			'底部运行问题记录'
+		);
+		await page.getByText('运行问题', { exact: true }).waitFor();
 		await page.waitForTimeout(5_000);
 		assert.equal(
 			sidecarRequests.filter((request) => request.intent.kind === 'revise-pairs').length,
@@ -1163,7 +1170,7 @@ async function testConnectionFailure(browser, baseUrl) {
 		const source = 'Keep text produced before a failed connection.';
 		await emitPair(page, source, '接続失敗前の字幕を保存します。');
 		await page.evaluate(() => window.__voxbraidBrowserTest?.fail('模拟连接中断。'));
-		await page.getByText('模拟连接中断。', { exact: true }).waitFor();
+		await page.getByRole('alert').getByText('模拟连接中断。', { exact: true }).waitFor();
 		const failedRun = await waitForRecord(
 			page,
 			'runs',
@@ -1227,8 +1234,11 @@ async function testStorageTimeoutFallback(browser, baseUrl) {
 		const start = page.getByRole('button', { name: '开始翻译' });
 		await start.waitFor({ state: 'visible' });
 		assert.equal(await start.isDisabled(), true);
-		await page.getByText(/本地历史记录不可用；实时翻译仍可继续。/).waitFor({ timeout: 10_000 });
-		await page.getByText(/Error: Local session restore timed out after 5000 ms/).waitFor();
+		const storageStatus = page.getByRole('status').filter({ hasText: '本地记录未保存' });
+		await storageStatus
+			.getByText(/本地历史记录不可用；实时翻译仍可继续。/)
+			.waitFor({ timeout: 10_000 });
+		await storageStatus.getByText(/Error: Local session restore timed out after 5000 ms/).waitFor();
 		await page.waitForFunction(() => window.__voxbraidBrowserTest !== undefined);
 		assert.equal(await start.isEnabled(), true);
 

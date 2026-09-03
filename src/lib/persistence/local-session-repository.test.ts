@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import Dexie from 'dexie';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
+import type { OperationalLogEntry } from '../operational-log';
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
 import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
 import type { StoredRevisedSegment, StoredRevisionBatch } from '../projection/revision-records';
@@ -850,5 +851,29 @@ describe('LocalSessionRepository', () => {
 			batches: [],
 			segments: []
 		});
+	});
+
+	it('persists and clears the bounded operational issue journal', async () => {
+		const entry: OperationalLogEntry = {
+			id: 'log-1',
+			severity: 'warning',
+			source: 'revision',
+			code: 'automatic-backoff',
+			summary: '稍后自动恢复。',
+			details: null,
+			occurredAt: START,
+			lastOccurredAt: CHECKPOINT,
+			threadId: 'thread-1',
+			runId: 'run-1',
+			requestId: null,
+			dedupeKey: 'revision-recovery:thread-1',
+			state: 'active',
+			count: 1
+		};
+
+		await repository.saveOperationalLog(entry);
+		await expect(repository.loadOperationalLogs()).resolves.toEqual([entry]);
+		await repository.clearOperationalLogs();
+		await expect(repository.loadOperationalLogs()).resolves.toEqual([]);
 	});
 });

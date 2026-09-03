@@ -63,6 +63,7 @@ function pairRequestBody(): unknown {
 			kind: 'revise-pairs',
 			trigger: 'periodic',
 			targetLanguage: 'zh',
+			tokenizerVersion: 2,
 			atoms: [{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' }],
 			continuity: [],
 			previousDraft: [],
@@ -234,6 +235,7 @@ describe('invokeSidecar', () => {
 					kind: 'revise-pairs',
 					trigger: 'periodic',
 					targetLanguage: 'zh',
+					tokenizerVersion: 2,
 					atoms: [
 						{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' },
 						{ i: 2, start: 15, end: 32, t: ' Second sentence.', boundary: 'sentence' }
@@ -317,6 +319,7 @@ describe('invokeSidecar', () => {
 					kind: 'revise-pairs',
 					trigger: 'periodic',
 					targetLanguage: 'zh',
+					tokenizerVersion: 2,
 					atoms: [
 						{ i: 1, start: 0, end: 240, t: source.slice(0, 240), boundary: 'forced' },
 						{ i: 2, start: 240, end: 480, t: source.slice(240, 480), boundary: 'forced' },
@@ -378,6 +381,7 @@ describe('invokeSidecar', () => {
 				kind: 'revise-pairs',
 				trigger: 'periodic',
 				targetLanguage: 'zh',
+				tokenizerVersion: 2,
 				atoms: [{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' }],
 				continuity: [],
 				previousDraft: [],

@@ -58,6 +58,7 @@ const END_REASONS = new Set<CaptureRunEndReason>([
 const ALIGNMENTS = new Set<SegmentAlignment>(['approximate', 'unpaired']);
 const SIDECAR_ERROR_CODES = new Set<SidecarErrorCode>([
 	'invalid-request',
+	'atomizer-version-mismatch',
 	'empty-context',
 	'context-too-large',
 	'browser-network-failed',

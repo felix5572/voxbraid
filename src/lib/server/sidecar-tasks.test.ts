@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { sourceClauseAtoms } from '../projection/revision-projection';
 import type { SidecarIntent, SidecarInvokeRequest } from '../sidecar/types';
-import { prepareSidecarCall, parseSidecarInvokeRequest } from './sidecar-tasks';
+import {
+	prepareSidecarCall,
+	parseSidecarInvokeRequest,
+	sidecarTaskDefinition
+} from './sidecar-tasks';
 
 type RevisionPairIntent = Extract<SidecarIntent, { kind: 'revise-pairs' }>;
 
@@ -12,6 +16,7 @@ function revisionPairRequest(): SidecarInvokeRequest & { intent: RevisionPairInt
 			kind: 'revise-pairs',
 			trigger: 'periodic',
 			targetLanguage: 'zh',
+			tokenizerVersion: 2,
 			atoms: [
 				{ i: 1, start: 0, end: 15, t: 'First sentence.', boundary: 'sentence' },
 				{ i: 2, start: 15, end: 32, t: ' Second sentence.', boundary: 'sentence' }
@@ -74,6 +79,13 @@ function request(kind: 'ask' | 'summarize' | 'retranslate') {
 }
 
 describe('sidecar task preparation', () => {
+	it('uses task-specific generation timeouts', () => {
+		expect(sidecarTaskDefinition('revise-pairs').requestTimeoutMs).toBe(20_000);
+		expect(sidecarTaskDefinition('summarize').requestTimeoutMs).toBe(90_000);
+		expect(sidecarTaskDefinition('ask').requestTimeoutMs).toBe(60_000);
+		expect(sidecarTaskDefinition('retranslate').requestTimeoutMs).toBe(60_000);
+	});
+
 	it('prepares bounded Luna structured output without an input-token preflight', () => {
 		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(revisionPairRequest()));
 
@@ -84,7 +96,8 @@ describe('sidecar task preparation', () => {
 			inputTokenPreflight: 'skip-bounded',
 			maxPreparedInputBytes: 64_000,
 			reasoningEffort: 'none',
-			structuredOutput: 'revision-pairs'
+			structuredOutput: 'revision-pairs',
+			requestTimeoutMs: 20_000
 		});
 		expect(prepared.revisionAtoms.map((atom) => atom.i)).toEqual([1, 2]);
 		expect(prepared.inputText).toContain('currentAtoms');
@@ -103,6 +116,36 @@ describe('sidecar task preparation', () => {
 			tokenizerVersion: 2
 		});
 		expect(prepared.revisionChainContext?.chainKey).toBe('["thread-1","run-1","zh",4,2]');
+	});
+
+	it('rejects an old tokenizer version with a refresh-specific error', () => {
+		const value = revisionPairRequest();
+		value.intent.tokenizerVersion = 1;
+
+		expect(() => parseSidecarInvokeRequest(value)).toThrowError(
+			expect.objectContaining({ code: 'atomizer-version-mismatch' })
+		);
+	});
+
+	it('drops a stale previous draft as a warning while preserving current facts', () => {
+		const value = revisionPairRequest();
+		value.intent.previousDraft = [
+			{
+				sourceStart: 0,
+				sourceEnd: 16,
+				rawText: 'stale draft text',
+				revisedSourceText: 'Stale.',
+				translatedText: '旧稿。',
+				paragraphBreakBefore: false
+			}
+		];
+
+		const prepared = prepareSidecarCall(parseSidecarInvokeRequest(value));
+
+		expect(prepared.revisionChainContext?.previousDraft).toEqual([]);
+		expect(prepared.warnings).toEqual([
+			expect.objectContaining({ code: 'previous-draft-dropped' })
+		]);
 	});
 
 	it('shows the model only request-local atom coordinates for previous drafts', () => {

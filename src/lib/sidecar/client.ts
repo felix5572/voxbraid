@@ -1,4 +1,5 @@
 import { errorDetails } from '../error-details';
+import { emitOperationalLog } from '../operational-log';
 import {
 	isSidecarInvokeResult,
 	type SidecarErrorCode,
@@ -24,6 +25,7 @@ export function sidecarLocalFailure(
 		upstreamStatus: null,
 		usageStatus: 'unavailable',
 		usage: null,
+		retryDisposition: 'manual-only',
 		diagnostic,
 		error: { code, message },
 		failedAt: new Date().toISOString()
@@ -153,6 +155,18 @@ export async function sendSidecarRequest(
 			`VoxBraid 旁路端点返回了无法识别的响应。\n${browserRequestContext(diagnostic)}\n${responseDetails(response, rawBody)}`,
 			diagnostic
 		);
+	}
+	for (const warning of body.warnings ?? []) {
+		emitOperationalLog({
+			severity: 'warning',
+			source: 'server',
+			code: warning.code,
+			summary: warning.message,
+			details: warning.details ?? null,
+			threadId: request.context.threadId,
+			runId: request.context.runs[0]?.runId ?? null,
+			requestId: request.clientRequestId
+		});
 	}
 	if (body.status === 'failed') {
 		return {

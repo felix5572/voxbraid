@@ -43,17 +43,19 @@
 
 转录第一版建立三个事实与投影 store；课堂清稿先后增加旧版整场投影和新版分块投影：
 
-| Store                   | 内容                                                        |
-| ----------------------- | ----------------------------------------------------------- |
-| `threads`               | 产品会话、默认目标语言、标题和归档状态                      |
-| `runs`                  | 收音生命周期、完整双流快照、恢复信息和当前 segment revision |
-| `segments`              | 当前及必要历史 revision 的可读双语段落                      |
-| `autoSummaries`         | 每个 thread 最新一版完整重算清稿、捕获长度、模型和 usage    |
-| `cleanTranscriptBlocks` | 每个 thread 按稳定字幕范围累积的清稿块、状态、模型和 usage  |
+| Store                                 | 内容                                                        |
+| ------------------------------------- | ----------------------------------------------------------- |
+| `threads`                             | 产品会话、默认目标语言、标题和归档状态                      |
+| `runs`                                | 收音生命周期、完整双流快照、恢复信息和当前 segment revision |
+| `segments`                            | 当前及必要历史 revision 的可读双语段落                      |
+| `autoSummaries`                       | 每个 thread 最新一版完整重算清稿、捕获长度、模型和 usage    |
+| `cleanTranscriptBlocks`               | 每个 thread 按稳定字幕范围累积的清稿块、状态、模型和 usage  |
+| `revisionBatches` / `revisedSegments` | 修订对照请求审计与当前可读投影                              |
+| `operationalLogs`                     | 最近 300 条应用级 warning/error、恢复状态与有界诊断         |
 
 assistant branch 和 message 不进入这一阶段。待上传标记可以先作为上述 record 的本地元数据存在；真正设计同步队列时再决定是否增加独立 outbox。
 
-`autoSummaries` 通过 Dexie version 2 加入；Dexie version 3 增加 `cleanTranscriptBlocks`，旧整场清稿只读兼容，新内容按块追加。两者都不进入当前 thread JSON 导出：原始双流仍是可重新生成这些投影的完整事实来源，导入同一 thread 时会清除本地旧投影以免正文与导入事实不一致。
+`autoSummaries` 通过 Dexie version 2 加入；Dexie version 3 增加 `cleanTranscriptBlocks`；version 5 使用 `revisionBatches` / `revisedSegments` 保存当前修订对照；version 6 增加全局 `operationalLogs`。运行问题不进入会话 JSON 归档；原始双流仍是可重新生成阅读投影的完整事实来源，导入同一 thread 时会清除本地旧投影以免正文与导入事实不一致。
 
 ### Schema epoch
 

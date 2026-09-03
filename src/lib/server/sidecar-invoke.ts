@@ -2,7 +2,9 @@ import type {
 	ModelUsage,
 	SidecarErrorCode,
 	SidecarInvokeResult,
-	SidecarTransportDiagnostic
+	SidecarTransportDiagnostic,
+	SidecarRetryDisposition,
+	SidecarWarning
 } from '../sidecar/types';
 import { errorDetails } from '../error-details';
 import {
@@ -26,7 +28,6 @@ import {
 
 const INPUT_TOKENS_URL = 'https://api.openai.com/v1/responses/input_tokens';
 const RESPONSES_URL = 'https://api.openai.com/v1/responses';
-const SIDECAR_REQUEST_TIMEOUT_MS = 60_000;
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type UpstreamTerminalStatus = 'failed' | 'incomplete' | 'cancelled';
@@ -121,6 +122,8 @@ function failure(
 		upstreamStatus?: UpstreamTerminalStatus | null;
 		usage?: ModelUsage | null;
 		transportDiagnostic?: SidecarTransportDiagnostic | null;
+		warnings?: readonly SidecarWarning[];
+		retryDisposition?: SidecarRetryDisposition;
 	} = {}
 ): SidecarInvokeResult {
 	const usage = options.usage ?? null;
@@ -134,6 +137,10 @@ function failure(
 		usageStatus: usage ? 'recorded' : 'unavailable',
 		usage,
 		transportDiagnostic: options.transportDiagnostic ?? null,
+		warnings: options.warnings ? [...options.warnings] : undefined,
+		retryDisposition:
+			options.retryDisposition ??
+			(code === 'atomizer-version-mismatch' ? 'reload-required' : 'manual-only'),
 		diagnostic: null,
 		error: { code, message },
 		failedAt: now()
@@ -241,7 +248,9 @@ function terminalStatus(value: unknown): UpstreamTerminalStatus | null {
 }
 
 function validationStatus(error: SidecarRequestValidationError): number {
-	return error.code === 'context-too-large' ? 413 : 400;
+	if (error.code === 'context-too-large') return 413;
+	if (error.code === 'atomizer-version-mismatch') return 409;
+	return 400;
 }
 
 function clientRequestIdFrom(value: unknown): string {
@@ -255,7 +264,7 @@ export async function invokeSidecar({
 	fetcher,
 	apiKey,
 	now = () => new Date().toISOString(),
-	timeoutMs = SIDECAR_REQUEST_TIMEOUT_MS,
+	timeoutMs,
 	revisionResponsesTransport = null
 }: InvokeSidecarOptions): Promise<Response> {
 	const rawBody: unknown = await request.json().catch(() => null);
@@ -268,6 +277,13 @@ export async function invokeSidecar({
 		return json(failure(clientRequestId, now, error.code, error.message), {
 			status: validationStatus(error),
 			headers: noStoreHeaders()
+		});
+	}
+	const effectiveTimeoutMs = timeoutMs ?? prepared.requestTimeoutMs;
+	if (prepared.warnings.length > 0) {
+		console.warn('[sidecar] request prepared with warnings', {
+			clientRequestId: prepared.clientRequestId,
+			warnings: prepared.warnings
 		});
 	}
 	console.info('[sidecar] request started', {
@@ -296,7 +312,7 @@ export async function invokeSidecar({
 			countResponse = await upstreamFetch(INPUT_TOKENS_URL, responseBody(prepared), {
 				fetcher,
 				apiKey,
-				timeoutMs
+				timeoutMs: effectiveTimeoutMs
 			});
 		} catch (error) {
 			const details = errorDetails(error);
@@ -376,7 +392,7 @@ export async function invokeSidecar({
 		const response = await upstreamFetch(RESPONSES_URL, generationBody, {
 			fetcher,
 			apiKey,
-			timeoutMs
+			timeoutMs: effectiveTimeoutMs
 		});
 		const result = await readUpstreamBody(response);
 		return {
@@ -401,7 +417,7 @@ export async function invokeSidecar({
 					prepared,
 					body: generationBody,
 					apiKey,
-					timeoutMs
+					timeoutMs: effectiveTimeoutMs
 				});
 			} catch (error) {
 				if (error instanceof WebSocketOutcomeUnknownError) {
@@ -447,7 +463,7 @@ export async function invokeSidecar({
 				now,
 				timedOut ? 'request-timeout' : 'upstream-failed',
 				timedOut
-					? `模型调用在 ${timeoutMs} ms 后超时；上游可能已经产生费用。${webSocketBeforeSendDetails ? `此前 WebSocket 在发送前失败并转用 HTTP：\n${webSocketBeforeSendDetails}\n` : ''}原始错误：\n${details}`
+					? `模型调用在 ${effectiveTimeoutMs} ms 后超时；上游可能已经产生费用。${webSocketBeforeSendDetails ? `此前 WebSocket 在发送前失败并转用 HTTP：\n${webSocketBeforeSendDetails}\n` : ''}原始错误：\n${details}`
 					: `模型调用失败。${webSocketBeforeSendDetails ? `此前 WebSocket 在发送前失败并转用 HTTP：\n${webSocketBeforeSendDetails}\n` : ''}原始错误：\n${details}`,
 				{ model: prepared.model }
 			),
@@ -477,7 +493,8 @@ export async function invokeSidecar({
 				`OpenAI 模型调用失败（${upstreamResult.transportDiagnostic.transport === 'websocket' ? 'WebSocket 请求级错误' : `HTTP ${upstreamResult.status}`}${requestIdSuffix(upstreamRequestId)}）${upstreamDetails ? `：${upstreamDetails}` : '。'}\n原始响应：\n${rawUpstream}`,
 				{
 					model: prepared.model,
-					transportDiagnostic: upstreamResult.transportDiagnostic
+					transportDiagnostic: upstreamResult.transportDiagnostic,
+					retryDisposition: 'automatic'
 				}
 			),
 			{ status: 502, headers: noStoreHeaders() }
@@ -550,6 +567,7 @@ export async function invokeSidecar({
 			usageStatus: usage ? 'recorded' : 'unavailable',
 			usage,
 			transportDiagnostic: upstreamResult.transportDiagnostic,
+			...(prepared.warnings.length > 0 ? { warnings: [...prepared.warnings] } : {}),
 			completedAt: now()
 		};
 		return json(result, { headers: noStoreHeaders() });
@@ -579,7 +597,8 @@ export async function invokeSidecar({
 				outputText: outputText || null,
 				upstreamStatus: status,
 				usage,
-				transportDiagnostic: upstreamResult.transportDiagnostic
+				transportDiagnostic: upstreamResult.transportDiagnostic,
+				retryDisposition: 'automatic'
 			}
 		),
 		{ status: 502, headers: noStoreHeaders() }

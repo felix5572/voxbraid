@@ -1,6 +1,17 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { inlineErrorDetails } from '$lib/error-details';
+	import OperationalLogPanel from '$lib/OperationalLogPanel.svelte';
+	import {
+		OPERATIONAL_LOG_EVENT,
+		defaultOperationalLogDedupeKey,
+		emitOperationalLog,
+		recordOperationalLog,
+		resolveOperationalIssue,
+		resolveOperationalLog,
+		type OperationalLogEntry,
+		type OperationalLogEventDetail
+	} from '$lib/operational-log';
 	import { CheckpointWriter } from '$lib/persistence/checkpoint-writer';
 	import {
 		requestStoragePersistence,
@@ -161,6 +172,7 @@
 	let officialUsageRequest = 0;
 	let captionFontSizePx = $state(DEFAULT_CAPTION_FONT_SIZE_PX);
 	let diagnosticsMode = $state(false);
+	let operationalLogs = $state<OperationalLogEntry[]>([]);
 	let captureRunDurationLimitMs = $state(CAPTURE_RUN_DURATION_LIMIT_MS);
 	let durationLimitNotice = $state('');
 	let client: TranslationClient | null = null;
@@ -210,6 +222,15 @@
 	let diagnosticReportText = $state('开始一次收音后，这里会生成当前 Run 的原始诊断报告。');
 	let durationLimitStopRequested = false;
 	const wakeLock = new ScreenWakeLock();
+
+	async function clearOperationalLogs(): Promise<void> {
+		try {
+			await repository?.clearOperationalLogs();
+			operationalLogs = [];
+		} catch (clearError) {
+			console.error('[operational-log] clear failed', clearError);
+		}
+	}
 
 	const active = $derived(status !== 'idle' && status !== 'failed' && status !== 'stopping');
 	const sessionActionsDisabled = $derived(
@@ -485,6 +506,14 @@
 		} catch (listError) {
 			console.error('[persistence] thread list failed', listError);
 			persistenceError = `会话列表刷新失败，请稍后重试。\n${inlineErrorDetails(listError)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'thread-list-failed',
+				summary: '会话列表刷新失败。',
+				details: inlineErrorDetails(listError),
+				threadId: session?.thread.id ?? null
+			});
 		}
 	}
 
@@ -503,10 +532,20 @@
 		try {
 			await checkpointWriter.flush();
 			persistenceError = '';
+			resolveOperationalIssue('storage-checkpoint');
 			return true;
 		} catch (saveError) {
 			console.error('[persistence] checkpoint failed', saveError);
 			persistenceError = `字幕仍保留在当前页面中，系统会继续尝试保存。\n${inlineErrorDetails(saveError)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'checkpoint-failed',
+				summary: '本地字幕保存失败；当前页面中的内容仍保留。',
+				details: inlineErrorDetails(saveError),
+				threadId: session?.thread.id ?? null,
+				dedupeKey: 'storage-checkpoint'
+			});
 			return false;
 		}
 	}
@@ -531,6 +570,14 @@
 		} catch (exportError) {
 			console.error('[persistence] export failed', exportError);
 			persistenceError = `会话导出失败，请稍后重试。\n${inlineErrorDetails(exportError)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'export-failed',
+				summary: '会话导出失败。',
+				details: inlineErrorDetails(exportError),
+				threadId: session?.thread.id ?? null
+			});
 		}
 	}
 
@@ -556,6 +603,13 @@
 		} catch (importError) {
 			console.error('[persistence] import failed', importError);
 			persistenceError = `会话文件无效或恢复失败，本地原有会话未被清除。\n${inlineErrorDetails(importError)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'import-failed',
+				summary: '会话文件无效或恢复失败。',
+				details: inlineErrorDetails(importError)
+			});
 		} finally {
 			sessionSwitching = false;
 			if (backupInput) backupInput.value = '';
@@ -609,6 +663,14 @@
 		} catch (switchError) {
 			console.error('[persistence] thread switch failed', switchError);
 			persistenceError = `会话切换失败，请稍后重试。\n${inlineErrorDetails(switchError)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'thread-switch-failed',
+				summary: '会话切换失败。',
+				details: inlineErrorDetails(switchError),
+				threadId
+			});
 		} finally {
 			sessionSwitching = false;
 		}
@@ -740,6 +802,39 @@
 		let restoreAllowed = true;
 		let restoreTimer: number | null = null;
 		let checkpointTimer: number | null = null;
+		const handleOperationalLog = (event: Event) => {
+			const detail = (event as CustomEvent<OperationalLogEventDetail>).detail;
+			const at = nowIso();
+			if (detail.action === 'record') {
+				operationalLogs = recordOperationalLog(operationalLogs, detail.input, {
+					id: crypto.randomUUID(),
+					now: at
+				});
+			} else {
+				operationalLogs = resolveOperationalLog(
+					operationalLogs,
+					detail.dedupeKey,
+					detail.state,
+					at
+				);
+			}
+			const changed =
+				detail.action === 'record'
+					? operationalLogs.find(
+							(entry) =>
+								entry.dedupeKey ===
+								(detail.input.dedupeKey ?? defaultOperationalLogDedupeKey(detail.input))
+						)
+					: operationalLogs.find((entry) => entry.dedupeKey === detail.dedupeKey);
+			if (changed && repository) {
+				void repository
+					.saveOperationalLog($state.snapshot(changed))
+					.catch((saveError: unknown) =>
+						console.error('[operational-log] persistence failed', saveError)
+					);
+			}
+		};
+		window.addEventListener(OPERATIONAL_LOG_EVENT, handleOperationalLog);
 		try {
 			const storedCaptionFontSize = localStorage.getItem(CAPTION_FONT_SIZE_STORAGE_KEY);
 			if (storedCaptionFontSize !== null) {
@@ -837,6 +932,15 @@
 			onError: (message) => {
 				if (import.meta.env.DEV) activeAudioTest?.errors.push(message);
 				error = message;
+				emitOperationalLog({
+					severity: 'warning',
+					source: 'realtime',
+					code: 'realtime-event-error',
+					summary: 'Realtime 返回了错误事件。',
+					details: message,
+					threadId: session?.thread.id ?? null,
+					runId: session ? (activeCaptureRun(session)?.id ?? null) : null
+				});
 			},
 			onConnectionFailure: (message) => {
 				if (import.meta.env.DEV) {
@@ -845,6 +949,14 @@
 				}
 				error = message;
 				endFailedRun(message);
+				emitOperationalLog({
+					severity: 'error',
+					source: 'realtime',
+					code: 'connection-failed',
+					summary: '实时连接中断，本段收音已结束。',
+					details: message,
+					threadId: session?.thread.id ?? null
+				});
 				if (import.meta.env.DEV) finishAudioTest('connection-failed');
 			}
 		};
@@ -897,6 +1009,12 @@
 						}
 
 						repository = localRepository;
+						try {
+							operationalLogs = await localRepository.loadOperationalLogs();
+						} catch (logLoadError) {
+							console.error('[operational-log] restore failed', logLoadError);
+							operationalLogs = [];
+						}
 						checkpointWriter = new CheckpointWriter(async (snapshot) => {
 							await localRepository.saveCheckpoint({ ...snapshot, checkpointedAt: nowIso() });
 						});
@@ -931,6 +1049,13 @@
 							})
 							.catch((storageError: unknown) => {
 								console.warn('[persistence] persistent storage request failed', storageError);
+								emitOperationalLog({
+									severity: 'warning',
+									source: 'storage',
+									code: 'persistent-storage-denied',
+									summary: '浏览器未授予持久存储，记录仍会尽力保存在本设备。',
+									details: inlineErrorDetails(storageError)
+								});
 								if (!disposed) storageDurability = 'best-effort';
 							});
 						checkpointTimer = window.setInterval(
@@ -955,6 +1080,13 @@
 				persistencePhase = 'unavailable';
 				storageDurability = 'best-effort';
 				persistenceError = `本地历史记录不可用；实时翻译仍可继续。\n${inlineErrorDetails(restoreError)}`;
+				emitOperationalLog({
+					severity: 'error',
+					source: 'storage',
+					code: 'restore-failed',
+					summary: '本地历史记录恢复失败；实时翻译仍可继续。',
+					details: inlineErrorDetails(restoreError)
+				});
 			})
 			.finally(() => {
 				if (restoreTimer !== null) clearTimeout(restoreTimer);
@@ -993,6 +1125,7 @@
 			restoreAllowed = false;
 			document.removeEventListener('visibilitychange', handleVisibility);
 			window.removeEventListener('pagehide', handlePageHide);
+			window.removeEventListener(OPERATIONAL_LOG_EVENT, handleOperationalLog);
 			if (checkpointTimer !== null) clearInterval(checkpointTimer);
 			clearInterval(usageTimer);
 			if (followFrame !== null) cancelAnimationFrame(followFrame);
@@ -1063,6 +1196,15 @@
 				audioFileSource?.stop();
 			}
 			error = message;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'realtime',
+				code: 'start-failed',
+				summary: '实时翻译启动失败。',
+				details: message,
+				threadId: session?.thread.id ?? null,
+				runId: session ? (activeCaptureRun(session)?.id ?? null) : null
+			});
 			endFailedRun(message);
 			if (import.meta.env.DEV) finishAudioTest('startup-failed');
 		}
@@ -1457,6 +1599,12 @@
 				<pre>{diagnosticReportText}</pre>
 			</details>
 		</section>
+
+		<OperationalLogPanel
+			entries={operationalLogs}
+			{diagnosticsMode}
+			onClear={() => void clearOperationalLogs()}
+		/>
 	</main>
 </div>
 

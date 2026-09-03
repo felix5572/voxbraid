@@ -2,6 +2,7 @@
 	import { untrack } from 'svelte';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { inlineErrorDetails } from '../error-details';
+	import { emitOperationalLog, resolveOperationalIssue } from '../operational-log';
 	import type { LocalSessionRepository } from '../persistence/local-session-repository';
 	import { ProjectionWorker } from '../projection/projection-worker';
 	import type { CaptureRun } from '../session/types';
@@ -63,7 +64,7 @@
 	}: Props = $props();
 	let legacySummary = $state<StoredAutoSummary | null>(null);
 	let blocks = $state<StoredCleanTranscriptBlock[]>([]);
-	let phase = $state<'loading' | 'idle' | 'requesting' | 'failed'>('loading');
+	let phase = $state<'loading' | 'idle' | 'requesting'>('loading');
 	let errorMessage = $state('');
 	let persistenceMessage = $state('');
 	let copyStatus = $state('');
@@ -76,6 +77,7 @@
 	let observedRunWasActive = false;
 	const automaticBaselines = new SvelteMap<string, CleanTranscriptCursor>();
 	const pendingRunEnds = new SvelteSet<string>();
+	const automaticallyRejectedRanges = new SvelteSet<string>();
 	const REQUEST_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
 		hour: '2-digit',
 		minute: '2-digit',
@@ -83,6 +85,10 @@
 	});
 
 	const threadId = $derived(session?.thread.id ?? null);
+
+	function cleanIssueKey(runId: string, sourceStart: number, sourceEnd: number): string {
+		return `clean-transcript:${runId}:${sourceStart}:${sourceEnd}`;
+	}
 	const hasTranscript = $derived(
 		Boolean(
 			session?.runs.some(
@@ -125,10 +131,20 @@
 		force: boolean,
 		allowShort: boolean
 	): CleanTranscriptCandidate | null {
-		return CLEAN_TRANSCRIPT_POLICY.nextCandidate(run, runCursor(run, manual), {
+		const candidate = CLEAN_TRANSCRIPT_POLICY.nextCandidate(run, runCursor(run, manual), {
 			force,
 			allowShort
 		});
+		if (
+			candidate &&
+			!manual &&
+			automaticallyRejectedRanges.has(
+				cleanIssueKey(candidate.runId, candidate.sourceStart, candidate.sourceEnd)
+			)
+		) {
+			return null;
+		}
+		return candidate;
 	}
 
 	function publishCleanTranscript(): void {
@@ -149,6 +165,7 @@
 		blocks = [];
 		automaticBaselines.clear();
 		pendingRunEnds.clear();
+		automaticallyRejectedRanges.clear();
 		errorMessage = '';
 		persistenceMessage = '';
 		copyStatus = '';
@@ -167,6 +184,14 @@
 			} catch (error) {
 				console.error('[clean-transcript] restore failed', error);
 				persistenceMessage = `课堂清稿记录读取失败；本页仍可继续生成。\n${inlineErrorDetails(error)}`;
+				emitOperationalLog({
+					severity: 'error',
+					source: 'storage',
+					code: 'clean-restore-failed',
+					summary: '课堂清稿记录读取失败；本页仍可继续生成。',
+					details: inlineErrorDetails(error),
+					threadId: nextThreadId
+				});
 			}
 		}
 		if (!worker.ownsLoad(generation) || session?.thread.id !== nextThreadId) return;
@@ -239,6 +264,16 @@
 		} catch (error) {
 			console.error('[clean-transcript] save failed', error);
 			persistenceMessage = `清稿已生成，但保存到本设备失败。\n${inlineErrorDetails(error)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'storage',
+				code: 'clean-save-failed',
+				summary: '清稿已生成，但保存到本设备失败。',
+				details: inlineErrorDetails(error),
+				threadId: block.threadId,
+				runId: block.runId,
+				requestId: block.clientRequestId
+			});
 		}
 	}
 
@@ -274,7 +309,20 @@
 		if (!sidecarRequestFits(request)) {
 			const requestBytes = serializedUtf8Bytes(request);
 			errorMessage = `当前清稿块为 ${requestBytes.toLocaleString()} 字节，超过 1,500,000 字节请求上限。`;
-			phase = 'failed';
+			phase = 'idle';
+			automaticallyRejectedRanges.add(
+				cleanIssueKey(candidate.runId, candidate.sourceStart, candidate.sourceEnd)
+			);
+			emitOperationalLog({
+				severity: 'error',
+				source: 'clean-transcript',
+				code: 'request-too-large',
+				summary: '清稿块超过浏览器请求上限，已跳过本次自动整理。',
+				details: errorMessage,
+				threadId: capturedSession.thread.id,
+				runId: candidate.runId,
+				dedupeKey: cleanIssueKey(candidate.runId, candidate.sourceStart, candidate.sourceEnd)
+			});
 			return false;
 		}
 
@@ -364,8 +412,26 @@
 		if (!completed) {
 			phase = 'idle';
 			errorMessage = block.error ?? '当前清稿块生成失败。';
+			emitOperationalLog({
+				severity: 'error',
+				source: 'clean-transcript',
+				code: block.errorCode ?? 'invalid-response',
+				summary: `第 ${block.sequence} 块清稿未完成。`,
+				details: block.error,
+				threadId: capturedSession.thread.id,
+				runId: candidate.runId,
+				requestId: clientRequestId,
+				dedupeKey: cleanIssueKey(candidate.runId, candidate.sourceStart, candidate.sourceEnd)
+			});
 			return false;
 		}
+		resolveOperationalIssue(
+			cleanIssueKey(candidate.runId, candidate.sourceStart, candidate.sourceEnd),
+			'corrected'
+		);
+		automaticallyRejectedRanges.delete(
+			cleanIssueKey(candidate.runId, candidate.sourceStart, candidate.sourceEnd)
+		);
 		phase = 'idle';
 		return true;
 	}
@@ -425,8 +491,16 @@
 				await repository.clearCleanTranscript(capturedSession.thread.id);
 			} catch (error) {
 				console.error('[clean-transcript] clear failed', error);
-				phase = 'failed';
+				phase = 'idle';
 				errorMessage = `无法清除旧清稿；原字幕和现有清稿均未改变。\n${inlineErrorDetails(error)}`;
+				emitOperationalLog({
+					severity: 'error',
+					source: 'clean-transcript',
+					code: 'rebuild-clear-failed',
+					summary: '无法清除旧清稿，已保留现有内容。',
+					details: inlineErrorDetails(error),
+					threadId: capturedSession.thread.id
+				});
 				onRequestingChange(false);
 				return;
 			}

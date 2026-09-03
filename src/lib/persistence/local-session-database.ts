@@ -3,6 +3,7 @@ import type { CaptureRun, TranscriptSegment, TranslationThread } from '../sessio
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
 import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
 import type { StoredRevisedSegment, StoredRevisionBatch } from '../projection/revision-records';
+import type { OperationalLogEntry } from '../operational-log';
 
 export const LOCAL_DB_EPOCH = 1;
 export const LOCAL_DB_NAME = import.meta.env.DEV ? `voxbraid-dev-${LOCAL_DB_EPOCH}` : 'voxbraid';
@@ -26,6 +27,7 @@ export class VoxBraidLocalDatabase extends Dexie {
 	cleanTranscriptBlocks!: Table<StoredCleanTranscriptBlock, string>;
 	revisionBatches!: Table<StoredRevisionBatch, string>;
 	revisedSegments!: Table<StoredRevisedSegment, string>;
+	operationalLogs!: Table<OperationalLogEntry, string>;
 
 	constructor(name = LOCAL_DB_NAME) {
 		super(name);
@@ -49,6 +51,9 @@ export class VoxBraidLocalDatabase extends Dexie {
 			translationPairSegments: null,
 			revisionBatches: '&id,threadId,runId,&[runId+sequence]',
 			revisedSegments: '&id,threadId,runId,state,&[runId+sourceStart]'
+		});
+		this.version(6).stores({
+			operationalLogs: '&id,lastOccurredAt,severity,source,threadId,state,dedupeKey'
 		});
 	}
 }

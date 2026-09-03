@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
+	import { emitOperationalLog } from '../operational-log';
 	import type { TranslationSessionState } from '../session/translation-session';
 	import { sendSidecarRequest, sidecarErrorDetails, sidecarLocalFailure } from './client';
 	import { captureSidecarContext, sidecarRequestFits } from './context';
@@ -191,6 +192,17 @@
 			completedInvocation,
 			...threadInvocations.slice(invocationIndex + 1)
 		]);
+		if (result.status === 'failed') {
+			emitOperationalLog({
+				severity: 'error',
+				source: 'conversation',
+				code: result.error.code,
+				summary: '自由对话请求未完成。',
+				details: result.error.message,
+				threadId: context.threadId,
+				requestId: clientRequestId
+			});
+		}
 		void followTail();
 	}
 
