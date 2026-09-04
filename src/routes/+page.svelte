@@ -7,7 +7,7 @@
 		isCreditBalanceAnchor,
 		type CreditBalanceAnchor
 	} from '$lib/billing/credit-balance';
-	import { inlineErrorDetails } from '$lib/error-details';
+	import { errorDetails, inlineErrorDetails } from '$lib/error-details';
 	import OperationalLogPanel from '$lib/OperationalLogPanel.svelte';
 	import {
 		OPERATIONAL_LOG_EVENT,
@@ -205,6 +205,7 @@
 	let usageNowMs = $state(Date.now());
 	let officialUsage = $state<OfficialUsageSummary | null>(null);
 	let officialUsagePhase = $state<OfficialUsagePhase>('loading');
+	let officialUsageError = $state('');
 	let officialUsageRequest = 0;
 	let creditBalanceAnchor = $state<CreditBalanceAnchor | null>(null);
 	let creditBalanceInput = $state('');
@@ -524,7 +525,7 @@
 			backupMessage = 'Realtime 原始诊断报告已复制。';
 		} catch (copyError) {
 			console.error('[realtime-diagnostics] copy failed', copyError);
-			backupMessage = '复制失败；请展开报告后手动选择文本。';
+			backupMessage = `复制失败；请展开报告后手动选择文本。\n${inlineErrorDetails(copyError)}`;
 		}
 	}
 
@@ -642,16 +643,43 @@
 			const response = await fetch(`/api/openai/usage-summary${force ? '?refresh=1' : ''}`, {
 				cache: 'no-store'
 			});
-			const body: unknown = await response.json().catch(() => null);
+			const rawBody = await response.text();
+			let body: unknown = null;
+			try {
+				body = JSON.parse(rawBody);
+			} catch (parseError) {
+				throw new Error(
+					`OpenAI 账目端点返回了非 JSON 响应（HTTP ${response.status}）。\n原始错误：\n${errorDetails(parseError)}\n原始响应：\n${rawBody.slice(0, 4_096)}`,
+					{ cause: parseError }
+				);
+			}
 			if (!response.ok || !isOfficialUsageSummary(body)) {
-				throw new Error(`Official usage request failed with HTTP ${response.status}.`);
+				const message =
+					typeof body === 'object' &&
+					body !== null &&
+					'message' in body &&
+					typeof body.message === 'string'
+						? body.message
+						: `OpenAI 账目响应未通过客户端校验。\n原始响应：\n${rawBody.slice(0, 4_096)}`;
+				throw new Error(`OpenAI 账目请求失败（HTTP ${response.status}）。\n${message}`);
 			}
 			if (request !== officialUsageRequest) return;
 			officialUsage = body;
 			officialUsagePhase = 'ready';
-		} catch {
+			officialUsageError = '';
+			resolveOperationalIssue('official-usage');
+		} catch (usageError) {
 			if (request !== officialUsageRequest) return;
 			officialUsagePhase = 'unavailable';
+			officialUsageError = errorDetails(usageError);
+			emitOperationalLog({
+				severity: 'warning',
+				source: 'billing',
+				code: 'official-usage-unavailable',
+				summary: `OpenAI 账目查询失败：${inlineErrorDetails(usageError).slice(0, 180)}`,
+				details: officialUsageError,
+				dedupeKey: 'official-usage'
+			});
 		}
 	}
 
@@ -1101,7 +1129,7 @@
 				})
 				.catch((loadError: unknown) => {
 					console.error('[audio-test] tools failed to load', loadError);
-					error = '录音回放测试工具加载失败。';
+					error = `录音回放测试工具加载失败。\n${inlineErrorDetails(loadError)}`;
 				});
 		}
 		const realtimeOptions: RealtimeTranslationClientOptions = {
@@ -1188,7 +1216,7 @@
 				})
 				.catch((testClientError: unknown) => {
 					console.error('[browser-test] client failed to load', testClientError);
-					error = '浏览器测试客户端加载失败。';
+					error = `浏览器测试客户端加载失败。\n${inlineErrorDetails(testClientError)}`;
 				});
 		} else {
 			client = new RealtimeTranslationClient(realtimeOptions, {
@@ -1689,7 +1717,10 @@
 					{:else if officialUsagePhase === 'loading'}
 						<strong class="muted">正在更新</strong>
 					{:else}
-						<strong class="muted">暂不可用</strong>
+						<details class="usage-error">
+							<summary class="muted">暂不可用 · 查看错误</summary>
+							<code>{officialUsageError || '未取得错误详情。'}</code>
+						</details>
 					{/if}
 				</div>
 			</div>

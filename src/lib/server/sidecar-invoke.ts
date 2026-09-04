@@ -506,6 +506,33 @@ export async function invokeSidecar({
 	let outputText = extractOutputText(body);
 	const usage = extractUsage(body);
 	if (body.status === 'completed' && responseId) {
+		if (!outputText.trim()) {
+			revisionResponsesTransport?.invalidate(prepared);
+			const rawUpstream = boundedResponseBody(upstreamResult.rawBody);
+			console.error('[sidecar] completed response contained no output text', {
+				clientRequestId: prepared.clientRequestId,
+				responseId,
+				requestId: upstreamRequestId,
+				model,
+				transport: upstreamResult.transportDiagnostic,
+				body: rawUpstream
+			});
+			return json(
+				failure(
+					prepared.clientRequestId,
+					now,
+					'invalid-response',
+					`OpenAI 报告响应已完成，但没有返回非空 output_text${requestIdSuffix(upstreamRequestId)}。\n原始响应：\n${rawUpstream}`,
+					{
+						responseId,
+						model,
+						usage,
+						transportDiagnostic: upstreamResult.transportDiagnostic
+					}
+				),
+				{ status: 502, headers: noStoreHeaders() }
+			);
+		}
 		if (prepared.structuredOutput === 'revision-pairs') {
 			try {
 				// Group length is a reading preference, not a correctness boundary.

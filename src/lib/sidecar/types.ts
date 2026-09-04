@@ -269,6 +269,7 @@ export function isSidecarInvokeResult(value: unknown): value is SidecarInvokeRes
 			typeof value.responseId === 'string' &&
 			typeof value.model === 'string' &&
 			typeof value.outputText === 'string' &&
+			value.outputText.trim().length > 0 &&
 			typeof value.completedAt === 'string'
 		);
 	}

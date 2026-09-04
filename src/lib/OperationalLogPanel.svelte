@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { inlineErrorDetails } from './error-details';
 	import type { OperationalLogEntry } from './operational-log';
 
 	interface Props {
@@ -51,8 +52,8 @@
 		try {
 			await navigator.clipboard.writeText(text());
 			copyStatus = '已复制';
-		} catch {
-			copyStatus = '复制失败';
+		} catch (error) {
+			copyStatus = `复制失败：${inlineErrorDetails(error)}`;
 		}
 	}
 </script>

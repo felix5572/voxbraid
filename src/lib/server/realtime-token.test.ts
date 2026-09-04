@@ -75,7 +75,43 @@ describe('issueTranslationToken', () => {
 		});
 
 		expect(response.status).toBe(502);
-		expect(await response.text()).not.toContain(API_KEY);
+		const body = await response.text();
+		expect(body).not.toContain(API_KEY);
+		expect(body).toContain('value=string');
+		expect(body).toContain('expires_at=undefined');
+		expect(body).not.toContain('temporary-client-secret');
+	});
+
+	it('preserves an upstream rejection body and request id', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const fetcher = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: {
+							message: 'Credit balance exhausted.',
+							type: 'insufficient_quota',
+							code: 'billing_hard_limit_reached'
+						}
+					}),
+					{
+						status: 429,
+						headers: { 'Content-Type': 'application/json', 'x-request-id': 'req-token' }
+					}
+				)
+		);
+		const response = await issueTranslationToken({
+			request: tokenRequest('zh'),
+			fetcher,
+			apiKey: API_KEY
+		});
+		const body = await response.text();
+
+		expect(response.status).toBe(502);
+		expect(body).toContain('HTTP 429，request ID req-token');
+		expect(body).toContain('Credit balance exhausted.');
+		expect(body).toContain('billing_hard_limit_reached');
+		expect(body).not.toContain(API_KEY);
 	});
 
 	it('returns only the validated short-lived credential fields', async () => {

@@ -1,7 +1,14 @@
 export type OperationalLogSeverity = 'warning' | 'error';
 export type OperationalLogState = 'active' | 'recovered' | 'corrected';
 export type OperationalLogSource =
-	'realtime' | 'storage' | 'revision' | 'clean-transcript' | 'conversation' | 'server' | 'system';
+	| 'realtime'
+	| 'storage'
+	| 'revision'
+	| 'clean-transcript'
+	| 'conversation'
+	| 'billing'
+	| 'server'
+	| 'system';
 
 export interface OperationalLogEntry {
 	id: string;

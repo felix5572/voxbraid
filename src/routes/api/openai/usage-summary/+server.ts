@@ -1,4 +1,5 @@
 import { openAIAdminKey } from '$lib/server/openai-admin-key';
+import { errorDetails } from '$lib/error-details';
 import { OpenAIUsageRequestError, OpenAIUsageSummaryCache } from '$lib/server/openai-usage-summary';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
@@ -19,6 +20,17 @@ export const GET: RequestHandler = async ({ fetch, url }) => {
 		);
 		return json(summary, { headers: responseHeaders });
 	} catch (error) {
+		const details = errorDetails(error);
+		const upstream =
+			error instanceof OpenAIUsageRequestError
+				? [
+						error.status === null ? null : `HTTP ${error.status}`,
+						error.requestId ? `request ID ${error.requestId}` : null,
+						error.upstreamCode ? `code=${error.upstreamCode}` : null
+					]
+						.filter(Boolean)
+						.join('，')
+				: '';
 		console.error('[openai-usage] official summary failed', {
 			name: error instanceof Error ? error.name : 'UnknownError',
 			message: error instanceof Error ? error.message : 'Unknown failure',
@@ -26,6 +38,11 @@ export const GET: RequestHandler = async ({ fetch, url }) => {
 			requestId: error instanceof OpenAIUsageRequestError ? error.requestId : null,
 			code: error instanceof OpenAIUsageRequestError ? error.upstreamCode : null
 		});
-		return json({ message: '官方用量暂时不可用。' }, { status: 502, headers: responseHeaders });
+		return json(
+			{
+				message: `官方用量暂时不可用${upstream ? `（${upstream}）` : ''}。\n原始错误：\n${details}`
+			},
+			{ status: 502, headers: responseHeaders }
+		);
 	}
 };

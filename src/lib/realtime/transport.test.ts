@@ -96,6 +96,20 @@ describe('exchangeTranslationSdp', () => {
 
 		await expect(
 			exchangeTranslationSdp('test-client-secret', 'offer-sdp', fetcher)
-		).rejects.toThrow('Translation call rejected.');
+		).rejects.toThrow('OpenAI WebRTC 握手失败（HTTP 400）：Translation call rejected.');
+	});
+
+	it('retains the request id and non-JSON response body from a failed handshake', async () => {
+		const fetcher = vi.fn(
+			async () =>
+				new Response('<h1>Bad gateway</h1>', {
+					status: 502,
+					headers: { 'x-request-id': 'req-sdp' }
+				})
+		);
+
+		await expect(
+			exchangeTranslationSdp('test-client-secret', 'offer-sdp', fetcher)
+		).rejects.toThrow(/HTTP 502，request ID req-sdp[\s\S]*<h1>Bad gateway<\/h1>/);
 	});
 });

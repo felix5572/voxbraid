@@ -684,6 +684,48 @@ describe('invokeSidecar', () => {
 		}
 	});
 
+	it('rejects a completed response without output text and preserves the upstream response', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		const fetcher = vi
+			.fn()
+			.mockResolvedValueOnce(jsonResponse({ input_tokens: 42 }))
+			.mockResolvedValueOnce(
+				jsonResponse(
+					{
+						id: 'resp-empty',
+						model: 'gpt-5.6-terra',
+						status: 'completed',
+						output: [],
+						usage: { input_tokens: 42, output_tokens: 0, total_tokens: 42 }
+					},
+					200,
+					'req-empty'
+				)
+			);
+
+		const response = await invokeSidecar({
+			request: request(),
+			fetcher,
+			apiKey: API_KEY,
+			now: () => NOW
+		});
+		const failure = await result(response);
+
+		expect(response.status).toBe(502);
+		expect(failure).toMatchObject({
+			status: 'failed',
+			responseId: 'resp-empty',
+			model: 'gpt-5.6-terra',
+			usageStatus: 'recorded',
+			error: { code: 'invalid-response' }
+		});
+		if (failure.status === 'failed') {
+			expect(failure.error.message).toContain('没有返回非空 output_text');
+			expect(failure.error.message).toContain('request ID req-empty');
+			expect(failure.error.message).toContain('"output":[]');
+		}
+	});
+
 	it('reports generation timeouts as possibly billable failures', async () => {
 		vi.spyOn(console, 'error').mockImplementation(() => undefined);
 		const abortError = new Error('aborted');

@@ -105,4 +105,36 @@ describe('sendSidecarRequest', () => {
 			diagnostic: { httpStatus: 502, requestBytes: expect.any(Number) }
 		});
 	});
+
+	it('rejects a completed response with blank output and retains the response body', async () => {
+		vi.spyOn(console, 'error').mockImplementation(() => undefined);
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						status: 'completed',
+						clientRequestId: 'request-1',
+						responseId: 'resp-empty',
+						model: 'gpt-5.6-terra',
+						outputText: '   ',
+						usageStatus: 'unavailable',
+						usage: null,
+						completedAt: '2026-09-02T12:00:01.000Z'
+					}),
+					{ status: 200, headers: { 'Content-Type': 'application/json' } }
+				)
+			)
+		);
+
+		const result = await sendSidecarRequest(request);
+
+		expect(result).toMatchObject({
+			status: 'failed',
+			error: {
+				code: 'invalid-response',
+				message: expect.stringContaining('"responseId":"resp-empty"')
+			}
+		});
+	});
 });

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
+	import { inlineErrorDetails } from '../error-details';
 	import type { AudioTestReport } from './audio-test-report';
 
 	let {
@@ -56,8 +57,9 @@
 			recorder.ondataavailable = (event) => {
 				if (event.data.size > 0) current.chunks.push(event.data);
 			};
-			recorder.onerror = () => {
-				recordingError = '录音失败，请重新尝试。';
+			recorder.onerror = (event) => {
+				const original = 'error' in event ? event.error : event;
+				recordingError = `录音失败，请重新尝试。\n${inlineErrorDetails(original)}`;
 				releaseRecordingStream(stream);
 				recording = null;
 			};
@@ -80,7 +82,7 @@
 			recorder.start();
 		} catch (error) {
 			console.error('[audio-test-recorder] start failed', error);
-			recordingError = error instanceof Error ? error.message : '无法开始录音。';
+			recordingError = `无法开始录音。\n${inlineErrorDetails(error)}`;
 		}
 	}
 

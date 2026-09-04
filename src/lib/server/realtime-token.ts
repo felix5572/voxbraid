@@ -8,6 +8,7 @@ import {
 	isRealtimeTranscriptionModel,
 	isTargetLanguage
 } from '../realtime/types';
+import { errorDetails } from '../error-details';
 import { json } from '@sveltejs/kit';
 
 const CLIENT_SECRET_URL = 'https://api.openai.com/v1/realtime/translations/client_secrets';
@@ -18,6 +19,50 @@ interface ClientSecretResponse {
 	value?: unknown;
 	expires_at?: unknown;
 	session?: { id?: unknown };
+}
+
+function boundedBody(value: string): string {
+	const limit = 4_096;
+	if (!value) return '[上游响应体为空]';
+	return value.length > limit
+		? `[上游响应共 ${value.length} 字符；以下为前 ${limit} 字符]\n${value.slice(0, limit)}\n[上游响应已截断]`
+		: `[上游响应共 ${value.length} 字符]\n${value}`;
+}
+
+function parseJson(value: string): unknown {
+	try {
+		return JSON.parse(value);
+	} catch {
+		return null;
+	}
+}
+
+function upstreamErrorDetails(value: unknown): string | null {
+	if (typeof value !== 'object' || value === null || !('error' in value)) return null;
+	const candidate = value.error;
+	if (typeof candidate !== 'object' || candidate === null) return null;
+	const fields = [
+		'message' in candidate && typeof candidate.message === 'string' ? candidate.message : null,
+		'type' in candidate && typeof candidate.type === 'string' ? `type=${candidate.type}` : null,
+		'code' in candidate && typeof candidate.code === 'string' ? `code=${candidate.code}` : null,
+		'param' in candidate && typeof candidate.param === 'string' ? `param=${candidate.param}` : null
+	].filter((field): field is string => field !== null);
+	return fields.length > 0 ? fields.join('；') : null;
+}
+
+function responseShape(value: unknown): string {
+	if (typeof value !== 'object' || value === null) return `responseType=${typeof value}`;
+	const record = value as Record<string, unknown>;
+	return [
+		`value=${typeof record.value}`,
+		`expires_at=${typeof record.expires_at}`,
+		`session=${typeof record.session}`,
+		`session.id=${
+			typeof record.session === 'object' && record.session !== null
+				? typeof (record.session as Record<string, unknown>).id
+				: 'unavailable'
+		}`
+	].join('，');
 }
 
 export interface IssueTranslationTokenOptions {
@@ -110,42 +155,55 @@ export async function issueTranslationToken({
 			})
 		});
 	} catch (error) {
+		const details = errorDetails(error);
 		console.error('[realtime-token] OpenAI request failed', {
-			name: error instanceof Error ? error.name : 'UnknownError',
-			message: error instanceof Error ? error.message : 'Unknown failure'
+			error: details
 		});
 		return json(
-			{ message: '暂时无法连接 OpenAI，请稍后重试。' },
+			{ message: `暂时无法连接 OpenAI。\n原始错误：\n${details}` },
 			{ status: 502, headers: noStoreHeaders() }
 		);
 	}
 
+	const rawUpstream = await upstream
+		.text()
+		.catch((error) => `[读取上游响应体失败]\n${errorDetails(error)}`);
+	const upstreamBody = parseJson(rawUpstream);
 	if (!upstream.ok) {
 		const requestId = upstream.headers.get('x-request-id');
-		const upstreamBody: unknown = await upstream.json().catch(() => null);
 		console.error('[realtime-token] OpenAI rejected client secret request', {
 			status: upstream.status,
 			requestId,
-			code: readUpstreamErrorCode(upstreamBody)
+			code: readUpstreamErrorCode(upstreamBody),
+			body: boundedBody(rawUpstream)
 		});
 		return json(
 			{
-				message: `OpenAI 拒绝了实时翻译凭证请求（HTTP ${upstream.status}）。`,
+				message: `OpenAI 拒绝了实时翻译凭证请求（HTTP ${upstream.status}${requestId ? `，request ID ${requestId}` : ''}）${upstreamErrorDetails(upstreamBody) ? `：${upstreamErrorDetails(upstreamBody)}` : '。'}\n原始响应：\n${boundedBody(rawUpstream)}`,
 				requestId
 			},
 			{ status: 502, headers: noStoreHeaders() }
 		);
 	}
 
-	const data = (await upstream.json()) as ClientSecretResponse;
+	const data = upstreamBody as ClientSecretResponse | null;
 	if (
+		!data ||
 		typeof data.value !== 'string' ||
 		typeof data.expires_at !== 'number' ||
 		typeof data.session?.id !== 'string'
 	) {
-		console.error('[realtime-token] OpenAI returned an unexpected client secret response');
+		const requestId = upstream.headers.get('x-request-id');
+		const shape = responseShape(upstreamBody);
+		console.error('[realtime-token] OpenAI returned an unexpected client secret response', {
+			requestId,
+			shape
+		});
 		return json(
-			{ message: 'OpenAI 返回了无法识别的凭证响应。' },
+			{
+				message: `OpenAI 返回了无法识别的凭证响应${requestId ? `（request ID ${requestId}）` : ''}。为避免泄露短期凭证，只报告字段形状：${shape}`,
+				requestId
+			},
 			{ status: 502, headers: noStoreHeaders() }
 		);
 	}

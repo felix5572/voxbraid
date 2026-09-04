@@ -84,6 +84,7 @@
 		minute: '2-digit',
 		second: '2-digit'
 	});
+	const LEGACY_EMPTY_OUTPUT_MESSAGE = '模型未返回清稿。';
 
 	const threadId = $derived(session?.thread.id ?? null);
 
@@ -227,6 +228,17 @@
 		return Number.isNaN(parsed.getTime()) ? timestamp : REQUEST_TIME_FORMATTER.format(parsed);
 	}
 
+	function blockErrorDetails(block: StoredCleanTranscriptBlock): string {
+		if (block.error === LEGACY_EMPTY_OUTPUT_MESSAGE) {
+			return `legacy-error-details-unavailable：该失败由旧版客户端记录，当时没有保存 OpenAI 原始响应，因此现在无法恢复。client request ${block.clientRequestId || '未知'}${block.responseId ? ` · OpenAI response ${block.responseId}` : ''}`;
+		}
+		return block.error ?? 'missing-error-details：失败记录没有错误详情。';
+	}
+
+	function failureSummary(value: string): string {
+		return value.split('\n', 1)[0].slice(0, 180);
+	}
+
 	function replaceBlock(block: StoredCleanTranscriptBlock): void {
 		blocks = [...blocks.filter((candidate) => candidate.id !== block.id), block].sort(
 			(left, right) => left.sequence - right.sequence
@@ -359,7 +371,8 @@
 		onRequestingChange(false);
 
 		const updatedAt = new Date().toISOString();
-		const completed = result.status === 'completed' && result.outputText.trim().length > 0;
+		// The server and client result validator both reject completed responses without text.
+		const completed = result.status === 'completed';
 		const priorAttempts = previousFailureAttempts(retry);
 		const failureAttempt: CleanTranscriptFailureAttempt | null =
 			result.status === 'failed'
@@ -401,11 +414,7 @@
 			errorCode: result.status === 'failed' ? result.error.code : null,
 			diagnostic: result.status === 'failed' ? (result.diagnostic ?? null) : null,
 			failureAttempts: failureAttempt ? [...priorAttempts, failureAttempt] : priorAttempts,
-			error: completed
-				? null
-				: result.status === 'failed'
-					? `${result.error.code}：${result.error.message}`
-					: '模型未返回清稿。',
+			error: result.status === 'failed' ? `${result.error.code}：${result.error.message}` : null,
 			updatedAt
 		};
 		replaceBlock(block);
@@ -417,7 +426,7 @@
 				severity: 'error',
 				source: 'clean-transcript',
 				code: block.errorCode ?? 'invalid-response',
-				summary: `第 ${block.sequence} 块清稿未完成。`,
+				summary: `第 ${block.sequence} 块：${failureSummary(block.error ?? 'missing-error-details')}`,
 				details: block.error,
 				threadId: capturedSession.thread.id,
 				runId: candidate.runId,
@@ -524,7 +533,7 @@
 			copyStatus = '已复制';
 		} catch (error) {
 			console.error('[clean-transcript] copy failed', error);
-			copyStatus = '复制失败，请手动选择文本';
+			copyStatus = `复制失败，请手动选择文本：${inlineErrorDetails(error)}`;
 		}
 	}
 
@@ -643,7 +652,9 @@
 				<div class="summary-text block">{block.text}</div>
 			{:else}
 				<details class="failed-block" role="alert" use:diagnosticsDisclosure={diagnosticsMode}>
-					<summary>第 {block.sequence} 块未整理成功 · {block.error?.split('\n', 1)[0]}</summary>
+					<summary
+						>第 {block.sequence} 块未整理成功 · {failureSummary(blockErrorDetails(block))}</summary
+					>
 					<span class="failure-meta">
 						{timeLabel(block.capturedAt)} 发起 · {timeLabel(block.updatedAt)} 失败 · 第
 						{block.runSequence} 段
@@ -670,7 +681,7 @@
 							</span>
 						{/if}
 					{/if}
-					<code>{block.error}</code>
+					<code>{blockErrorDetails(block)}</code>
 					{#if (block.failureAttempts?.length ?? 0) > 1}
 						<details>
 							<summary>查看之前 {block.failureAttempts!.length - 1} 次失败</summary>

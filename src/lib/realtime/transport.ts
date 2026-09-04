@@ -12,13 +12,28 @@ export const REALTIME_TRANSLATION_CALLS_URL =
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+function boundedBody(value: string): string {
+	const limit = 4_096;
+	if (!value) return '[响应体为空]';
+	return value.length > limit
+		? `[响应体共 ${value.length} 字符；以下为前 ${limit} 字符]\n${value.slice(0, limit)}\n[响应已截断]`
+		: `[响应体共 ${value.length} 字符]\n${value}`;
+}
+
 export async function apiResponseError(response: Response, fallback: string): Promise<Error> {
-	const body = await response.text();
+	let body: string;
+	try {
+		body = await response.text();
+	} catch (error) {
+		const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		return new Error(`${fallback}（HTTP ${response.status}）；读取错误响应体失败：${details}`);
+	}
+	let upstreamMessage: string | null = null;
 	try {
 		const parsed: unknown = JSON.parse(body);
 		if (typeof parsed === 'object' && parsed !== null) {
 			if ('message' in parsed && typeof parsed.message === 'string') {
-				return new Error(parsed.message);
+				upstreamMessage = parsed.message;
 			}
 			if (
 				'error' in parsed &&
@@ -27,13 +42,16 @@ export async function apiResponseError(response: Response, fallback: string): Pr
 				'message' in parsed.error &&
 				typeof parsed.error.message === 'string'
 			) {
-				return new Error(parsed.error.message);
+				upstreamMessage = parsed.error.message;
 			}
 		}
 	} catch {
 		// SDP errors may be plain text instead of JSON.
 	}
-	return new Error(`${fallback}（HTTP ${response.status}）`);
+	const requestId = response.headers.get('x-request-id');
+	return new Error(
+		`${fallback}（HTTP ${response.status}${requestId ? `，request ID ${requestId}` : ''}）${upstreamMessage ? `：${upstreamMessage}` : '。'}\n原始响应：\n${boundedBody(body)}`
+	);
 }
 
 export async function fetchTranslationToken(
@@ -54,7 +72,23 @@ export async function fetchTranslationToken(
 		throw await apiResponseError(response, '无法创建实时翻译凭证');
 	}
 
-	const token: unknown = await response.json();
+	let rawBody: string;
+	try {
+		rawBody = await response.text();
+	} catch (error) {
+		const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		throw new Error(`读取实时翻译凭证响应失败。原始错误：${details}`, { cause: error });
+	}
+	let token: unknown;
+	try {
+		token = JSON.parse(rawBody);
+	} catch (error) {
+		const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+		throw new Error(
+			`实时翻译凭证响应不是有效 JSON。原始错误：${details}\n${boundedBody(rawBody)}`,
+			{ cause: error }
+		);
+	}
 	if (
 		typeof token !== 'object' ||
 		token === null ||
@@ -63,7 +97,10 @@ export async function fetchTranslationToken(
 		!('expiresAt' in token) ||
 		typeof token.expiresAt !== 'number'
 	) {
-		throw new Error('服务端没有返回有效的实时翻译凭证。');
+		const record = token as Record<string, unknown>;
+		throw new Error(
+			`服务端没有返回有效的实时翻译凭证。字段形状：clientSecret=${typeof record.clientSecret}，expiresAt=${typeof record.expiresAt}`
+		);
 	}
 
 	return token as TranslationTokenResponse;

@@ -199,7 +199,7 @@
 				severity: 'error',
 				source: 'conversation',
 				code: result.error.code,
-				summary: '自由对话请求未完成。',
+				summary: `${result.error.code}：${failureSummary(result.error.message)}`,
 				details: result.error.message,
 				threadId: context.threadId,
 				requestId: clientRequestId
