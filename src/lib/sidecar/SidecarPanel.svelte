@@ -92,6 +92,7 @@
 		<ConversationPanel
 			{session}
 			{outputLanguage}
+			{repository}
 			cleanedTranscript={currentCleanedTranscript}
 			{diagnosticsMode}
 			disabled={disabled || !canStartProjection('interactive', inFlightLanes) || !cleanContextReady}

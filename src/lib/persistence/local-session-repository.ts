@@ -1,6 +1,12 @@
 import type { CaptureRun, TranscriptSegment, TranslationThread } from '../session/types';
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
 import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
+import {
+	abandonConversationInvocation,
+	compareConversationInvocations,
+	validateConversationInvocation,
+	type StoredConversationInvocation
+} from '../sidecar/conversation-records';
 import type {
 	StoredRevisedSegment,
 	StoredRevisionBatch,
@@ -274,6 +280,66 @@ export class LocalSessionRepository {
 		await this.database.operationalLogs.clear();
 	}
 
+	async loadConversationInvocations(threadId: string): Promise<StoredConversationInvocation[]> {
+		const records = await this.database.conversationInvocations
+			.where('threadId')
+			.equals(threadId)
+			.toArray();
+		return records.sort(compareConversationInvocations);
+	}
+
+	async saveConversationInvocation(record: StoredConversationInvocation): Promise<void> {
+		validateConversationInvocation(record);
+		await this.database.transaction(
+			'rw',
+			this.database.threads,
+			this.database.conversationInvocations,
+			async () => {
+				if (!(await this.database.threads.get(record.threadId))) {
+					throw new Error(`Thread not found: ${record.threadId}.`);
+				}
+				const existing = await this.database.conversationInvocations.get(record.id);
+				if (
+					existing &&
+					(existing.threadId !== record.threadId || existing.sequence !== record.sequence)
+				) {
+					throw new Error(`Conversation invocation ${record.id} changed identity.`);
+				}
+				await this.database.conversationInvocations.put(record);
+			}
+		);
+	}
+
+	async repairAbandonedConversationInvocations(
+		threadId: string,
+		failedAt: string
+	): Promise<StoredConversationInvocation[]> {
+		return this.database.transaction('rw', this.database.conversationInvocations, async () => {
+			const records = await this.database.conversationInvocations
+				.where('threadId')
+				.equals(threadId)
+				.toArray();
+			const repaired = records.map((record) => abandonConversationInvocation(record, failedAt));
+			const changed = repaired.filter((record, index) => record !== records[index]);
+			if (changed.length > 0) await this.database.conversationInvocations.bulkPut(changed);
+			return repaired.sort(compareConversationInvocations);
+		});
+	}
+
+	async clearConversationInvocations(threadId: string): Promise<void> {
+		await this.database.transaction(
+			'rw',
+			this.database.threads,
+			this.database.conversationInvocations,
+			async () => {
+				if (!(await this.database.threads.get(threadId))) {
+					throw new Error(`Thread not found: ${threadId}.`);
+				}
+				await this.database.conversationInvocations.where('threadId').equals(threadId).delete();
+			}
+		);
+	}
+
 	async loadAutoSummary(threadId: string): Promise<StoredAutoSummary | null> {
 		return (await this.database.autoSummaries.get(threadId)) ?? null;
 	}
@@ -541,23 +607,31 @@ export class LocalSessionRepository {
 				this.database.autoSummaries,
 				this.database.cleanTranscriptBlocks,
 				this.database.revisionBatches,
-				this.database.revisedSegments
+				this.database.revisedSegments,
+				this.database.conversationInvocations
 			],
 			async () => {
 				const threadRecord = await this.database.threads.get(threadId);
 				if (!threadRecord) return null;
 				const runRecords = await this.database.runs.where('threadId').equals(threadId).toArray();
 				const runIds = runRecords.map((run) => run.id);
-				const [segments, legacySummary, cleanBlocks, revisionBatches, revisedSegments] =
-					await Promise.all([
-						runIds.length === 0
-							? Promise.resolve([])
-							: this.database.segments.where('runId').anyOf(runIds).toArray(),
-						this.database.autoSummaries.get(threadId),
-						this.database.cleanTranscriptBlocks.where('threadId').equals(threadId).toArray(),
-						this.database.revisionBatches.where('threadId').equals(threadId).toArray(),
-						this.database.revisedSegments.where('threadId').equals(threadId).toArray()
-					]);
+				const [
+					segments,
+					legacySummary,
+					cleanBlocks,
+					revisionBatches,
+					revisedSegments,
+					conversationInvocations
+				] = await Promise.all([
+					runIds.length === 0
+						? Promise.resolve([])
+						: this.database.segments.where('runId').anyOf(runIds).toArray(),
+					this.database.autoSummaries.get(threadId),
+					this.database.cleanTranscriptBlocks.where('threadId').equals(threadId).toArray(),
+					this.database.revisionBatches.where('threadId').equals(threadId).toArray(),
+					this.database.revisedSegments.where('threadId').equals(threadId).toArray(),
+					this.database.conversationInvocations.where('threadId').equals(threadId).toArray()
+				]);
 				return {
 					schemaVersion: SESSION_ARCHIVE_VERSION,
 					exportedAt,
@@ -577,7 +651,8 @@ export class LocalSessionRepository {
 					cleanTranscriptProjection: {
 						legacySummary: legacySummary ?? null,
 						blocks: cleanBlocks.sort((left, right) => left.sequence - right.sequence)
-					}
+					},
+					conversationInvocations: conversationInvocations.sort(compareConversationInvocations)
 				};
 			}
 		);
@@ -613,7 +688,8 @@ export class LocalSessionRepository {
 				this.database.autoSummaries,
 				this.database.cleanTranscriptBlocks,
 				this.database.revisionBatches,
-				this.database.revisedSegments
+				this.database.revisedSegments,
+				this.database.conversationInvocations
 			],
 			async () => {
 				const existingRuns = await this.database.runs
@@ -672,6 +748,16 @@ export class LocalSessionRepository {
 				) {
 					throw new Error('Imported clean transcript block ID belongs to another thread.');
 				}
+				const importedConversationCollisions = await this.database.conversationInvocations.bulkGet(
+					archive.conversationInvocations.map((invocation) => invocation.id)
+				);
+				if (
+					importedConversationCollisions.some(
+						(invocation) => invocation !== undefined && invocation.threadId !== archive.thread.id
+					)
+				) {
+					throw new Error('Imported conversation invocation ID belongs to another thread.');
+				}
 
 				if (existingRunIds.length > 0) {
 					await this.database.segments.where('runId').anyOf(existingRunIds).delete();
@@ -683,6 +769,10 @@ export class LocalSessionRepository {
 					.delete();
 				await this.database.revisedSegments.where('threadId').equals(archive.thread.id).delete();
 				await this.database.revisionBatches.where('threadId').equals(archive.thread.id).delete();
+				await this.database.conversationInvocations
+					.where('threadId')
+					.equals(archive.thread.id)
+					.delete();
 				await this.database.runs.where('threadId').equals(archive.thread.id).delete();
 				await this.database.threads.put(toThreadRecord(archive.thread, checkpointedAt));
 				await this.database.runs.bulkPut(
@@ -695,6 +785,7 @@ export class LocalSessionRepository {
 					await this.database.autoSummaries.put(archive.cleanTranscriptProjection.legacySummary);
 				}
 				await this.database.cleanTranscriptBlocks.bulkPut(archive.cleanTranscriptProjection.blocks);
+				await this.database.conversationInvocations.bulkPut(archive.conversationInvocations);
 			}
 		);
 		return { threadId: archive.thread.id, warnings: parsed.warnings };

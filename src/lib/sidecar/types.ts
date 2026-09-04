@@ -133,6 +133,7 @@ export type SidecarErrorCode =
 	| 'invalid-revision-boundary'
 	| 'budget-check-failed'
 	| 'request-timeout'
+	| 'request-outcome-unknown'
 	| 'websocket-outcome-unknown'
 	| 'upstream-failed'
 	| 'upstream-incomplete';

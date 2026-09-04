@@ -1188,8 +1188,9 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		);
 		assert.ok(freshThreadRequest);
 		assert.equal(freshThreadRequest.context.cleanedTranscript, '');
+		page.once('dialog', (dialog) => dialog.accept());
 		await page.getByRole('button', { name: '清空对话', exact: true }).click();
-		assert.equal(await page.getByText('Fresh thread question', { exact: true }).count(), 0);
+		await page.getByText('Fresh thread question', { exact: true }).waitFor({ state: 'detached' });
 
 		await firstThreadButton.click();
 		await page.getByText('What was captured?', { exact: true }).waitFor();
@@ -1214,13 +1215,27 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		});
 		await firstThreadButton.click();
 		await page.getByText('Hold across thread switch', { exact: true }).waitFor();
+		await page.reload({ waitUntil: 'networkidle' });
+		await waitForReady(page);
+		await firstThreadButton.click();
+		await mainText(page, firstSource).waitFor();
+		await page.getByText('What was captured?', { exact: true }).waitFor();
+		await page.getByText('What did you just answer?', { exact: true }).waitFor();
+		await page.getByText('Hold across thread switch', { exact: true }).waitFor();
+		assert.equal(
+			(await readStore(page, 'conversationInvocations')).filter(
+				(record) => record.context.threadId === firstRun.threadId
+			).length,
+			3
+		);
 		const downloadPromise = page.waitForEvent('download');
 		await page.getByRole('button', { name: '导出恢复备份' }).click();
 		const download = await downloadPromise;
 		const archivePath = await download.path();
 		assert.ok(archivePath);
 		const archive = JSON.parse(await readFile(archivePath, 'utf8'));
-		assert.equal(archive.schemaVersion, 4);
+		assert.equal(archive.schemaVersion, 5);
+		assert.equal(archive.conversationInvocations.length, 3);
 		assert.ok(Array.isArray(archive.cleanTranscriptProjection.blocks));
 		assert.ok(archive.cleanTranscriptProjection.blocks.length > 0);
 		assert.ok(Array.isArray(archive.revisionProjection.batches));
@@ -1231,7 +1246,8 @@ async function testPauseResumeAndNewThread(browser, baseUrl) {
 		assert.ok(evaluationPath);
 		const evaluation = JSON.parse(await readFile(evaluationPath, 'utf8'));
 		assert.equal(evaluation.kind, 'voxbraid-evaluation-bundle');
-		assert.equal(evaluation.schemaVersion, 1);
+		assert.equal(evaluation.schemaVersion, 2);
+		assert.equal(evaluation.projections.conversationInvocations.length, 3);
 		assert.ok(evaluation.summary.metrics.revisionTransport);
 		assert.equal(typeof evaluation.summary.usage.persistedProjectionTasks.totalTokens, 'number');
 		assert.ok(Array.isArray(evaluation.summary.limitations));

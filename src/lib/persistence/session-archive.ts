@@ -25,8 +25,13 @@ import type {
 	SidecarFailureDiagnostic,
 	SidecarTransportDiagnostic
 } from '../sidecar/types';
+import { isSidecarInvokeResult } from '../sidecar/types';
+import {
+	validateConversationInvocation,
+	type StoredConversationInvocation
+} from '../sidecar/conversation-records';
 
-export const SESSION_ARCHIVE_VERSION = 4 as const;
+export const SESSION_ARCHIVE_VERSION = 5 as const;
 
 export interface StoredCleanTranscriptProjection {
 	legacySummary: StoredAutoSummary | null;
@@ -41,6 +46,7 @@ export interface SessionArchive {
 	segments: TranscriptSegment[];
 	revisionProjection: StoredRevisionProjection;
 	cleanTranscriptProjection: StoredCleanTranscriptProjection;
+	conversationInvocations: StoredConversationInvocation[];
 }
 
 export interface ParsedSessionArchive {
@@ -77,10 +83,77 @@ const SIDECAR_ERROR_CODES = new Set<SidecarErrorCode>([
 	'invalid-revision-boundary',
 	'budget-check-failed',
 	'request-timeout',
+	'request-outcome-unknown',
 	'websocket-outcome-unknown',
 	'upstream-failed',
 	'upstream-incomplete'
 ]);
+
+function conversationInvocation(value: unknown, index: number): StoredConversationInvocation {
+	const label = `conversationInvocations[${index}]`;
+	const input = record(value, label);
+	const intent = record(input.intent, `${label}.intent`);
+	const context = record(input.context, `${label}.context`);
+	const state = string(input.state, `${label}.state`);
+	if (intent.kind !== 'ask' || intent.trigger !== 'manual') {
+		throw new Error(`${label}.intent must be a manual ask.`);
+	}
+	if (state !== 'requesting' && state !== 'completed' && state !== 'failed') {
+		throw new Error(`${label}.state is invalid.`);
+	}
+	const result = input.result === null ? null : structuredClone(input.result);
+	if (result !== null && !isSidecarInvokeResult(result)) {
+		throw new Error(`${label}.result is invalid.`);
+	}
+	if (result?.usage) modelUsage(result.usage, `${label}.result.usage`);
+	if (result?.status === 'completed') {
+		timestamp(result.completedAt, `${label}.result.completedAt`);
+	} else if (result?.status === 'failed') {
+		timestamp(result.failedAt, `${label}.result.failedAt`);
+		if (sidecarErrorCode(result.error.code, `${label}.result.error.code`) === null) {
+			throw new Error(`${label}.result.error.code is invalid.`);
+		}
+	}
+	const scope = string(context.scope, `${label}.context.scope`);
+	if (scope !== 'latest-run' && scope !== 'current-thread') {
+		throw new Error(`${label}.context.scope is invalid.`);
+	}
+	const invocation: StoredConversationInvocation = {
+		id: string(input.id, `${label}.id`),
+		threadId: string(input.threadId, `${label}.threadId`),
+		sequence: positiveInteger(input.sequence, `${label}.sequence`),
+		intent: {
+			kind: 'ask',
+			trigger: 'manual',
+			question: string(intent.question, `${label}.intent.question`),
+			outputLanguage: string(intent.outputLanguage, `${label}.intent.outputLanguage`)
+		},
+		context: {
+			threadId: string(context.threadId, `${label}.context.threadId`),
+			scope,
+			capturedAt: timestamp(context.capturedAt, `${label}.context.capturedAt`),
+			runCount: nonnegativeInteger(context.runCount, `${label}.context.runCount`),
+			sourceCharacters: nonnegativeInteger(
+				context.sourceCharacters,
+				`${label}.context.sourceCharacters`
+			),
+			translationCharacters: nonnegativeInteger(
+				context.translationCharacters,
+				`${label}.context.translationCharacters`
+			),
+			cleanedTranscriptCharacters: nonnegativeInteger(
+				context.cleanedTranscriptCharacters,
+				`${label}.context.cleanedTranscriptCharacters`
+			),
+			historyTurns: nonnegativeInteger(context.historyTurns, `${label}.context.historyTurns`)
+		},
+		state,
+		result,
+		updatedAt: timestamp(input.updatedAt, `${label}.updatedAt`)
+	};
+	validateConversationInvocation(invocation);
+	return invocation;
+}
 
 function record(value: unknown, label: string): Record<string, unknown> {
 	if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -556,6 +629,20 @@ export function validateSessionArchive(archive: SessionArchive): SessionArchive 
 		archive.cleanTranscriptProjection.blocks.map((item) => String(item.sequence)),
 		'clean transcript block sequences'
 	);
+	unique(
+		archive.conversationInvocations.map((item) => item.id),
+		'conversation invocation IDs'
+	);
+	unique(
+		archive.conversationInvocations.map((item) => String(item.sequence)),
+		'conversation invocation sequences'
+	);
+	for (const invocation of archive.conversationInvocations) {
+		validateConversationInvocation(invocation);
+		if (invocation.threadId !== archive.thread.id) {
+			throw new Error(`Conversation invocation ${invocation.id} does not belong to the thread.`);
+		}
+	}
 
 	const runIds = new Set(archive.runs.map((item) => item.id));
 	const activeRuns = archive.runs.filter((item) => ACTIVE_RUN_STATUSES.has(item.status));
@@ -673,6 +760,7 @@ export function parseSessionArchive(value: string): ParsedSessionArchive {
 		input.schemaVersion !== 1 &&
 		input.schemaVersion !== 2 &&
 		input.schemaVersion !== 3 &&
+		input.schemaVersion !== 4 &&
 		input.schemaVersion !== SESSION_ARCHIVE_VERSION
 	) {
 		throw new Error(`Unsupported session archive version: ${String(input.schemaVersion)}.`);
@@ -680,7 +768,7 @@ export function parseSessionArchive(value: string): ParsedSessionArchive {
 	if (!Array.isArray(input.runs)) throw new Error('archive.runs must be an array.');
 	if (!Array.isArray(input.segments)) throw new Error('archive.segments must be an array.');
 	const current = input.schemaVersion === SESSION_ARCHIVE_VERSION;
-	const hasRevisionProjection = input.schemaVersion === 3 || current;
+	const hasRevisionProjection = input.schemaVersion === 3 || input.schemaVersion === 4 || current;
 	const revisionInput = hasRevisionProjection
 		? record(input.revisionProjection, 'archive.revisionProjection')
 		: { batches: [], segments: [] };
@@ -690,11 +778,16 @@ export function parseSessionArchive(value: string): ParsedSessionArchive {
 	if (!Array.isArray(revisionInput.segments)) {
 		throw new Error('archive.revisionProjection.segments must be an array.');
 	}
-	const cleanInput = current
+	const hasCleanTranscriptProjection = input.schemaVersion === 4 || current;
+	const cleanInput = hasCleanTranscriptProjection
 		? record(input.cleanTranscriptProjection, 'archive.cleanTranscriptProjection')
 		: { legacySummary: null, blocks: [] };
 	if (!Array.isArray(cleanInput.blocks)) {
 		throw new Error('archive.cleanTranscriptProjection.blocks must be an array.');
+	}
+	const conversationInput = current ? input.conversationInvocations : [];
+	if (!Array.isArray(conversationInput)) {
+		throw new Error('archive.conversationInvocations must be an array.');
 	}
 
 	const archive = validateSessionArchive({
@@ -710,15 +803,20 @@ export function parseSessionArchive(value: string): ParsedSessionArchive {
 		cleanTranscriptProjection: {
 			legacySummary: autoSummary(cleanInput.legacySummary),
 			blocks: cleanInput.blocks.map(cleanTranscriptBlock)
-		}
+		},
+		conversationInvocations: conversationInput.map(conversationInvocation)
 	});
 	return {
 		archive,
 		warnings: current
 			? []
-			: hasRevisionProjection
-				? ['该备份不含课堂清稿；事实与修订对照已恢复，课堂清稿将从此重新开始。']
-				: ['该备份不含当前修订对照与课堂清稿；Live 原文已恢复，派生内容将从此重新开始。']
+			: hasCleanTranscriptProjection
+				? ['该备份不含自由对话记录；其余会话内容已恢复。']
+				: hasRevisionProjection
+					? ['该备份不含课堂清稿与自由对话记录；事实与修订对照已恢复，课堂清稿将从此重新开始。']
+					: [
+							'该备份不含当前修订对照、课堂清稿与自由对话记录；Live 原文已恢复，派生内容将从此重新开始。'
+						]
 	};
 }
 

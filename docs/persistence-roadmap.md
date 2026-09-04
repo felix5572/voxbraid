@@ -55,7 +55,7 @@
 
 assistant branch 和 message 不进入这一阶段。待上传标记可以先作为上述 record 的本地元数据存在；真正设计同步队列时再决定是否增加独立 outbox。
 
-`autoSummaries` 通过 Dexie version 2 加入；Dexie version 3 增加 `cleanTranscriptBlocks`；version 5 使用 `revisionBatches` / `revisedSegments` 保存当前修订对照；version 6 增加全局 `operationalLogs`。恢复备份 archive v4 保存原始事实、修订对照、分块清稿和仍存在的旧整场清稿；运行问题不进入可导入备份，而进入单独的 evaluation bundle。原始双流仍是所有阅读投影的完整事实来源；导入 v4 时原子替换同一 thread 的事实与两类投影，导入 v1/v2/v3 时只恢复对应版本实际携带且满足当前不变量的内容。
+`autoSummaries` 通过 Dexie version 2 加入；Dexie version 3 增加 `cleanTranscriptBlocks`；version 5 使用 `revisionBatches` / `revisedSegments` 保存当前修订对照；version 6 增加全局 `operationalLogs`；version 7 增加 thread 级 `conversationInvocations`。恢复备份 archive v5 保存原始事实、修订对照、分块清稿、仍存在的旧整场清稿和自由问答；运行问题不进入可导入备份，而进入单独的 evaluation bundle。原始双流仍是所有阅读投影的完整事实来源；导入 v5 时原子替换同一 thread 的事实、投影与问答，导入 v1/v2/v3/v4 时只恢复对应版本实际携带且满足当前不变量的内容。
 
 ### Schema epoch
 
@@ -105,7 +105,7 @@ interface SessionRepository {
 - `replaceSegmentRevision` 在一个事务内写入新 revision 的全部 segment，并切换 `run.currentSegmentRevision`。
 - `repairAbandonedRuns` 在页面恢复时一次性修复遗留 run。
 - `clearCleanTranscript` 在一个事务中只删除旧整场清稿和新版分块清稿投影，供用户明确选择“重新整理全部”；它不能触碰字幕事实。
-- `exportThread` 和 `importThread` 使用 archive v4 的 thread 级 JSON；导入前验证对象结构、跨 thread 引用、事实范围、投影结果与稳定顺序号，再在一个事务内替换该 thread 的本地记录。相同文件重复导入按稳定 thread ID 覆盖恢复，不创建副本；v1/v2 只恢复事实，v3 同时恢复修订对照，并明确提示缺少清稿。`exportEvaluationBundle` 生成不可导入的 evaluation bundle v1，详见 [`evaluation-bundle.md`](evaluation-bundle.md)。MVP 不增加整库归档格式。
+- `exportThread` 和 `importThread` 使用 archive v5 的 thread 级 JSON；导入前验证对象结构、跨 thread 引用、事实范围、投影结果、问答终态与稳定顺序号，再在一个事务内替换该 thread 的本地记录。相同文件重复导入按稳定 thread ID 覆盖恢复，不创建副本；v1/v2 只恢复事实，v3 同时恢复修订对照，v4 再恢复清稿，并明确提示缺少后续内容。`exportEvaluationBundle` 生成不可导入的 evaluation bundle v2，详见 [`evaluation-bundle.md`](evaluation-bundle.md)。MVP 不增加整库归档格式。
 - 本地库打开后尽力调用浏览器 Storage API 请求持久存储。浏览器可能拒绝或不支持该请求，因此它只降低自动回收风险，不能替代逐会话 JSON 备份。
 - 完整流变脏后以 10 秒为最大合并间隔保存。这里使用持续写入也会周期触发的 throttle/coalescing 语义，不能把普通 trailing debounce 重置到连续讲话结束才第一次落盘。暂停、连接失败、页面隐藏和 `pagehide` 时立即 flush `saveCheckpoint`；组件卸载不能直接丢弃最后的内存状态。浏览器可能随时终止异步卸载工作，因此恢复能力不能只依赖最后一次 unload 写入。
 - 页面侧 checkpoint 协调器使用 `clean / dirty / saving / saving-dirty` 四态，而不是单个 dirty 布尔值。保存期间出现的新 delta 必须进入 `saving-dirty`，旧快照完成后仍保持待保存；写入失败回到 `dirty` 并保留原始错误供日志和重试，不另设会阻断实时翻译的失败终态。

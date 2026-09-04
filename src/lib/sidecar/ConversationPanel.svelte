@@ -2,11 +2,14 @@
 	import { tick } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 	import { diagnosticsDisclosure } from '../diagnostics-disclosure';
+	import { inlineErrorDetails } from '../error-details';
 	import { safeMarkdownHtml } from '../markdown';
 	import { emitOperationalLog } from '../operational-log';
+	import type { LocalSessionRepository } from '../persistence/local-session-repository';
 	import type { TranslationSessionState } from '../session/translation-session';
 	import { sendSidecarRequest, sidecarErrorDetails, sidecarLocalFailure } from './client';
 	import { captureSidecarContext, sidecarRequestFits } from './context';
+	import type { StoredConversationInvocation } from './conversation-records';
 	import type {
 		SidecarConversationTurn,
 		SidecarInvocationView,
@@ -18,6 +21,7 @@
 		session: TranslationSessionState | null;
 		outputLanguage: string;
 		cleanedTranscript: string;
+		repository: LocalSessionRepository | null;
 		disabled?: boolean;
 		diagnosticsMode?: boolean;
 		onRequestingChange?: (requesting: boolean) => void;
@@ -27,13 +31,18 @@
 		session,
 		outputLanguage,
 		cleanedTranscript,
+		repository,
 		disabled = false,
 		diagnosticsMode = false,
 		onRequestingChange = () => undefined
 	}: Props = $props();
 	let question = $state('');
-	const conversations = new SvelteMap<string, SidecarInvocationView[]>();
+	const conversations = new SvelteMap<string, StoredConversationInvocation[]>();
 	let currentThreadId = $state<string | null>(null);
+	let loadGeneration = 0;
+	let loading = $state(false);
+	let clearing = $state(false);
+	let persistenceMessage = $state('');
 	let copiedInvocationId = $state<string | null>(null);
 	let copyFailureInvocationId = $state<string | null>(null);
 	let conversationScroller = $state<HTMLDivElement | null>(null);
@@ -59,11 +68,58 @@
 
 	$effect(() => {
 		const nextThreadId = session?.thread.id ?? null;
-		if (nextThreadId === currentThreadId) return;
-		currentThreadId = nextThreadId;
-		question = '';
-		copiedInvocationId = null;
-		copyFailureInvocationId = null;
+		const capturedRepository = repository;
+		if (nextThreadId !== currentThreadId) {
+			loadGeneration += 1;
+			currentThreadId = nextThreadId;
+			loading = false;
+			question = '';
+			copiedInvocationId = null;
+			copyFailureInvocationId = null;
+			persistenceMessage = '';
+		}
+		if (!nextThreadId || conversations.has(nextThreadId)) return;
+		if (!capturedRepository) {
+			loading = true;
+			return;
+		}
+		const generation = ++loadGeneration;
+		loading = true;
+		void (async () => {
+			try {
+				const records = capturedRepository
+					? await capturedRepository.repairAbandonedConversationInvocations(
+							nextThreadId,
+							new Date().toISOString()
+						)
+					: [];
+				if (generation !== loadGeneration || currentThreadId !== nextThreadId) return;
+				conversations.set(nextThreadId, records);
+				for (const record of records) {
+					if (
+						record.result?.status !== 'failed' ||
+						record.result.error.code !== 'request-outcome-unknown'
+					) {
+						continue;
+					}
+					emitOperationalLog({
+						severity: 'warning',
+						source: 'conversation',
+						code: record.result.error.code,
+						summary: failureSummary(record.result.error.message),
+						details: record.result.error.message,
+						threadId: nextThreadId,
+						requestId: record.id
+					});
+				}
+			} catch (error) {
+				if (generation !== loadGeneration || currentThreadId !== nextThreadId) return;
+				persistenceMessage = `自由对话记录读取失败；没有删除本地数据。\n${inlineErrorDetails(error)}`;
+				conversations.set(nextThreadId, []);
+			} finally {
+				if (generation === loadGeneration && currentThreadId === nextThreadId) loading = false;
+			}
+		})();
 	});
 
 	function completedHistory(): SidecarConversationTurn[] {
@@ -88,7 +144,7 @@
 		if (conversationScroller) conversationScroller.scrollTop = conversationScroller.scrollHeight;
 	}
 
-	function appendInvocation(invocation: SidecarInvocationView): void {
+	function appendInvocation(invocation: StoredConversationInvocation): void {
 		conversations.set(invocation.context.threadId, [
 			...(conversations.get(invocation.context.threadId) ?? []),
 			invocation
@@ -96,10 +152,44 @@
 		void followTail();
 	}
 
+	async function persistInvocation(invocation: StoredConversationInvocation): Promise<void> {
+		if (!repository) {
+			persistenceMessage = '本地存储不可用；这份自由对话只保留到页面关闭。';
+			return;
+		}
+		try {
+			await repository.saveConversationInvocation($state.snapshot(invocation));
+		} catch (error) {
+			persistenceMessage = `自由对话没有保存到本设备；页面关闭后可能丢失。\n${inlineErrorDetails(error)}`;
+			emitOperationalLog({
+				severity: 'error',
+				source: 'conversation',
+				code: 'conversation-persistence-failed',
+				summary: '自由对话没有保存到本设备。',
+				details: inlineErrorDetails(error),
+				threadId: invocation.context.threadId,
+				requestId: invocation.id
+			});
+		}
+	}
+
+	function nextStoredInvocation(
+		invocation: SidecarInvocationView,
+		threadInvocations = invocations
+	): StoredConversationInvocation {
+		return {
+			...invocation,
+			threadId: invocation.context.threadId,
+			sequence: (threadInvocations.at(-1)?.sequence ?? 0) + 1,
+			updatedAt: new Date().toISOString()
+		};
+	}
+
 	async function ask(): Promise<void> {
 		const capturedSession = session;
 		const normalizedQuestion = question.trim();
-		if (disabled || requesting || !capturedSession || !normalizedQuestion) return;
+		if (disabled || loading || clearing || requesting || !capturedSession || !normalizedQuestion)
+			return;
 
 		const capturedAt = new Date().toISOString();
 		const context = captureSidecarContext(
@@ -138,17 +228,19 @@
 		copiedInvocationId = null;
 		copyFailureInvocationId = null;
 		if (context.runs.length === 0) {
-			appendInvocation({
+			const invocation = nextStoredInvocation({
 				id: clientRequestId,
 				intent: viewIntent,
 				context: viewContext,
 				state: 'failed',
 				result: sidecarLocalFailure(clientRequestId, 'empty-context', '当前会话还没有可用字幕。')
 			});
+			appendInvocation(invocation);
+			await persistInvocation(invocation);
 			return;
 		}
 		if (!sidecarRequestFits(request)) {
-			appendInvocation({
+			const invocation = nextStoredInvocation({
 				id: clientRequestId,
 				intent: viewIntent,
 				context: viewContext,
@@ -159,17 +251,21 @@
 					'当前字幕、清稿与对话历史超过旁路请求 1.5 MB 上限。'
 				)
 			});
+			appendInvocation(invocation);
+			await persistInvocation(invocation);
 			return;
 		}
 
 		question = '';
-		appendInvocation({
+		const pendingInvocation = nextStoredInvocation({
 			id: clientRequestId,
 			intent: viewIntent,
 			context: viewContext,
 			state: 'requesting',
 			result: null
 		});
+		appendInvocation(pendingInvocation);
+		await persistInvocation(pendingInvocation);
 		onRequestingChange(true);
 		let result: SidecarInvokeResult;
 		try {
@@ -184,16 +280,18 @@
 		);
 		if (invocationIndex === -1) return;
 		onRequestingChange(false);
-		const completedInvocation: SidecarInvocationView = {
+		const completedInvocation: StoredConversationInvocation = {
 			...threadInvocations[invocationIndex],
 			state: result.status === 'completed' ? 'completed' : 'failed',
-			result
+			result,
+			updatedAt: new Date().toISOString()
 		};
 		conversations.set(context.threadId, [
 			...threadInvocations.slice(0, invocationIndex),
 			completedInvocation,
 			...threadInvocations.slice(invocationIndex + 1)
 		]);
+		await persistInvocation(completedInvocation);
 		if (result.status === 'failed') {
 			emitOperationalLog({
 				severity: 'error',
@@ -222,12 +320,23 @@
 		}
 	}
 
-	function clearConversation(): void {
-		if (!currentThreadId || requesting) return;
-		conversations.delete(currentThreadId);
-		question = '';
-		copiedInvocationId = null;
-		copyFailureInvocationId = null;
+	async function clearConversation(): Promise<void> {
+		const threadId = currentThreadId;
+		if (!threadId || requesting || loading || clearing) return;
+		if (!window.confirm('清空当前会话的全部自由问答记录？此操作不可撤销。')) return;
+		clearing = true;
+		persistenceMessage = '';
+		try {
+			if (repository) await repository.clearConversationInvocations(threadId);
+			conversations.delete(threadId);
+			question = '';
+			copiedInvocationId = null;
+			copyFailureInvocationId = null;
+		} catch (error) {
+			persistenceMessage = `自由对话未清空；本地记录保持不变。\n${inlineErrorDetails(error)}`;
+		} finally {
+			clearing = false;
+		}
 	}
 
 	function handleComposerKeydown(event: KeyboardEvent): void {
@@ -247,15 +356,20 @@
 		<div class="header-actions">
 			<span>每轮读取完整字幕、当前清稿与此前问答</span>
 			{#if invocations.length > 0}
-				<button type="button" class="clear" disabled={requesting} onclick={clearConversation}
-					>清空对话</button
+				<button
+					type="button"
+					class="clear"
+					disabled={requesting || loading || clearing}
+					onclick={() => void clearConversation()}>清空对话</button
 				>
 			{/if}
 		</div>
 	</header>
 
 	<div class="conversation-scroll" bind:this={conversationScroller} aria-live="polite">
-		{#if invocations.length > 0}
+		{#if loading}
+			<p class="placeholder">正在读取本地自由对话…</p>
+		{:else if invocations.length > 0}
 			{#each invocations as invocation (invocation.id)}
 				<article class="turn">
 					<div class="question">
@@ -321,15 +435,16 @@
 			rows="2"
 			placeholder="针对字幕或清稿提一个问题…"
 			aria-label="字幕问题"
-			disabled={disabled || requesting}
+			disabled={disabled || loading || clearing || requesting}
 			onkeydown={handleComposerKeydown}></textarea>
 		<button
 			type="button"
-			disabled={disabled || requesting || !hasTranscript || !question.trim()}
+			disabled={disabled || loading || clearing || requesting || !hasTranscript || !question.trim()}
 			onclick={() => void ask()}>提问</button
 		>
 	</div>
-	<p class="composer-hint">Ctrl/⌘ + Enter 发送 · 对话仅保留在当前页面</p>
+	<p class="composer-hint">Ctrl/⌘ + Enter 发送 · 对话按当前会话保存在本设备</p>
+	{#if persistenceMessage}<pre class="persistence-warning">{persistenceMessage}</pre>{/if}
 </section>
 
 <style>
@@ -588,6 +703,16 @@
 
 	.composer-hint {
 		margin: 5px 0 0;
+	}
+
+	.persistence-warning {
+		margin: 7px 0 0;
+		color: #e7bd72;
+		font: inherit;
+		font-size: 12px;
+		line-height: 1.45;
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 
 	textarea,

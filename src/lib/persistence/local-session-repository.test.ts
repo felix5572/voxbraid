@@ -5,6 +5,7 @@ import type { CaptureRun, TranscriptSegment, TranslationThread } from '../sessio
 import type { OperationalLogEntry } from '../operational-log';
 import type { StoredAutoSummary } from '../sidecar/auto-summary';
 import type { StoredCleanTranscriptBlock } from '../sidecar/clean-transcript';
+import type { StoredConversationInvocation } from '../sidecar/conversation-records';
 import type { StoredRevisedSegment, StoredRevisionBatch } from '../projection/revision-records';
 import { VoxBraidLocalDatabase } from './local-session-database';
 import { LocalSessionRepository } from './local-session-repository';
@@ -125,6 +126,51 @@ function createRevisedSegment(overrides: Partial<StoredRevisedSegment> = {}): St
 	};
 }
 
+function createConversationInvocation(
+	overrides: Partial<StoredConversationInvocation> = {}
+): StoredConversationInvocation {
+	return {
+		id: 'conversation-request-1',
+		threadId: 'thread-1',
+		sequence: 1,
+		intent: {
+			kind: 'ask',
+			trigger: 'manual',
+			question: 'What was discussed?',
+			outputLanguage: 'zh'
+		},
+		context: {
+			threadId: 'thread-1',
+			scope: 'current-thread',
+			capturedAt: '2026-09-01T00:00:09.000Z',
+			runCount: 1,
+			sourceCharacters: 38,
+			translationCharacters: 11,
+			cleanedTranscriptCharacters: 12,
+			historyTurns: 0
+		},
+		state: 'completed',
+		result: {
+			status: 'completed',
+			clientRequestId: 'conversation-request-1',
+			responseId: 'conversation-response-1',
+			model: 'gpt-5.6-sol',
+			outputText: 'The class discussed a complete source stream.',
+			usageStatus: 'recorded',
+			usage: {
+				inputTokens: 50,
+				cachedInputTokens: 0,
+				outputTokens: 10,
+				reasoningTokens: 0,
+				totalTokens: 60
+			},
+			completedAt: CHECKPOINT
+		},
+		updatedAt: CHECKPOINT,
+		...overrides
+	};
+}
+
 function createThread(id = 'thread-1'): TranslationThread {
 	return {
 		id,
@@ -224,6 +270,7 @@ describe('LocalSessionRepository', () => {
 			expect(await upgraded.cleanTranscriptBlocks.toArray()).toEqual([]);
 			expect(await upgraded.revisionBatches.toArray()).toEqual([]);
 			expect(await upgraded.revisedSegments.toArray()).toEqual([]);
+			expect(await upgraded.conversationInvocations.toArray()).toEqual([]);
 		} finally {
 			await upgraded.delete();
 		}
@@ -760,8 +807,10 @@ describe('LocalSessionRepository', () => {
 		});
 		const legacySummary = createAutoSummary();
 		const cleanBlock = createCleanBlock();
+		const conversationInvocation = createConversationInvocation();
 		await repository.saveAutoSummary(legacySummary);
 		await repository.saveCleanTranscriptBlock(cleanBlock);
+		await repository.saveConversationInvocation(conversationInvocation);
 		const exported = await repository.exportThread(thread.id, '2026-09-01T00:02:00.000Z');
 
 		const importedDatabase = new VoxBraidLocalDatabase(
@@ -784,6 +833,9 @@ describe('LocalSessionRepository', () => {
 			await expect(importedRepository.loadAutoSummary(thread.id)).resolves.toEqual(legacySummary);
 			await expect(importedRepository.loadCleanTranscriptBlocks(thread.id)).resolves.toEqual([
 				cleanBlock
+			]);
+			await expect(importedRepository.loadConversationInvocations(thread.id)).resolves.toEqual([
+				conversationInvocation
 			]);
 			expect(exported).not.toContain('checkpointedAt');
 		} finally {
@@ -810,6 +862,7 @@ describe('LocalSessionRepository', () => {
 			}),
 			segments: [createRevisedSegment()]
 		});
+		await repository.saveConversationInvocation(createConversationInvocation());
 		await repository.saveOperationalLog({
 			id: 'log-thread',
 			severity: 'warning',
@@ -860,9 +913,9 @@ describe('LocalSessionRepository', () => {
 
 		expect(bundle).toMatchObject({
 			kind: 'voxbraid-evaluation-bundle',
-			schemaVersion: 1,
+			schemaVersion: 2,
 			summary: {
-				usage: { persistedProjectionTasks: { inputTokens: 300, totalTokens: 360 } },
+				usage: { persistedProjectionTasks: { inputTokens: 350, totalTokens: 420 } },
 				metrics: {
 					cleanTranscript: { completedBlocks: 1, failedBlocks: 0 },
 					operationalLogs: { total: 1, activeWarnings: 1, activeErrors: 0 }
@@ -873,7 +926,8 @@ describe('LocalSessionRepository', () => {
 			captureSettings: { transcriptionModel: 'gpt-live-transcribe', noiseReduction: 'off' },
 			usage: {
 				revision: { inputTokens: 200, cachedInputTokens: 80, totalTokens: 240 },
-				persistedProjectionTasks: { inputTokens: 300, totalTokens: 360 }
+				conversation: { inputTokens: 50, totalTokens: 60 },
+				persistedProjectionTasks: { inputTokens: 350, totalTokens: 420 }
 			},
 			metrics: {
 				cleanTranscript: { completedBlocks: 1, failedBlocks: 0 },
@@ -902,11 +956,11 @@ describe('LocalSessionRepository', () => {
 			runs: Array<{ threadId: string }>;
 			cleanTranscriptProjection: { blocks: Array<{ threadId: string }> };
 		};
-		exported.schemaVersion = 5;
+		exported.schemaVersion = 6;
 		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
 			'Unsupported session archive version'
 		);
-		exported.schemaVersion = 4;
+		exported.schemaVersion = 5;
 		exported.cleanTranscriptProjection.blocks[0].threadId = 'thread-elsewhere';
 		await expect(repository.importThread(JSON.stringify(exported), CHECKPOINT)).rejects.toThrow(
 			'does not match its run'
@@ -933,7 +987,9 @@ describe('LocalSessionRepository', () => {
 
 		await expect(repository.importThread(JSON.stringify(legacy), CHECKPOINT)).resolves.toEqual({
 			threadId: 'thread-1',
-			warnings: ['该备份不含当前修订对照与课堂清稿；Live 原文已恢复，派生内容将从此重新开始。']
+			warnings: [
+				'该备份不含当前修订对照、课堂清稿与自由对话记录；Live 原文已恢复，派生内容将从此重新开始。'
+			]
 		});
 		await expect(repository.loadRevisionProjection('thread-1')).resolves.toEqual({
 			batches: [],
@@ -955,7 +1011,9 @@ describe('LocalSessionRepository', () => {
 		};
 		await expect(repository.importThread(JSON.stringify(legacy), CHECKPOINT)).resolves.toEqual({
 			threadId: 'thread-1',
-			warnings: ['该备份不含当前修订对照与课堂清稿；Live 原文已恢复，派生内容将从此重新开始。']
+			warnings: [
+				'该备份不含当前修订对照、课堂清稿与自由对话记录；Live 原文已恢复，派生内容将从此重新开始。'
+			]
 		});
 		await expect(repository.loadThread('thread-1')).resolves.toMatchObject({
 			runs: [{ sourceStream: createRun().sourceStream }]
@@ -985,7 +1043,7 @@ describe('LocalSessionRepository', () => {
 
 		await expect(repository.importThread(JSON.stringify(legacy), CHECKPOINT)).resolves.toEqual({
 			threadId: thread.id,
-			warnings: ['该备份不含课堂清稿；事实与修订对照已恢复，课堂清稿将从此重新开始。']
+			warnings: ['该备份不含课堂清稿与自由对话记录；事实与修订对照已恢复，课堂清稿将从此重新开始。']
 		});
 		await expect(repository.loadRevisionProjection(thread.id)).resolves.toEqual(
 			legacy.revisionProjection
@@ -1015,5 +1073,39 @@ describe('LocalSessionRepository', () => {
 		await expect(repository.loadOperationalLogs()).resolves.toEqual([entry]);
 		await repository.clearOperationalLogs();
 		await expect(repository.loadOperationalLogs()).resolves.toEqual([]);
+	});
+
+	it('persists conversation turns and repairs an abandoned request without inventing an answer', async () => {
+		const thread = createThread();
+		await repository.saveCheckpoint({ thread, run: createRun(), checkpointedAt: CHECKPOINT });
+		const pending = createConversationInvocation({
+			state: 'requesting',
+			result: null,
+			updatedAt: '2026-09-01T00:00:09.000Z'
+		});
+		await repository.saveConversationInvocation(pending);
+
+		const repaired = await repository.repairAbandonedConversationInvocations(
+			thread.id,
+			'2026-09-01T00:01:00.000Z'
+		);
+		expect(repaired).toMatchObject([
+			{
+				id: pending.id,
+				state: 'failed',
+				result: {
+					status: 'failed',
+					outputText: null,
+					usageStatus: 'unavailable',
+					error: { code: 'request-outcome-unknown' }
+				}
+			}
+		]);
+		expect(
+			repaired[0].result?.status === 'failed' ? repaired[0].result.error.message : ''
+		).toContain('可能已经处理该请求并产生费用');
+
+		await repository.clearConversationInvocations(thread.id);
+		await expect(repository.loadConversationInvocations(thread.id)).resolves.toEqual([]);
 	});
 });

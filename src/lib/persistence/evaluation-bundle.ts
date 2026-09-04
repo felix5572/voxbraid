@@ -9,7 +9,7 @@ import {
 import type { ModelUsage, ModelUsageStatus } from '../sidecar/types';
 import type { SessionArchive } from './session-archive';
 
-export const EVALUATION_BUNDLE_VERSION = 1 as const;
+export const EVALUATION_BUNDLE_VERSION = 2 as const;
 
 export interface EvaluationBundleBuild {
 	commitSha: string;
@@ -74,8 +74,20 @@ export function evaluationBundle(
 		...archive.cleanTranscriptProjection.blocks
 	];
 	const revisionRecords: UsageRecord[] = archive.revisionProjection.batches;
+	const conversationRecords: UsageRecord[] = archive.conversationInvocations.flatMap((record) =>
+		record.result
+			? [
+					{
+						model: record.result.model,
+						usageStatus: record.result.usageStatus,
+						usage: record.result.usage
+					}
+				]
+			: []
+	);
 	const cleanUsage = usageSummary(cleanRecords);
 	const revisionUsage = usageSummary(revisionRecords);
+	const conversationUsage = usageSummary(conversationRecords);
 	const realtime = estimateRealtimeUsage(archive.runs, Date.parse(options.exportedAt));
 	const translationPrice = REALTIME_TRANSLATION_PRICING.components.find(
 		(component) => component.model === REALTIME_TRANSLATION_MODEL
@@ -115,7 +127,7 @@ export function evaluationBundle(
 		limitations: [
 			'captureSettings describes the UI selection at export time, not a per-run persisted configuration history.',
 			'realtimeLatestRun contains at most the latest in-memory report for this thread and is capped by the runtime diagnostic event limit.',
-			'free conversation turns are not persisted and are absent from this bundle.',
+			'conversation requests that outlived a browser page are retained as request-outcome-unknown; no model answer or usage is inferred.',
 			'superseded successful revision drafts are not retained; projections.revision.segments contains the current readable projection.',
 			'clean-transcript failureAttempts do not retain per-attempt usage; no missing token values are inferred.'
 		],
@@ -126,7 +138,8 @@ export function evaluationBundle(
 		projections: {
 			legacyAlignedSegments: archive.segments,
 			cleanTranscript: archive.cleanTranscriptProjection,
-			revision: archive.revisionProjection
+			revision: archive.revisionProjection,
+			conversationInvocations: archive.conversationInvocations
 		},
 		usage: {
 			realtimeEstimate: {
@@ -150,12 +163,22 @@ export function evaluationBundle(
 			},
 			cleanTranscript: cleanUsage,
 			revision: revisionUsage,
+			conversation: conversationUsage,
 			persistedProjectionTasks: {
-				inputTokens: cleanUsage.inputTokens + revisionUsage.inputTokens,
-				cachedInputTokens: cleanUsage.cachedInputTokens + revisionUsage.cachedInputTokens,
-				outputTokens: cleanUsage.outputTokens + revisionUsage.outputTokens,
-				reasoningTokens: cleanUsage.reasoningTokens + revisionUsage.reasoningTokens,
-				totalTokens: cleanUsage.totalTokens + revisionUsage.totalTokens
+				inputTokens:
+					cleanUsage.inputTokens + revisionUsage.inputTokens + conversationUsage.inputTokens,
+				cachedInputTokens:
+					cleanUsage.cachedInputTokens +
+					revisionUsage.cachedInputTokens +
+					conversationUsage.cachedInputTokens,
+				outputTokens:
+					cleanUsage.outputTokens + revisionUsage.outputTokens + conversationUsage.outputTokens,
+				reasoningTokens:
+					cleanUsage.reasoningTokens +
+					revisionUsage.reasoningTokens +
+					conversationUsage.reasoningTokens,
+				totalTokens:
+					cleanUsage.totalTokens + revisionUsage.totalTokens + conversationUsage.totalTokens
 			},
 			officialAccountSnapshot: options.officialUsageSnapshot
 		},
@@ -207,6 +230,21 @@ export function evaluationBundle(
 				sourceCoverage: sourceCharacters === 0 ? null : revisedSourceCharacters / sourceCharacters
 			},
 			revisionTransport: revisionTransportSummary(archive.revisionProjection.batches),
+			conversation: {
+				total: archive.conversationInvocations.length,
+				requesting: archive.conversationInvocations.filter(
+					(record) => record.state === 'requesting'
+				).length,
+				completed: archive.conversationInvocations.filter((record) => record.state === 'completed')
+					.length,
+				failed: archive.conversationInvocations.filter((record) => record.state === 'failed')
+					.length,
+				outcomeUnknown: archive.conversationInvocations.filter(
+					(record) =>
+						record.result?.status === 'failed' &&
+						record.result.error.code === 'request-outcome-unknown'
+				).length
+			},
 			operationalLogs: {
 				total: relevantLogs.length,
 				activeWarnings: relevantLogs.filter(
